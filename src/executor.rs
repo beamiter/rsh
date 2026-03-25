@@ -6,11 +6,39 @@ use crate::expand::{expand_word_to_string, expand_words};
 use crate::parser::ast::*;
 use crate::signal;
 
-use nix::sys::wait::{waitpid, WaitStatus};
-use nix::unistd::{close, dup2, execvp, fork, pipe, setpgid, ForkResult, Pid};
+use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
+use nix::unistd::{close, dup2, execvp, fork, pipe, setpgid, tcsetpgrp, ForkResult, Pid};
 use std::ffi::CString;
 use std::fs::{File, OpenOptions};
 use std::os::unix::io::{IntoRawFd, RawFd};
+
+/// Give terminal foreground to `pgrp`, then wait for the process, then reclaim
+/// the terminal for the shell's own process group.
+fn wait_for_fg(pid: Pid, state: &mut ShellState) -> i32 {
+    let shell_pgid = nix::unistd::getpgrp();
+    // Give the child's process group the terminal foreground
+    tcsetpgrp(std::io::stdin(), pid).ok();
+
+    let status = match waitpid(pid, Some(WaitPidFlag::WUNTRACED)) {
+        Ok(WaitStatus::Exited(_, code)) => code,
+        Ok(WaitStatus::Signaled(_, sig, _)) => 128 + sig as i32,
+        Ok(WaitStatus::Stopped(_, _)) => {
+            // Job got stopped (Ctrl-Z) — add to job table
+            let cmd_str = format!("(pid {})", pid);
+            let jid = state.jobs.add(pid, cmd_str.clone());
+            if let Some(job) = state.jobs.get_by_id(jid) {
+                job.status = crate::job::JobStatus::Stopped;
+                eprintln!("\n[{}]+  Stopped                    {}", jid, cmd_str);
+            }
+            148
+        }
+        _ => 1,
+    };
+
+    // Reclaim terminal foreground for the shell
+    tcsetpgrp(std::io::stdin(), shell_pgid).ok();
+    status
+}
 
 pub fn execute_program(commands: &[CompleteCommand], state: &mut ShellState) -> i32 {
     let mut last = 0;
@@ -59,6 +87,7 @@ fn execute_pipeline(pipeline: &Pipeline, state: &mut ShellState) -> i32 {
     // Multi-command pipeline
     let mut prev_read_fd: Option<RawFd> = None;
     let mut child_pids: Vec<Pid> = Vec::new();
+    let mut pgid = Pid::from_raw(0); // will be set to first child's pid
 
     for (i, cmd) in cmds.iter().enumerate() {
         let is_last = i == cmds.len() - 1;
@@ -74,7 +103,10 @@ fn execute_pipeline(pipeline: &Pipeline, state: &mut ShellState) -> i32 {
         match unsafe { fork() } {
             Ok(ForkResult::Child) => {
                 signal::reset_child_signals();
-                setpgid(Pid::from_raw(0), Pid::from_raw(0)).ok();
+                // All pipeline children share the first child's process group
+                let my_pid = nix::unistd::getpid();
+                let target_pgid = if pgid.as_raw() == 0 { my_pid } else { pgid };
+                setpgid(my_pid, target_pgid).ok();
 
                 // Set up stdin from previous pipe
                 if let Some(fd) = prev_read_fd {
@@ -95,6 +127,11 @@ fn execute_pipeline(pipeline: &Pipeline, state: &mut ShellState) -> i32 {
                 std::process::exit(code);
             }
             Ok(ForkResult::Parent { child }) => {
+                // First child becomes the process group leader
+                if pgid.as_raw() == 0 {
+                    pgid = child;
+                }
+                setpgid(child, pgid).ok();
                 child_pids.push(child);
                 // Close write end of current pipe in parent
                 if let Some(fd) = write_fd {
@@ -113,6 +150,12 @@ fn execute_pipeline(pipeline: &Pipeline, state: &mut ShellState) -> i32 {
         }
     }
 
+    // Give terminal foreground to the pipeline's process group
+    let shell_pgid = nix::unistd::getpgrp();
+    if state.interactive && pgid.as_raw() != 0 {
+        tcsetpgrp(std::io::stdin(), pgid).ok();
+    }
+
     // Wait for all children and collect PIPESTATUS
     let mut last_status = 0;
     let mut pipestatus = Vec::new();
@@ -122,6 +165,11 @@ fn execute_pipeline(pipeline: &Pipeline, state: &mut ShellState) -> i32 {
             Ok(WaitStatus::Signaled(_, sig, _)) => { let c = 128 + sig as i32; pipestatus.push(c); last_status = c; }
             _ => { pipestatus.push(1); last_status = 1; }
         }
+    }
+
+    // Reclaim terminal foreground for the shell
+    if state.interactive {
+        tcsetpgrp(std::io::stdin(), shell_pgid).ok();
     }
     state.pipestatus = pipestatus.clone();
 
@@ -223,7 +271,8 @@ fn execute_simple(cmd: &SimpleCommand, state: &mut ShellState) -> i32 {
     match unsafe { fork() } {
         Ok(ForkResult::Child) => {
             signal::reset_child_signals();
-            setpgid(Pid::from_raw(0), Pid::from_raw(0)).ok();
+            let pid = nix::unistd::getpid();
+            setpgid(pid, pid).ok();
 
             // Apply redirections
             apply_redirects_in_child(&cmd.redirects, state);
@@ -245,10 +294,16 @@ fn execute_simple(cmd: &SimpleCommand, state: &mut ShellState) -> i32 {
             std::process::exit(127);
         }
         Ok(ForkResult::Parent { child }) => {
-            match waitpid(child, None) {
-                Ok(WaitStatus::Exited(_, code)) => code,
-                Ok(WaitStatus::Signaled(_, sig, _)) => 128 + sig as i32,
-                _ => 1,
+            // Put child in its own process group (race-free: both parent and child call setpgid)
+            setpgid(child, child).ok();
+            if state.interactive {
+                wait_for_fg(child, state)
+            } else {
+                match waitpid(child, None) {
+                    Ok(WaitStatus::Exited(_, code)) => code,
+                    Ok(WaitStatus::Signaled(_, sig, _)) => 128 + sig as i32,
+                    _ => 1,
+                }
             }
         }
         Err(e) => {
@@ -270,15 +325,21 @@ fn execute_compound(cmd: &CompoundCommand, state: &mut ShellState) -> i32 {
             match unsafe { fork() } {
                 Ok(ForkResult::Child) => {
                     signal::reset_child_signals();
-                    setpgid(Pid::from_raw(0), Pid::from_raw(0)).ok();
+                    let pid = nix::unistd::getpid();
+                    setpgid(pid, pid).ok();
                     apply_redirects_in_child(redirects, state);
                     let code = execute_command_list(body, state);
                     std::process::exit(code);
                 }
                 Ok(ForkResult::Parent { child }) => {
-                    match waitpid(child, None) {
-                        Ok(WaitStatus::Exited(_, code)) => code,
-                        _ => 1,
+                    setpgid(child, child).ok();
+                    if state.interactive {
+                        wait_for_fg(child, state)
+                    } else {
+                        match waitpid(child, None) {
+                            Ok(WaitStatus::Exited(_, code)) => code,
+                            _ => 1,
+                        }
                     }
                 }
                 Err(_) => 1,

@@ -2,7 +2,7 @@
 
 use nix::sys::signal::{kill, Signal};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
-use nix::unistd::Pid;
+use nix::unistd::{Pid, tcsetpgrp};
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -127,8 +127,14 @@ impl JobTable {
             let pid = job.pid;
             job.status = JobStatus::Running;
             eprintln!("{}", job.command);
+            // Give terminal foreground to the job's process group
+            let shell_pgid = nix::unistd::getpgrp();
+            tcsetpgrp(std::io::stdin(), pid).ok();
             kill(pid, Signal::SIGCONT).ok();
-            self.wait_fg(pid)
+            let code = self.wait_fg(pid);
+            // Reclaim terminal foreground for the shell
+            tcsetpgrp(std::io::stdin(), shell_pgid).ok();
+            code
         } else {
             eprintln!("rsh: fg: {}: no such job", id);
             1
