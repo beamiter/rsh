@@ -29,6 +29,7 @@ pub struct Editor {
     terminal_height: u16,
     completion_menu: Option<CompletionMenu>,
     search_mode: Option<SearchMode>,
+    last_rendered_lines: u16,
 }
 
 struct CompletionMenu {
@@ -55,6 +56,7 @@ impl Editor {
             terminal_height: h,
             completion_menu: None,
             search_mode: None,
+            last_rendered_lines: 0,
         }
     }
 
@@ -69,6 +71,7 @@ impl Editor {
 
         // Print prompt
         let prompt_str = prompt::render_prompt(state);
+        self.last_rendered_lines = prompt_str.matches('\n').count() as u16;
         print!("{}", prompt_str);
         io::stdout().flush()?;
 
@@ -84,7 +87,7 @@ impl Editor {
             if SIGINT_RECEIVED.swap(false, Ordering::SeqCst) {
                 self.buffer.clear();
                 self.cursor = 0;
-                println!("^C");
+                print!("^C\r\n");
                 return Ok(Some(String::new()));
             }
 
@@ -101,20 +104,20 @@ impl Editor {
                         match self.handle_key(key, state, history)? {
                             KeyAction::Continue => {}
                             KeyAction::Submit => {
-                                println!();
+                                print!("\r\n");
                                 let line = self.buffer.clone();
                                 return Ok(Some(line));
                             }
                             KeyAction::Eof => {
                                 if self.buffer.is_empty() {
-                                    println!();
+                                    print!("\r\n");
                                     return Ok(None); // EOF
                                 } else {
                                     self.delete_char();
                                 }
                             }
                             KeyAction::Interrupt => {
-                                println!("^C");
+                                print!("^C\r\n");
                                 return Ok(Some(String::new()));
                             }
                         }
@@ -163,8 +166,7 @@ impl Editor {
                 let mut out = stdout();
                 out.execute(Clear(ClearType::All))?;
                 out.execute(cursor::MoveTo(0, 0))?;
-                print!("{}", prompt::render_prompt(state));
-                out.flush()?;
+                self.last_rendered_lines = 0;
             }
             (KeyCode::Char('a'), KeyModifiers::CONTROL) => {
                 // Home
@@ -366,24 +368,20 @@ impl Editor {
         self.suggestion = suggest::suggest(&self.buffer, history);
     }
 
-    fn repaint(&self, state: &ShellState) -> io::Result<()> {
+    fn repaint(&mut self, state: &ShellState) -> io::Result<()> {
         let mut out = stdout();
 
-        // Move to start of input (handle multiline)
-        // Count lines to go back up
-        let display_buf = self.get_display_buffer();
-        let line_count = display_buf.matches('\n').count();
-
-        // Move cursor to beginning of current input area
+        // Move back to start of previous render
         out.queue(MoveToColumn(0))?;
-        if line_count > 0 {
-            // Move up to the start
-            out.queue(MoveUp(line_count as u16))?;
+        if self.last_rendered_lines > 0 {
+            out.queue(MoveUp(self.last_rendered_lines))?;
         }
         out.queue(Clear(ClearType::FromCursorDown))?;
 
+        let mut rendered_lines: u16 = 0;
+
         if let Some(ref search) = self.search_mode {
-            // Render search prompt
+            // Render search prompt (single line)
             out.queue(SetForegroundColor(Color::Yellow))?;
             out.queue(Print(format!("(reverse-i-search)`{}': ", search.query)))?;
             out.queue(ResetColor)?;
@@ -391,6 +389,7 @@ impl Editor {
         } else {
             // Render prompt
             let prompt_text = prompt::render_prompt(state);
+            rendered_lines += prompt_text.matches('\n').count() as u16;
             out.queue(Print(&prompt_text))?;
 
             // Render highlighted buffer
@@ -409,6 +408,7 @@ impl Editor {
                 out.queue(ResetColor)?;
                 out.queue(SetAttribute(Attribute::Reset))?;
             }
+            rendered_lines += self.buffer.matches('\n').count() as u16;
 
             // Render suggestion (ghost text)
             if let Some(ref suggestion) = self.suggestion {
@@ -423,6 +423,7 @@ impl Editor {
         // Render completion menu if active
         if let Some(ref menu) = self.completion_menu {
             out.queue(Print("\n"))?;
+            rendered_lines += 1;
             let cols = (self.terminal_width as usize) / 20;
             let cols = cols.max(1);
             for (i, comp) in menu.completions.iter().enumerate().take(20) {
@@ -439,13 +440,16 @@ impl Editor {
                 out.queue(Print("  "))?;
                 if (i + 1) % cols == 0 && i + 1 < menu.completions.len() {
                     out.queue(Print("\n"))?;
+                    rendered_lines += 1;
                 }
             }
             if menu.completions.len() > 20 {
                 out.queue(Print(format!("\n... and {} more", menu.completions.len() - 20)))?;
+                rendered_lines += 1;
             }
         }
 
+        self.last_rendered_lines = rendered_lines;
         out.flush()?;
         Ok(())
     }

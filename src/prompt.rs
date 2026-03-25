@@ -29,7 +29,7 @@ pub fn render_prompt(state: &ShellState) -> String {
         prompt.push_str(&format!(" {}", format!("({})", branch).magenta()));
     }
 
-    prompt.push('\n');
+    prompt.push(' ');
     prompt.push_str(&exit_indicator);
     prompt.push(' ');
 
