@@ -17,15 +17,87 @@ pub fn complete(buffer: &str, cursor: usize, state: &ShellState) -> (usize, Vec<
     let (word, word_start) = extract_word_at(buf);
     let is_cmd_pos = is_command_position(buf, word_start);
 
+    let cmd = first_command(buf);
     let completions = if word.starts_with('$') {
         complete_variable(&word[1..], state)
     } else if is_cmd_pos {
         complete_command(&word, state)
+    } else if let Some(subs) = subcommand_completions(&cmd, &word, buf, word_start) {
+        subs
+    } else if cmd == "cd" || cmd == "mkdir" || cmd == "rmdir" {
+        complete_path(&word, state).into_iter().filter(|c| c.is_dir).collect()
     } else {
         complete_path(&word, state)
     };
 
     (word_start, completions)
+}
+
+/// Extract the first command word from the buffer (before cursor).
+fn first_command(buf: &str) -> String {
+    let trimmed = buf.trim_start();
+    // Find after the last pipe/semicolon/&& /|| to get the current simple command
+    let cmd_start = trimmed.rfind(|c: char| c == '|' || c == ';')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let segment = trimmed[cmd_start..].trim_start();
+    segment.split_whitespace().next().unwrap_or("").to_string()
+}
+
+/// Return subcommand completions for known commands, or None to fall back to path completion.
+fn subcommand_completions(cmd: &str, prefix: &str, buf: &str, word_start: usize) -> Option<Vec<Completion>> {
+    // Only complete subcommands in the second word position
+    let before = buf[..word_start].trim_end();
+    let word_count = before.split_whitespace().count();
+    // For "git ch", before is "git", word_count is 1 → second position
+    // For "git checkout ma", before is "git checkout", word_count is 2 → third position (path completion)
+    if word_count != 1 {
+        return None;
+    }
+
+    let subs: &[&str] = match cmd {
+        "git" => &[
+            "add", "bisect", "blame", "branch", "checkout", "cherry-pick",
+            "clone", "commit", "config", "diff", "fetch", "grep", "init",
+            "log", "merge", "mv", "pull", "push", "rebase", "remote",
+            "reset", "restore", "revert", "rm", "show", "stash", "status",
+            "switch", "tag", "worktree",
+        ],
+        "cargo" => &[
+            "add", "bench", "build", "check", "clean", "clippy", "doc",
+            "fetch", "fix", "fmt", "init", "install", "new", "publish",
+            "remove", "run", "search", "test", "tree", "uninstall", "update",
+        ],
+        "docker" => &[
+            "build", "compose", "container", "cp", "create", "exec",
+            "image", "images", "kill", "logs", "network", "ps", "pull",
+            "push", "restart", "rm", "rmi", "run", "start", "stop",
+            "tag", "volume",
+        ],
+        "systemctl" => &[
+            "daemon-reload", "disable", "edit", "enable", "is-active",
+            "is-enabled", "list-units", "reload", "restart", "start",
+            "status", "stop",
+        ],
+        "npm" => &[
+            "audit", "build", "cache", "ci", "clean", "config", "create",
+            "exec", "init", "install", "link", "list", "outdated", "pack",
+            "publish", "rebuild", "remove", "run", "search", "start",
+            "test", "uninstall", "update", "version",
+        ],
+        _ => return None,
+    };
+
+    let completions = subs.iter()
+        .filter(|s| s.starts_with(prefix))
+        .map(|s| Completion {
+            text: s.to_string(),
+            display: s.to_string(),
+            is_dir: false,
+        })
+        .collect::<Vec<_>>();
+
+    Some(completions)
 }
 
 fn extract_word_at(buf: &str) -> (String, usize) {
