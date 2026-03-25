@@ -6,20 +6,9 @@ use crate::parser;
 use std::path::PathBuf;
 
 pub fn load_config(state: &mut ShellState) {
-    // Try ~/.rshrc first, then ~/.bashrc as fallback
     let rshrc = state.home_dir.join(".rshrc");
-    let bashrc = state.home_dir.join(".bashrc");
-
-    let config_file = if rshrc.exists() {
-        Some(rshrc)
-    } else if bashrc.exists() {
-        Some(bashrc)
-    } else {
-        None
-    };
-
-    if let Some(path) = config_file {
-        source_file(&path, state);
+    if rshrc.exists() {
+        source_file(&rshrc, state);
     }
 }
 

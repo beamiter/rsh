@@ -1,7 +1,7 @@
 /// Prompt rendering with colors, git branch, exit code.
 
 use crate::environment::ShellState;
-use crossterm::style::Stylize;
+use crossterm::style::{Color, Stylize};
 use std::env;
 
 pub fn render_prompt(state: &ShellState) -> String {
@@ -17,12 +17,14 @@ pub fn render_prompt(state: &ShellState) -> String {
 
     let mut prompt = String::new();
 
-    // User@host in bold blue
-    prompt.push_str(&format!("{}", format!("{}@{}", user, hostname).dark_cyan().bold()));
+    // User@host
+    prompt.push_str(&format!("{}", format!("{}@{}", user, hostname)
+        .with(Color::Rgb { r: 0, g: 210, b: 210 }).bold()));
     prompt.push(' ');
 
-    // CWD in bold cyan
-    prompt.push_str(&format!("{}", cwd.blue().bold()));
+    // CWD
+    prompt.push_str(&format!("{}", cwd
+        .with(Color::Rgb { r: 80, g: 255, b: 120 }).bold()));
 
     // Git branch in magenta
     if let Some(branch) = &git_branch {
