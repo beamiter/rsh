@@ -20,7 +20,12 @@ mod suggest;
 use crossterm::terminal;
 
 fn main() {
-    // Panic hook: restore terminal on crash
+    // Fast path: non-interactive modes (-c, script) skip Editor/History entirely
+    if let Some(code) = shell::run_noninteractive() {
+        std::process::exit(code);
+    }
+
+    // Interactive mode: set up panic hook to restore terminal
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = terminal::disable_raw_mode();
