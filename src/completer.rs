@@ -12,7 +12,7 @@ pub struct Completion {
 
 /// Perform completion for the current buffer at the cursor position.
 /// Returns the start position of the word being completed and the list of completions.
-pub fn complete(buffer: &str, cursor: usize, state: &ShellState) -> (usize, Vec<Completion>) {
+pub fn complete(buffer: &str, cursor: usize, state: &mut ShellState) -> (usize, Vec<Completion>) {
     let buf = &buffer[..cursor];
     let (word, word_start) = extract_word_at(buf);
     let is_cmd_pos = is_command_position(buf, word_start);
@@ -130,7 +130,7 @@ fn is_command_position(buf: &str, word_start: usize) -> bool {
     before.ends_with('{')
 }
 
-fn complete_command(prefix: &str, state: &ShellState) -> Vec<Completion> {
+fn complete_command(prefix: &str, state: &mut ShellState) -> Vec<Completion> {
     let mut completions = Vec::new();
 
     // Builtins
@@ -169,7 +169,7 @@ fn complete_command(prefix: &str, state: &ShellState) -> Vec<Completion> {
     }
 
     // PATH executables
-    for cmd in &state.path_cache {
+    for cmd in state.path_cache().iter() {
         if cmd.starts_with(prefix) {
             completions.push(Completion {
                 text: cmd.clone(),

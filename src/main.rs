@@ -7,6 +7,7 @@ mod editor;
 mod environment;
 mod executor;
 mod expand;
+mod glob_match;
 mod highlighter;
 mod history;
 mod job;

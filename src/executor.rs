@@ -4,12 +4,13 @@ use crate::builtins;
 use crate::environment::ShellState;
 use crate::expand::{expand_word_to_string, expand_words};
 use crate::parser::ast::*;
+use crate::signal;
 
 use nix::sys::wait::{waitpid, WaitStatus};
-use nix::unistd::{close, dup2, execvp, fork, pipe, ForkResult, Pid};
+use nix::unistd::{close, dup2, execvp, fork, pipe, setpgid, ForkResult, Pid};
 use std::ffi::CString;
 use std::fs::{File, OpenOptions};
-use std::os::unix::io::{AsRawFd, IntoRawFd, RawFd};
+use std::os::unix::io::{IntoRawFd, RawFd};
 
 pub fn execute_program(commands: &[CompleteCommand], state: &mut ShellState) -> i32 {
     let mut last = 0;
@@ -72,6 +73,9 @@ fn execute_pipeline(pipeline: &Pipeline, state: &mut ShellState) -> i32 {
 
         match unsafe { fork() } {
             Ok(ForkResult::Child) => {
+                signal::reset_child_signals();
+                setpgid(Pid::from_raw(0), Pid::from_raw(0)).ok();
+
                 // Set up stdin from previous pipe
                 if let Some(fd) = prev_read_fd {
                     dup2(fd, 0).ok();
@@ -218,6 +222,9 @@ fn execute_simple(cmd: &SimpleCommand, state: &mut ShellState) -> i32 {
     // External command - fork and exec
     match unsafe { fork() } {
         Ok(ForkResult::Child) => {
+            signal::reset_child_signals();
+            setpgid(Pid::from_raw(0), Pid::from_raw(0)).ok();
+
             // Apply redirections
             apply_redirects_in_child(&cmd.redirects, state);
 
@@ -262,6 +269,8 @@ fn execute_compound(cmd: &CompoundCommand, state: &mut ShellState) -> i32 {
         CompoundCommand::Subshell { body, redirects } => {
             match unsafe { fork() } {
                 Ok(ForkResult::Child) => {
+                    signal::reset_child_signals();
+                    setpgid(Pid::from_raw(0), Pid::from_raw(0)).ok();
                     apply_redirects_in_child(redirects, state);
                     let code = execute_command_list(body, state);
                     std::process::exit(code);
@@ -363,32 +372,9 @@ fn execute_command_list(cmds: &[CompleteCommand], state: &mut ShellState) -> i32
     code
 }
 
-/// Simple glob-like pattern matching for case statements.
+/// Glob-like pattern matching for case statements.
 fn match_pattern(value: &str, pattern: &str) -> bool {
-    if pattern == "*" { return true; }
-    if pattern == value { return true; }
-
-    let v: Vec<char> = value.chars().collect();
-    let p: Vec<char> = pattern.chars().collect();
-    match_pattern_recursive(&v, 0, &p, 0)
-}
-
-fn match_pattern_recursive(value: &[char], vi: usize, pattern: &[char], pi: usize) -> bool {
-    if pi >= pattern.len() { return vi >= value.len(); }
-    if pattern[pi] == '*' {
-        // Match zero or more characters
-        for i in vi..=value.len() {
-            if match_pattern_recursive(value, i, pattern, pi + 1) {
-                return true;
-            }
-        }
-        return false;
-    }
-    if vi >= value.len() { return false; }
-    if pattern[pi] == '?' || pattern[pi] == value[vi] {
-        return match_pattern_recursive(value, vi + 1, pattern, pi + 1);
-    }
-    false
+    crate::glob_match::glob_match(pattern, value)
 }
 
 // --- Redirect handling ---
@@ -398,46 +384,63 @@ struct SavedFd {
     saved_fd: RawFd,
 }
 
-fn setup_redirects(redirects: &[Redirect], state: &ShellState) -> Vec<SavedFd> {
+/// Apply a single redirect: open the target and dup2 onto `fd`.
+fn apply_one_redirect(kind: &RedirectKind, fd: RawFd, target_str: &str) {
+    match kind {
+        RedirectKind::Output => {
+            if let Ok(file) = File::create(target_str) {
+                dup2(file.into_raw_fd(), fd).ok();
+            }
+        }
+        RedirectKind::Append => {
+            if let Ok(file) = OpenOptions::new().create(true).append(true).open(target_str) {
+                dup2(file.into_raw_fd(), fd).ok();
+            }
+        }
+        RedirectKind::Input => {
+            if let Ok(file) = File::open(target_str) {
+                dup2(file.into_raw_fd(), fd).ok();
+            }
+        }
+        RedirectKind::HereString | RedirectKind::HereDoc => {
+            let (r, w) = pipe().expect("pipe");
+            let r_fd = r.into_raw_fd();
+            let w_fd = w.into_raw_fd();
+            let data = format!("{}\n", target_str);
+            unsafe { nix::libc::write(w_fd, data.as_ptr() as *const _, data.len()); }
+            close(w_fd).ok();
+            dup2(r_fd, fd).ok();
+            close(r_fd).ok();
+        }
+        RedirectKind::DupOutput => {
+            if let Ok(target_fd) = target_str.parse::<RawFd>() {
+                dup2(target_fd, fd).ok();
+            }
+        }
+        _ => {}
+    }
+}
+
+fn redirect_fd(redir: &Redirect) -> RawFd {
+    match redir.kind {
+        RedirectKind::Output | RedirectKind::Append | RedirectKind::DupOutput => redir.fd.unwrap_or(1),
+        RedirectKind::Input | RedirectKind::HereString | RedirectKind::HereDoc => redir.fd.unwrap_or(0),
+        _ => redir.fd.unwrap_or(1),
+    }
+}
+
+fn setup_redirects(redirects: &[Redirect], state: &mut ShellState) -> Vec<SavedFd> {
     let mut saved = Vec::new();
     for redir in redirects {
         let target_str = expand_word_to_string(&redir.target, state);
-        let fd = match redir.kind {
-            RedirectKind::Output | RedirectKind::Append => redir.fd.unwrap_or(1),
-            RedirectKind::Input => redir.fd.unwrap_or(0),
-            RedirectKind::DupOutput => redir.fd.unwrap_or(1),
-            _ => continue,
-        };
+        let fd = redirect_fd(redir);
 
         // Save original fd
-        let saved_fd = nix::unistd::dup(fd).ok();
-        if let Some(sfd) = saved_fd {
+        if let Ok(sfd) = nix::unistd::dup(fd) {
             saved.push(SavedFd { original_fd: fd, saved_fd: sfd });
         }
 
-        match redir.kind {
-            RedirectKind::Output => {
-                if let Ok(file) = File::create(&target_str) {
-                    dup2(file.as_raw_fd(), fd).ok();
-                }
-            }
-            RedirectKind::Append => {
-                if let Ok(file) = OpenOptions::new().create(true).append(true).open(&target_str) {
-                    dup2(file.as_raw_fd(), fd).ok();
-                }
-            }
-            RedirectKind::Input => {
-                if let Ok(file) = File::open(&target_str) {
-                    dup2(file.as_raw_fd(), fd).ok();
-                }
-            }
-            RedirectKind::DupOutput => {
-                if let Ok(target_fd) = target_str.parse::<RawFd>() {
-                    dup2(target_fd, fd).ok();
-                }
-            }
-            _ => {}
-        }
+        apply_one_redirect(&redir.kind, fd, &target_str);
     }
     saved
 }
@@ -449,59 +452,10 @@ fn restore_fds(saved: Vec<SavedFd>) {
     }
 }
 
-fn apply_redirects_in_child(redirects: &[Redirect], state: &ShellState) {
+fn apply_redirects_in_child(redirects: &[Redirect], state: &mut ShellState) {
     for redir in redirects {
         let target_str = expand_word_to_string(&redir.target, state);
-        let fd = match redir.kind {
-            RedirectKind::Output | RedirectKind::Append => redir.fd.unwrap_or(1),
-            RedirectKind::Input | RedirectKind::HereString => redir.fd.unwrap_or(0),
-            RedirectKind::DupOutput => redir.fd.unwrap_or(1),
-            _ => continue,
-        };
-
-        match redir.kind {
-            RedirectKind::Output => {
-                if let Ok(file) = File::create(&target_str) {
-                    dup2(file.as_raw_fd(), fd).ok();
-                }
-            }
-            RedirectKind::Append => {
-                if let Ok(file) = OpenOptions::new().create(true).append(true).open(&target_str) {
-                    dup2(file.as_raw_fd(), fd).ok();
-                }
-            }
-            RedirectKind::Input => {
-                if let Ok(file) = File::open(&target_str) {
-                    dup2(file.as_raw_fd(), fd).ok();
-                }
-            }
-            RedirectKind::HereString => {
-                let (r, w) = pipe().expect("pipe");
-                let r_fd = r.into_raw_fd();
-                let w_fd = w.into_raw_fd();
-                let data = format!("{}\n", target_str);
-                unsafe { nix::libc::write(w_fd, data.as_ptr() as *const _, data.len()); }
-                close(w_fd).ok();
-                dup2(r_fd, fd).ok();
-                close(r_fd).ok();
-            }
-            RedirectKind::HereDoc => {
-                // Heredoc: pipe content to stdin
-                let (r, w) = pipe().expect("pipe");
-                let r_fd = r.into_raw_fd();
-                let w_fd = w.into_raw_fd();
-                let data = format!("{}\n", target_str);
-                unsafe { nix::libc::write(w_fd, data.as_ptr() as *const _, data.len()); }
-                close(w_fd).ok();
-                dup2(r_fd, fd).ok();
-                close(r_fd).ok();
-            }
-            RedirectKind::DupOutput => {
-                if let Ok(target_fd) = target_str.parse::<RawFd>() {
-                    dup2(target_fd, fd).ok();
-                }
-            }
-            _ => {}
-        }
+        let fd = redirect_fd(redir);
+        apply_one_redirect(&redir.kind, fd, &target_str);
     }
 }

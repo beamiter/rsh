@@ -3,7 +3,6 @@
 use crate::environment::ShellState;
 use crate::parser::lexer::{self, Token};
 use crossterm::style::Color;
-use std::path::Path;
 
 pub struct StyledSpan {
     pub text: String,
@@ -13,7 +12,7 @@ pub struct StyledSpan {
 }
 
 /// Highlight the input buffer, returning styled spans.
-pub fn highlight(buffer: &str, state: &ShellState) -> Vec<StyledSpan> {
+pub fn highlight(buffer: &str, state: &mut ShellState) -> Vec<StyledSpan> {
     let tokens = lexer::tokenize_lenient(buffer);
     let mut spans = Vec::new();
     let mut is_command_pos = true;
@@ -40,8 +39,8 @@ pub fn highlight(buffer: &str, state: &ShellState) -> Vec<StyledSpan> {
                 let raw = strip_quotes(w);
                 if is_builtin_cmd(&raw) || state.command_in_path(&raw) || state.aliases.contains_key(&raw) || state.functions.contains_key(&raw) {
                     StyledSpan { text, fg: Some(Color::Green), bold: true, underline: false }
-                } else if Path::new(&raw).is_file() && raw.contains('/') {
-                    // It's an executable path
+                } else if raw.contains('/') {
+                    // Looks like a path — show as valid (skip stat on every keystroke)
                     StyledSpan { text, fg: Some(Color::Green), bold: true, underline: true }
                 } else {
                     StyledSpan { text, fg: Some(Color::Red), bold: true, underline: false }
@@ -55,8 +54,6 @@ pub fn highlight(buffer: &str, state: &ShellState) -> Vec<StyledSpan> {
                     StyledSpan { text, fg: Some(Color::White), bold: false, underline: false }
                 } else if raw.starts_with('\'') || raw.starts_with('"') {
                     StyledSpan { text, fg: Some(Color::Yellow), bold: false, underline: false }
-                } else if Path::new(&raw).exists() {
-                    StyledSpan { text, fg: None, bold: false, underline: true }
                 } else {
                     StyledSpan { text, fg: None, bold: false, underline: false }
                 }

@@ -1,6 +1,6 @@
 /// History management: file I/O, in-memory ring, search.
 
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
@@ -59,12 +59,15 @@ impl History {
         if entry.is_empty() { return; }
         // Don't add duplicates of the last entry
         if self.entries.last().map(|s| s.as_str()) == Some(&entry) { return; }
-        self.entries.push(entry);
+        self.entries.push(entry.clone());
         if self.entries.len() > self.max_size {
             self.entries.remove(0);
         }
         self.position = self.entries.len();
-        self.save();
+        // Append just the new line instead of rewriting the entire file
+        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&self.file_path) {
+            writeln!(file, "{}", entry).ok();
+        }
     }
 
     pub fn entries(&self) -> &[String] {

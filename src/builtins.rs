@@ -706,24 +706,7 @@ fn eval_cond_binary(args: &[&str], pos: &mut usize) -> i32 {
 }
 
 fn glob_match(pattern: &str, text: &str) -> bool {
-    let p: Vec<char> = pattern.chars().collect();
-    let t: Vec<char> = text.chars().collect();
-    glob_match_rec(&p, 0, &t, 0)
-}
-
-fn glob_match_rec(pat: &[char], pi: usize, text: &[char], ti: usize) -> bool {
-    if pi >= pat.len() { return ti >= text.len(); }
-    if pat[pi] == '*' {
-        for i in ti..=text.len() {
-            if glob_match_rec(pat, pi + 1, text, i) { return true; }
-        }
-        return false;
-    }
-    if ti >= text.len() { return false; }
-    if pat[pi] == '?' || pat[pi] == text[ti] {
-        return glob_match_rec(pat, pi + 1, text, ti + 1);
-    }
-    false
+    crate::glob_match::glob_match(pattern, text)
 }
 
 fn builtin_trap(args: &[String], state: &mut ShellState) -> i32 {

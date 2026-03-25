@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::path::PathBuf;
 
@@ -21,7 +21,7 @@ pub struct ShellState {
     pub last_bg_pid: Option<u32>,
     pub interactive: bool,
     pub home_dir: PathBuf,
-    pub path_cache: Vec<String>,
+    path_cache: Option<HashSet<String>>,
     pub positional_params: Vec<String>,
     pub positional_stack: Vec<Vec<String>>,
     pub dir_stack: Vec<PathBuf>,
@@ -40,7 +40,7 @@ impl ShellState {
 
         let home_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
 
-        let mut state = ShellState {
+        ShellState {
             env_vars,
             local_vars: HashMap::new(),
             aliases: HashMap::new(),
@@ -49,7 +49,7 @@ impl ShellState {
             last_bg_pid: None,
             interactive,
             home_dir,
-            path_cache: Vec::new(),
+            path_cache: None,
             positional_params: Vec::new(),
             positional_stack: Vec::new(),
             dir_stack: Vec::new(),
@@ -57,9 +57,7 @@ impl ShellState {
             traps: HashMap::new(),
             pipestatus: Vec::new(),
             jobs: JobTable::new(),
-        };
-        state.rebuild_path_cache();
-        state
+        }
     }
 
     pub fn get_var(&self, name: &str) -> Option<&str> {
@@ -78,7 +76,7 @@ impl ShellState {
             self.env_vars.insert(name.to_string(), value.to_string());
             env::set_var(name, value);
             if name == "PATH" {
-                self.rebuild_path_cache();
+                self.invalidate_path_cache();
             }
         } else {
             self.local_vars.insert(name.to_string(), value.to_string());
@@ -90,7 +88,7 @@ impl ShellState {
         env::set_var(name, value);
         self.local_vars.remove(name);
         if name == "PATH" {
-            self.rebuild_path_cache();
+            self.invalidate_path_cache();
         }
     }
 
@@ -99,33 +97,41 @@ impl ShellState {
         self.local_vars.remove(name);
         env::remove_var(name);
         if name == "PATH" {
-            self.rebuild_path_cache();
+            self.invalidate_path_cache();
         }
     }
 
-    pub fn rebuild_path_cache(&mut self) {
-        self.path_cache.clear();
-        if let Some(path) = self.env_vars.get("PATH") {
-            for dir in path.split(':') {
-                if let Ok(entries) = std::fs::read_dir(dir) {
-                    for entry in entries.flatten() {
-                        if let Ok(ft) = entry.file_type() {
-                            if ft.is_file() || ft.is_symlink() {
-                                if let Some(name) = entry.file_name().to_str() {
-                                    self.path_cache.push(name.to_string());
+    /// Invalidate the cache so it is rebuilt on next access.
+    fn invalidate_path_cache(&mut self) {
+        self.path_cache = None;
+    }
+
+    /// Lazily build (or return) the path cache.
+    pub fn path_cache(&mut self) -> &HashSet<String> {
+        if self.path_cache.is_none() {
+            let mut cache = HashSet::new();
+            if let Some(path) = self.env_vars.get("PATH") {
+                for dir in path.split(':') {
+                    if let Ok(entries) = std::fs::read_dir(dir) {
+                        for entry in entries.flatten() {
+                            if let Ok(ft) = entry.file_type() {
+                                if ft.is_file() || ft.is_symlink() {
+                                    if let Some(name) = entry.file_name().to_str() {
+                                        cache.insert(name.to_string());
+                                    }
                                 }
                             }
                         }
                     }
                 }
             }
+            self.path_cache = Some(cache);
         }
-        self.path_cache.sort();
-        self.path_cache.dedup();
+        self.path_cache.as_ref().unwrap()
     }
 
-    pub fn command_in_path(&self, name: &str) -> bool {
-        self.path_cache.binary_search(&name.to_string()).is_ok()
+    pub fn command_in_path(&mut self, name: &str) -> bool {
+        self.path_cache().contains(name)
     }
 
     pub fn push_positional_params(&mut self, args: Vec<String>) {

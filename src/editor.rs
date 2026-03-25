@@ -354,7 +354,7 @@ impl Editor {
         Ok(KeyAction::Continue)
     }
 
-    fn handle_tab(&mut self, state: &ShellState) {
+    fn handle_tab(&mut self, state: &mut ShellState) {
         if let Some(ref mut menu) = self.completion_menu {
             // Cycle and preview selected completion in buffer
             menu.selected = (menu.selected + 1) % menu.completions.len();
@@ -407,7 +407,7 @@ impl Editor {
         self.suggestion = suggest::suggest(&self.buffer, history);
     }
 
-    fn repaint(&mut self, state: &ShellState) -> io::Result<()> {
+    fn repaint(&mut self, state: &mut ShellState) -> io::Result<()> {
         let mut out = stdout();
 
         // Move back to start of previous render (from cursor position, not bottom)
@@ -474,9 +474,9 @@ impl Editor {
             let buf_cursor_last = buf_before.rsplit('\n').next().unwrap_or(buf_before);
             cursor_row = prompt_lines + buf_cursor_lines;
             cursor_col = if buf_cursor_lines > 0 {
-                buf_cursor_last.len() as u16
+                display_width(buf_cursor_last) as u16
             } else {
-                prompt_width + buf_cursor_last.len() as u16
+                prompt_width + display_width(buf_cursor_last) as u16
             };
         }
 
@@ -588,6 +588,7 @@ enum KeyAction {
 }
 
 /// Calculate display width of a string, stripping ANSI escape sequences.
+/// Accounts for double-width CJK characters.
 fn display_width(s: &str) -> usize {
     let mut w = 0;
     let mut in_esc = false;
@@ -599,9 +600,34 @@ fn display_width(s: &str) -> usize {
         } else if c == '\x1b' {
             in_esc = true;
         } else {
-            w += 1;
+            w += char_width(c);
         }
     }
     w
+}
+
+/// Return the display width of a character (2 for CJK/fullwidth, 1 otherwise).
+fn char_width(c: char) -> usize {
+    let cp = c as u32;
+    // CJK Unified Ideographs and extensions
+    if (0x4E00..=0x9FFF).contains(&cp)        // CJK Unified Ideographs
+        || (0x3400..=0x4DBF).contains(&cp)     // CJK Extension A
+        || (0x20000..=0x2A6DF).contains(&cp)   // CJK Extension B
+        || (0x2A700..=0x2CEAF).contains(&cp)   // CJK Extensions C-F
+        || (0xF900..=0xFAFF).contains(&cp)     // CJK Compatibility Ideographs
+        // Hangul
+        || (0xAC00..=0xD7AF).contains(&cp)     // Hangul Syllables
+        // Fullwidth forms
+        || (0xFF01..=0xFF60).contains(&cp)      // Fullwidth ASCII variants
+        || (0xFFE0..=0xFFE6).contains(&cp)      // Fullwidth signs
+        // CJK Symbols, Hiragana, Katakana, etc.
+        || (0x2E80..=0x303E).contains(&cp)
+        || (0x3041..=0x33BF).contains(&cp)      // Hiragana, Katakana, Bopomofo, etc.
+        || (0xFE30..=0xFE6F).contains(&cp)      // CJK Compatibility Forms
+    {
+        2
+    } else {
+        1
+    }
 }
 

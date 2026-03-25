@@ -2,11 +2,10 @@
 
 use crate::environment::ShellState;
 use crate::parser::ast::{Word, WordPart};
-use std::process::Command as StdCommand;
 
 /// Expand a Word (Vec<WordPart>) into a list of strings.
 /// Word splitting and globbing may produce multiple strings from one Word.
-pub fn expand_word(word: &Word, state: &ShellState) -> Vec<String> {
+pub fn expand_word(word: &Word, state: &mut ShellState) -> Vec<String> {
     let expanded = expand_word_to_string(word, state);
 
     // Glob expansion
@@ -32,7 +31,7 @@ pub fn expand_word(word: &Word, state: &ShellState) -> Vec<String> {
 }
 
 /// Expand a Word into a single string (no word splitting/globbing).
-pub fn expand_word_to_string(word: &Word, state: &ShellState) -> String {
+pub fn expand_word_to_string(word: &Word, state: &mut ShellState) -> String {
     let mut result = String::new();
     for part in word {
         result.push_str(&expand_part(part, state));
@@ -40,7 +39,7 @@ pub fn expand_word_to_string(word: &Word, state: &ShellState) -> String {
     result
 }
 
-fn expand_part(part: &WordPart, state: &ShellState) -> String {
+fn expand_part(part: &WordPart, state: &mut ShellState) -> String {
     match part {
         WordPart::Literal(s) => s.clone(),
         WordPart::SingleQuoted(s) => s.clone(),
@@ -63,7 +62,7 @@ fn expand_part(part: &WordPart, state: &ShellState) -> String {
     }
 }
 
-fn expand_variable(name: &str, state: &ShellState) -> String {
+fn expand_variable(name: &str, state: &mut ShellState) -> String {
     match name {
         "?" => state.last_exit_code.to_string(),
         "$" => std::process::id().to_string(),
@@ -85,7 +84,7 @@ fn expand_variable(name: &str, state: &ShellState) -> String {
     }
 }
 
-fn expand_parameter(name: &str, state: &ShellState) -> String {
+fn expand_parameter(name: &str, state: &mut ShellState) -> String {
     // ${var:-default}
     if let Some(pos) = name.find(":-") {
         let var = &name[..pos];
@@ -101,7 +100,11 @@ fn expand_parameter(name: &str, state: &ShellState) -> String {
         let default = &name[pos + 2..];
         return match state.get_var(var) {
             Some(v) if !v.is_empty() => v.to_string(),
-            _ => default.to_string(),
+            _ => {
+                let val = default.to_string();
+                state.set_var(var, &val);
+                val
+            }
         };
     }
     // ${var:+alternate}
@@ -197,7 +200,7 @@ fn expand_parameter(name: &str, state: &ShellState) -> String {
     state.get_var(name).unwrap_or("").to_string()
 }
 
-fn expand_brace_items(items: &[Vec<WordPart>], state: &ShellState) -> Vec<String> {
+fn expand_brace_items(items: &[Vec<WordPart>], state: &mut ShellState) -> Vec<String> {
     items.iter().map(|parts| {
         let mut s = String::new();
         for p in parts { s.push_str(&expand_part(p, state)); }
@@ -206,27 +209,10 @@ fn expand_brace_items(items: &[Vec<WordPart>], state: &ShellState) -> Vec<String
 }
 
 fn match_glob(pattern: &str, text: &str) -> bool {
-    let p: Vec<char> = pattern.chars().collect();
-    let t: Vec<char> = text.chars().collect();
-    match_glob_rec(&p, 0, &t, 0)
+    crate::glob_match::glob_match(pattern, text)
 }
 
-fn match_glob_rec(pat: &[char], pi: usize, text: &[char], ti: usize) -> bool {
-    if pi >= pat.len() { return ti >= text.len(); }
-    if pat[pi] == '*' {
-        for i in ti..=text.len() {
-            if match_glob_rec(pat, pi + 1, text, i) { return true; }
-        }
-        return false;
-    }
-    if ti >= text.len() { return false; }
-    if pat[pi] == '?' || pat[pi] == text[ti] {
-        return match_glob_rec(pat, pi + 1, text, ti + 1);
-    }
-    false
-}
-
-fn expand_tilde(user: &str, state: &ShellState) -> String {
+fn expand_tilde(user: &str, state: &mut ShellState) -> String {
     if user.is_empty() {
         state.home_dir.to_string_lossy().to_string()
     } else {
@@ -243,22 +229,64 @@ fn expand_tilde(user: &str, state: &ShellState) -> String {
 }
 
 fn expand_command_sub(cmd: &str) -> String {
-    // Use rsh itself for command substitution, falling back to sh
-    let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("sh"));
-    match StdCommand::new(exe).arg("-c").arg(cmd).output() {
-        Ok(output) => {
-            let mut s = String::from_utf8_lossy(&output.stdout).to_string();
+    // Fork and capture stdout in-process, avoiding re-exec of rsh binary.
+    use nix::unistd::{close, fork, pipe, read, ForkResult};
+    use std::os::unix::io::IntoRawFd;
+
+    let (r, w) = match pipe() {
+        Ok(fds) => (fds.0.into_raw_fd(), fds.1.into_raw_fd()),
+        Err(_) => return String::new(),
+    };
+
+    match unsafe { fork() } {
+        Ok(ForkResult::Child) => {
+            close(r).ok();
+            // Redirect stdout to write end of pipe
+            nix::unistd::dup2(w, 1).ok();
+            close(w).ok();
+
+            // Parse and execute inside the child
+            let mut state = crate::environment::ShellState::new(false);
+            match crate::parser::parse(cmd) {
+                Ok(cmds) => {
+                    let mut code = 0;
+                    for c in &cmds {
+                        code = crate::executor::execute_complete_command(c, &mut state);
+                    }
+                    std::process::exit(code);
+                }
+                Err(_) => std::process::exit(2),
+            }
+        }
+        Ok(ForkResult::Parent { child }) => {
+            close(w).ok();
+            // Read all output from child
+            let mut output = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                match read(r, &mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => output.extend_from_slice(&buf[..n]),
+                }
+            }
+            close(r).ok();
+            nix::sys::wait::waitpid(child, None).ok();
+            let mut s = String::from_utf8_lossy(&output).to_string();
             // Trim trailing newlines (bash behavior)
             while s.ends_with('\n') || s.ends_with('\r') {
                 s.pop();
             }
             s
         }
-        Err(_) => String::new(),
+        Err(_) => {
+            close(r).ok();
+            close(w).ok();
+            String::new()
+        }
     }
 }
 
-fn expand_arithmetic(expr: &str, state: &ShellState) -> String {
+fn expand_arithmetic(expr: &str, state: &mut ShellState) -> String {
     // Simple integer arithmetic evaluator
     let expanded = expand_arith_vars(expr, state);
     match eval_arithmetic(&expanded) {
@@ -267,7 +295,7 @@ fn expand_arithmetic(expr: &str, state: &ShellState) -> String {
     }
 }
 
-fn expand_arith_vars(expr: &str, state: &ShellState) -> String {
+fn expand_arith_vars(expr: &str, state: &mut ShellState) -> String {
     let mut result = String::new();
     let mut chars = expr.chars().peekable();
     while let Some(&c) = chars.peek() {
@@ -454,7 +482,7 @@ fn contains_glob(s: &str) -> bool {
 }
 
 /// Expand all words in a command, performing word splitting on the results.
-pub fn expand_words(words: &[Word], state: &ShellState) -> Vec<String> {
+pub fn expand_words(words: &[Word], state: &mut ShellState) -> Vec<String> {
     let mut result = Vec::new();
     for word in words {
         result.extend(expand_word(word, state));
