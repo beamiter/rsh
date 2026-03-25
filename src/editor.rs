@@ -147,6 +147,19 @@ impl Editor {
 
         match (key.code, key.modifiers) {
             (KeyCode::Enter, _) => {
+                // Accept completion if menu is open
+                if let Some(menu) = self.completion_menu.take() {
+                    let completion = &menu.completions[menu.selected];
+                    let text = completion.text.clone();
+                    let is_dir = completion.is_dir;
+                    self.buffer.replace_range(menu.word_start..self.cursor, &text);
+                    self.cursor = menu.word_start + text.len();
+                    if !is_dir {
+                        self.buffer.insert(self.cursor, ' ');
+                        self.cursor += 1;
+                    }
+                    return Ok(KeyAction::Continue);
+                }
                 // Check if input is incomplete (multiline)
                 if crate::parser::is_incomplete(&self.buffer) {
                     self.buffer.push('\n');
@@ -202,6 +215,16 @@ impl Editor {
             }
             (KeyCode::Tab, _) => {
                 self.handle_tab(state);
+            }
+            (KeyCode::BackTab, _) => {
+                // Shift+Tab: cycle backwards in completion menu
+                if let Some(ref mut menu) = self.completion_menu {
+                    if menu.selected == 0 {
+                        menu.selected = menu.completions.len() - 1;
+                    } else {
+                        menu.selected -= 1;
+                    }
+                }
             }
             (KeyCode::Right, KeyModifiers::NONE) => {
                 if self.cursor >= self.buffer.len() {
@@ -318,12 +341,8 @@ impl Editor {
 
     fn handle_tab(&mut self, state: &ShellState) {
         if let Some(ref mut menu) = self.completion_menu {
-            // Cycle through completions
+            // Cycle highlight only - Enter to confirm
             menu.selected = (menu.selected + 1) % menu.completions.len();
-            let completion = &menu.completions[menu.selected];
-            let new_text = &completion.text;
-            self.buffer.replace_range(menu.word_start..self.cursor, new_text);
-            self.cursor = menu.word_start + new_text.len();
             return;
         }
 
