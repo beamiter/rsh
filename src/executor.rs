@@ -171,14 +171,13 @@ fn execute_pipeline(pipeline: &Pipeline, state: &mut ShellState) -> i32 {
     if state.interactive {
         tcsetpgrp(std::io::stdin(), shell_pgid).ok();
     }
-    state.pipestatus = pipestatus.clone();
-
     // pipefail: return first non-zero exit code
     if state.shell_opts.pipefail {
         if let Some(&code) = pipestatus.iter().find(|&&c| c != 0) {
             last_status = code;
         }
     }
+    state.pipestatus = pipestatus;
 
     if pipeline.negated { if last_status == 0 { 1 } else { 0 } } else { last_status }
 }
@@ -450,17 +449,23 @@ fn apply_one_redirect(kind: &RedirectKind, fd: RawFd, target_str: &str) {
     match kind {
         RedirectKind::Output => {
             if let Ok(file) = File::create(target_str) {
-                dup2(file.into_raw_fd(), fd).ok();
+                let src = file.into_raw_fd();
+                dup2(src, fd).ok();
+                if src != fd { close(src).ok(); }
             }
         }
         RedirectKind::Append => {
             if let Ok(file) = OpenOptions::new().create(true).append(true).open(target_str) {
-                dup2(file.into_raw_fd(), fd).ok();
+                let src = file.into_raw_fd();
+                dup2(src, fd).ok();
+                if src != fd { close(src).ok(); }
             }
         }
         RedirectKind::Input => {
             if let Ok(file) = File::open(target_str) {
-                dup2(file.into_raw_fd(), fd).ok();
+                let src = file.into_raw_fd();
+                dup2(src, fd).ok();
+                if src != fd { close(src).ok(); }
             }
         }
         RedirectKind::HereString | RedirectKind::HereDoc => {

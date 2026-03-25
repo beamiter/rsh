@@ -6,7 +6,7 @@ use std::env;
 
 pub fn render_prompt(state: &ShellState) -> String {
     let user = env::var("USER").unwrap_or_else(|_| String::from("user"));
-    let hostname = get_hostname();
+    let hostname = &state.hostname;
     let cwd = get_short_cwd(state);
     let git_branch = get_git_branch();
     let exit_indicator = if state.last_exit_code == 0 {
@@ -36,12 +36,6 @@ pub fn render_prompt(state: &ShellState) -> String {
     prompt.push(' ');
 
     prompt
-}
-
-fn get_hostname() -> String {
-    std::fs::read_to_string("/etc/hostname")
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|_| String::from("localhost"))
 }
 
 fn get_short_cwd(state: &ShellState) -> String {

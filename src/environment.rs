@@ -21,6 +21,7 @@ pub struct ShellState {
     pub last_bg_pid: Option<u32>,
     pub interactive: bool,
     pub home_dir: PathBuf,
+    pub hostname: String,
     path_cache: Option<HashSet<String>>,
     pub positional_params: Vec<String>,
     pub positional_stack: Vec<Vec<String>>,
@@ -39,6 +40,9 @@ impl ShellState {
         }
 
         let home_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+        let hostname = std::fs::read_to_string("/etc/hostname")
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|_| String::from("localhost"));
 
         ShellState {
             env_vars,
@@ -49,6 +53,7 @@ impl ShellState {
             last_bg_pid: None,
             interactive,
             home_dir,
+            hostname,
             path_cache: None,
             positional_params: Vec::new(),
             positional_stack: Vec::new(),

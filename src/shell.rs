@@ -84,6 +84,81 @@ pub fn run_noninteractive() -> Option<i32> {
     None // interactive mode
 }
 
+/// Expand history references: !!, !$, !n, !-n
+/// Returns None if a reference is invalid.
+fn expand_history(line: &str, history: &crate::history::History) -> Option<String> {
+    if !line.contains('!') {
+        return Some(line.to_string());
+    }
+
+    let mut result = String::new();
+    let mut chars = line.chars().peekable();
+    let mut in_single_quote = false;
+
+    while let Some(c) = chars.next() {
+        if c == '\'' {
+            in_single_quote = !in_single_quote;
+            result.push(c);
+            continue;
+        }
+        if in_single_quote || c != '!' {
+            result.push(c);
+            continue;
+        }
+        // c == '!' and not in single quotes
+        match chars.peek() {
+            Some(&'!') => {
+                chars.next();
+                // !! = last command
+                result.push_str(history.last()?);
+            }
+            Some(&'$') => {
+                chars.next();
+                // !$ = last argument of previous command
+                let prev = history.last()?;
+                let last_arg = prev.split_whitespace().last().unwrap_or(prev);
+                result.push_str(last_arg);
+            }
+            Some(&c2) if c2.is_ascii_digit() => {
+                // !n = nth history entry (1-based)
+                let mut num_str = String::new();
+                while let Some(&d) = chars.peek() {
+                    if d.is_ascii_digit() {
+                        num_str.push(d);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                let n: usize = num_str.parse().unwrap_or(0);
+                if n == 0 { return None; }
+                result.push_str(history.get(n - 1)?);
+            }
+            Some(&'-') => {
+                chars.next();
+                // !-n = nth from end
+                let mut num_str = String::new();
+                while let Some(&d) = chars.peek() {
+                    if d.is_ascii_digit() {
+                        num_str.push(d);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                let n: usize = num_str.parse().unwrap_or(0);
+                if n == 0 || n > history.len() { return None; }
+                result.push_str(history.get(history.len() - n)?);
+            }
+            _ => {
+                // Lone '!' not followed by special char — keep as-is
+                result.push('!');
+            }
+        }
+    }
+    Some(result)
+}
+
 fn run_exit_trap(state: &mut ShellState) {
     if let Some(cmd) = state.traps.get("EXIT").cloned() {
         if let Ok(commands) = parser::parse(&cmd) {
@@ -117,6 +192,20 @@ impl Shell {
                 Ok(Some(line)) => {
                     let line = line.trim().to_string();
                     if line.is_empty() { continue; }
+
+                    // History expansion (!!, !$, !n)
+                    let line = match expand_history(&line, &self.history) {
+                        Some(expanded) => {
+                            if expanded != line {
+                                eprintln!("{}", expanded);
+                            }
+                            expanded
+                        }
+                        None => {
+                            eprintln!("rsh: !: event not found");
+                            continue;
+                        }
+                    };
 
                     // Add to history
                     self.history.add(&line);

@@ -134,9 +134,7 @@ fn complete_command(prefix: &str, state: &mut ShellState) -> Vec<Completion> {
     let mut completions = Vec::new();
 
     // Builtins
-    for cmd in &["cd", "exit", "export", "unset", "echo", "pwd", "alias", "unalias",
-                 "type", "source", "eval", "read", "true", "false", "test",
-                 "jobs", "fg", "bg", "history", "help", "set", "local"] {
+    for cmd in crate::builtins::BUILTIN_NAMES {
         if cmd.starts_with(prefix) {
             completions.push(Completion {
                 text: cmd.to_string(),

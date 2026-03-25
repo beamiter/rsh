@@ -5,14 +5,16 @@ use crate::parser;
 use std::env;
 use std::path::Path;
 
+pub const BUILTIN_NAMES: &[&str] = &[
+    "cd", "exit", "export", "unset", "echo", "printf", "pwd",
+    "alias", "unalias", "type", "source", ".", "eval", "read",
+    "true", "false", "test", "[", "return", "break", "continue",
+    "shift", "set", "local", "jobs", "fg", "bg", "history", "help",
+    "pushd", "popd", "dirs", "trap", "command", "builtin", "[[",
+];
+
 pub fn is_builtin(name: &str) -> bool {
-    matches!(name,
-        "cd" | "exit" | "export" | "unset" | "echo" | "printf" | "pwd" |
-        "alias" | "unalias" | "type" | "source" | "." | "eval" | "read" |
-        "true" | "false" | "test" | "[" | "return" | "break" | "continue" |
-        "shift" | "set" | "local" | "jobs" | "fg" | "bg" | "history" | "help" |
-        "pushd" | "popd" | "dirs" | "trap" | "command" | "builtin" | "[["
-    )
+    BUILTIN_NAMES.contains(&name)
 }
 
 pub fn run_builtin(name: &str, args: &[String], state: &mut ShellState) -> i32 {
@@ -65,17 +67,33 @@ pub fn run_builtin(name: &str, args: &[String], state: &mut ShellState) -> i32 {
             }
         }
         "[[" => builtin_double_bracket(args),
-        "command" | "builtin" => {
+        "command" => {
             if args.is_empty() { return 0; }
-            // Run arg as command, bypassing aliases/functions
-            let cmd = args.join(" ");
-            match parser::parse(&cmd) {
-                Ok(cmds) => {
-                    let mut last = 0;
-                    for c in &cmds { last = crate::executor::execute_complete_command(c, state); }
-                    last
+            let cmd_name = &args[0];
+            // command: bypass aliases and functions, run builtin or external
+            if is_builtin(cmd_name) {
+                run_builtin(cmd_name, &args[1..], state)
+            } else {
+                // Re-parse the full command to handle redirections etc.
+                let cmd = args.join(" ");
+                match parser::parse(&cmd) {
+                    Ok(cmds) => {
+                        let mut last = 0;
+                        for c in &cmds { last = crate::executor::execute_complete_command(c, state); }
+                        last
+                    }
+                    Err(_) => 1,
                 }
-                Err(_) => 1,
+            }
+        }
+        "builtin" => {
+            if args.is_empty() { return 0; }
+            let cmd_name = &args[0];
+            if is_builtin(cmd_name) {
+                run_builtin(cmd_name, &args[1..], state)
+            } else {
+                eprintln!("rsh: builtin: {}: not a shell builtin", cmd_name);
+                1
             }
         }
         _ => { eprintln!("rsh: {}: builtin not yet implemented", name); 1 }
@@ -127,8 +145,21 @@ fn builtin_exit(args: &[String]) -> i32 {
 fn builtin_export(args: &[String], state: &mut ShellState) -> i32 {
     if args.is_empty() {
         // Print all exported variables
-        for (k, v) in &state.env_vars {
+        let mut vars: Vec<_> = state.env_vars.iter().collect();
+        vars.sort_by_key(|(k, _)| (*k).clone());
+        for (k, v) in vars {
             println!("declare -x {}=\"{}\"", k, v);
+        }
+        return 0;
+    }
+
+    // Handle -n flag: un-export variables (move from env to local)
+    if args.first().map(|s| s.as_str()) == Some("-n") {
+        for arg in &args[1..] {
+            if let Some(val) = state.env_vars.remove(arg) {
+                env::remove_var(arg);
+                state.local_vars.insert(arg.clone(), val);
+            }
         }
         return 0;
     }
@@ -328,17 +359,76 @@ fn builtin_eval(args: &[String], state: &mut ShellState) -> i32 {
 }
 
 fn builtin_read(args: &[String], state: &mut ShellState) -> i32 {
-    let var_name = args.first().map(|s| s.as_str()).unwrap_or("REPLY");
+    let mut prompt_str = None;
+    let mut silent = false;
+    let mut raw = false;
+    let mut var_names: Vec<&str> = Vec::new();
+    let mut i = 0;
+
+    // Parse flags
+    while i < args.len() {
+        match args[i].as_str() {
+            "-p" => {
+                i += 1;
+                if i < args.len() { prompt_str = Some(args[i].as_str()); }
+            }
+            "-s" => silent = true,
+            "-r" => raw = true,
+            s if s.starts_with('-') => {} // ignore unknown flags
+            _ => { var_names.push(&args[i]); }
+        }
+        i += 1;
+    }
+    if var_names.is_empty() {
+        var_names.push("REPLY");
+    }
+
+    // Print prompt if -p given
+    if let Some(p) = prompt_str {
+        eprint!("{}", p);
+        use std::io::Write;
+        std::io::stderr().flush().ok();
+    }
+
+    // Disable echo for -s
+    if silent {
+        // Use crossterm to disable echo in raw mode is complex;
+        // use stty as a simple fallback
+        std::process::Command::new("stty").arg("-echo").status().ok();
+    }
+
     let mut line = String::new();
-    match std::io::stdin().read_line(&mut line) {
+    let result = match std::io::stdin().read_line(&mut line) {
         Ok(0) => 1, // EOF
         Ok(_) => {
             let line = line.trim_end_matches('\n').trim_end_matches('\r');
-            state.set_var(var_name, line);
+            let line = if !raw {
+                // Process backslash continuations
+                line.replace("\\\n", "")
+            } else {
+                line.to_string()
+            };
+
+            if var_names.len() == 1 {
+                state.set_var(var_names[0], &line);
+            } else {
+                // Split into words and assign to variables; last var gets the remainder
+                let parts: Vec<&str> = line.splitn(var_names.len(), char::is_whitespace).collect();
+                for (vi, var) in var_names.iter().enumerate() {
+                    state.set_var(var, parts.get(vi).unwrap_or(&""));
+                }
+            }
             0
         }
         Err(_) => 1,
+    };
+
+    if silent {
+        std::process::Command::new("stty").arg("echo").status().ok();
+        eprintln!(); // newline after silent input
     }
+
+    result
 }
 
 fn builtin_test(args: &[String]) -> i32 {

@@ -53,7 +53,7 @@ fn expand_part(part: &WordPart, state: &mut ShellState) -> String {
         WordPart::Variable(name) => expand_variable(name, state),
         WordPart::Tilde(user) => expand_tilde(user, state),
         WordPart::Glob(pattern) => pattern.clone(), // returned as-is; expanded at Word level
-        WordPart::CommandSub(cmd) => expand_command_sub(cmd),
+        WordPart::CommandSub(cmd) => expand_command_sub(cmd, state),
         WordPart::Arithmetic(expr) => expand_arithmetic(expr, state),
         WordPart::BraceExpansion(items) => {
             // Single-part fallback: expand and join (full multi-word handled in expand_word)
@@ -228,7 +228,7 @@ fn expand_tilde(user: &str, state: &mut ShellState) -> String {
     }
 }
 
-fn expand_command_sub(cmd: &str) -> String {
+fn expand_command_sub(cmd: &str, state: &mut crate::environment::ShellState) -> String {
     // Fork and capture stdout in-process, avoiding re-exec of rsh binary.
     use nix::unistd::{close, fork, pipe, read, ForkResult};
     use std::os::unix::io::IntoRawFd;
@@ -245,13 +245,13 @@ fn expand_command_sub(cmd: &str) -> String {
             nix::unistd::dup2(w, 1).ok();
             close(w).ok();
 
-            // Parse and execute inside the child
-            let mut state = crate::environment::ShellState::new(false);
+            // Parse and execute inside the child (inherits parent state via fork COW)
+            state.interactive = false;
             match crate::parser::parse(cmd) {
                 Ok(cmds) => {
                     let mut code = 0;
                     for c in &cmds {
-                        code = crate::executor::execute_complete_command(c, &mut state);
+                        code = crate::executor::execute_complete_command(c, state);
                     }
                     std::process::exit(code);
                 }

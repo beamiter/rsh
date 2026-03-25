@@ -70,6 +70,14 @@ impl History {
         }
     }
 
+    pub fn last(&self) -> Option<&str> {
+        self.entries.last().map(|s| s.as_str())
+    }
+
+    pub fn get(&self, index: usize) -> Option<&str> {
+        self.entries.get(index).map(|s| s.as_str())
+    }
+
     pub fn entries(&self) -> &[String] {
         &self.entries
     }
@@ -90,7 +98,7 @@ impl History {
 
     /// Navigate to next entry. Returns the entry or None (past end = empty).
     pub fn next(&mut self) -> Option<&str> {
-        if self.position < self.entries.len() - 1 {
+        if !self.entries.is_empty() && self.position + 1 < self.entries.len() {
             self.position += 1;
             Some(&self.entries[self.position])
         } else {
