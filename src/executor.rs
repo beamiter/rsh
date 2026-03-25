@@ -109,13 +109,22 @@ fn execute_pipeline(pipeline: &Pipeline, state: &mut ShellState) -> i32 {
         }
     }
 
-    // Wait for all children
+    // Wait for all children and collect PIPESTATUS
     let mut last_status = 0;
+    let mut pipestatus = Vec::new();
     for pid in child_pids {
         match waitpid(pid, None) {
-            Ok(WaitStatus::Exited(_, code)) => last_status = code,
-            Ok(WaitStatus::Signaled(_, sig, _)) => last_status = 128 + sig as i32,
-            _ => {}
+            Ok(WaitStatus::Exited(_, code)) => { pipestatus.push(code); last_status = code; }
+            Ok(WaitStatus::Signaled(_, sig, _)) => { let c = 128 + sig as i32; pipestatus.push(c); last_status = c; }
+            _ => { pipestatus.push(1); last_status = 1; }
+        }
+    }
+    state.pipestatus = pipestatus.clone();
+
+    // pipefail: return first non-zero exit code
+    if state.shell_opts.pipefail {
+        if let Some(&code) = pipestatus.iter().find(|&&c| c != 0) {
+            last_status = code;
         }
     }
 
@@ -134,6 +143,12 @@ fn execute_command(cmd: &Command, state: &mut ShellState) -> i32 {
 }
 
 fn execute_simple(cmd: &SimpleCommand, state: &mut ShellState) -> i32 {
+    // xtrace: print command before executing
+    if state.shell_opts.xtrace && !cmd.words.is_empty() {
+        let trace: Vec<String> = cmd.words.iter().map(|w| expand_word_to_string(w, state)).collect();
+        eprintln!("+ {}", trace.join(" "));
+    }
+
     // Handle assignments only (no command)
     if cmd.words.is_empty() {
         for assign in &cmd.assignments {
@@ -169,7 +184,10 @@ fn execute_simple(cmd: &SimpleCommand, state: &mut ShellState) -> i32 {
 
     // Check for function
     if let Some(func_body) = state.functions.get(cmd_name).cloned() {
-        return execute_compound(&func_body, state);
+        state.push_positional_params(args.to_vec());
+        let code = execute_compound(&func_body, state);
+        state.pop_positional_params();
+        return code;
     }
 
     // Check for builtin
@@ -283,7 +301,7 @@ fn execute_compound(cmd: &CompoundCommand, state: &mut ShellState) -> i32 {
             let saved = setup_redirects(redirects, state);
             let word_list = match words {
                 Some(ws) => expand_words(ws, state),
-                None => Vec::new(), // TODO: use positional params
+                None => state.positional_params.clone(),
             };
 
             let mut code = 0;
@@ -458,6 +476,17 @@ fn apply_redirects_in_child(redirects: &[Redirect], state: &ShellState) {
                 }
             }
             RedirectKind::HereString => {
+                let (r, w) = pipe().expect("pipe");
+                let r_fd = r.into_raw_fd();
+                let w_fd = w.into_raw_fd();
+                let data = format!("{}\n", target_str);
+                unsafe { nix::libc::write(w_fd, data.as_ptr() as *const _, data.len()); }
+                close(w_fd).ok();
+                dup2(r_fd, fd).ok();
+                close(r_fd).ok();
+            }
+            RedirectKind::HereDoc => {
+                // Heredoc: pipe content to stdin
                 let (r, w) = pipe().expect("pipe");
                 let r_fd = r.into_raw_fd();
                 let w_fd = w.into_raw_fd();

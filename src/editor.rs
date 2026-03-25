@@ -37,6 +37,7 @@ struct CompletionMenu {
     completions: Vec<Completion>,
     selected: usize,
     word_start: usize,
+    original_word: String,
 }
 
 struct SearchMode {
@@ -100,8 +101,14 @@ impl Editor {
                     Event::Key(key) => {
                         // Close completion menu on non-tab keys
                         if key.code != KeyCode::Tab && key.code != KeyCode::BackTab {
-                            if self.completion_menu.is_some() && key.code != KeyCode::Enter {
-                                self.completion_menu = None;
+                            if key.code != KeyCode::Enter {
+                                if let Some(menu) = self.completion_menu.take() {
+                                    if key.code == KeyCode::Esc {
+                                        // Revert to original word
+                                        self.buffer.replace_range(menu.word_start..self.cursor, &menu.original_word);
+                                        self.cursor = menu.word_start + menu.original_word.len();
+                                    }
+                                }
                             }
                         }
 
@@ -380,10 +387,12 @@ impl Editor {
                     self.cursor = word_start + common.len();
                 } else {
                     // Show completion menu
+                    let original_word = self.buffer[word_start..self.cursor].to_string();
                     self.completion_menu = Some(CompletionMenu {
                         completions,
                         selected: 0,
                         word_start,
+                        original_word,
                     });
                 }
             }

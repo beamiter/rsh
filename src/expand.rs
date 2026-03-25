@@ -56,7 +56,10 @@ fn expand_part(part: &WordPart, state: &ShellState) -> String {
         WordPart::Glob(pattern) => pattern.clone(), // returned as-is; expanded at Word level
         WordPart::CommandSub(cmd) => expand_command_sub(cmd),
         WordPart::Arithmetic(expr) => expand_arithmetic(expr, state),
-        WordPart::BraceExpansion(_) => String::new(), // TODO
+        WordPart::BraceExpansion(items) => {
+            // Single-part fallback: expand and join (full multi-word handled in expand_word)
+            expand_brace_items(items, state).join(" ")
+        }
     }
 }
 
@@ -65,42 +68,184 @@ fn expand_variable(name: &str, state: &ShellState) -> String {
         "?" => state.last_exit_code.to_string(),
         "$" => std::process::id().to_string(),
         "!" => state.last_bg_pid.map_or(String::new(), |p| p.to_string()),
-        "#" => String::from("0"), // positional params count - simplified
-        "@" | "*" => String::new(), // positional params - simplified
-        _ => {
-            // Handle ${var:-default}, ${var:=default}, etc.
-            if let Some(colon_pos) = name.find(":-") {
-                let var_name = &name[..colon_pos];
-                let default = &name[colon_pos + 2..];
-                match state.get_var(var_name) {
-                    Some(v) if !v.is_empty() => v.to_string(),
-                    _ => default.to_string(),
-                }
-            } else if let Some(colon_pos) = name.find(":+") {
-                let var_name = &name[..colon_pos];
-                let alt = &name[colon_pos + 2..];
-                match state.get_var(var_name) {
-                    Some(v) if !v.is_empty() => alt.to_string(),
-                    _ => String::new(),
-                }
+        "#" => state.positional_params.len().to_string(),
+        "@" | "*" => state.positional_params.join(" "),
+        "0" => std::env::current_exe().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|_| "rsh".into()),
+        _ if name.len() <= 3 && name.chars().all(|c| c.is_ascii_digit()) => {
+            let idx: usize = name.parse().unwrap_or(0);
+            if idx > 0 && idx <= state.positional_params.len() {
+                state.positional_params[idx - 1].clone()
             } else {
-                state.get_var(name).unwrap_or("").to_string()
+                String::new()
+            }
+        }
+        _ => {
+            expand_parameter(name, state)
+        }
+    }
+}
+
+fn expand_parameter(name: &str, state: &ShellState) -> String {
+    // ${var:-default}
+    if let Some(pos) = name.find(":-") {
+        let var = &name[..pos];
+        let default = &name[pos + 2..];
+        return match state.get_var(var) {
+            Some(v) if !v.is_empty() => v.to_string(),
+            _ => default.to_string(),
+        };
+    }
+    // ${var:=default} (assign default)
+    if let Some(pos) = name.find(":=") {
+        let var = &name[..pos];
+        let default = &name[pos + 2..];
+        return match state.get_var(var) {
+            Some(v) if !v.is_empty() => v.to_string(),
+            _ => default.to_string(),
+        };
+    }
+    // ${var:+alternate}
+    if let Some(pos) = name.find(":+") {
+        let var = &name[..pos];
+        let alt = &name[pos + 2..];
+        return match state.get_var(var) {
+            Some(v) if !v.is_empty() => alt.to_string(),
+            _ => String::new(),
+        };
+    }
+    // ${var:offset:length} and ${var:offset}
+    if let Some(pos) = name.find(':') {
+        let var = &name[..pos];
+        let rest = &name[pos + 1..];
+        // Check it's numeric (substring operation)
+        if rest.starts_with(|c: char| c.is_ascii_digit() || c == '-') {
+            let val = state.get_var(var).unwrap_or("");
+            if let Some(colon2) = rest.find(':') {
+                let offset: i64 = rest[..colon2].parse().unwrap_or(0);
+                let length: usize = rest[colon2 + 1..].parse().unwrap_or(val.len());
+                let start = if offset < 0 { (val.len() as i64 + offset).max(0) as usize } else { offset as usize };
+                let end = (start + length).min(val.len());
+                return val.get(start..end).unwrap_or("").to_string();
+            } else {
+                let offset: i64 = rest.parse().unwrap_or(0);
+                let start = if offset < 0 { (val.len() as i64 + offset).max(0) as usize } else { offset as usize };
+                return val.get(start..).unwrap_or("").to_string();
             }
         }
     }
+    // ${var##pattern} (greedy prefix strip)
+    if let Some(pos) = name.find("##") {
+        let var = &name[..pos];
+        let pat = &name[pos + 2..];
+        let val = state.get_var(var).unwrap_or("");
+        for i in (0..=val.len()).rev() {
+            if match_glob(pat, &val[..i]) { return val[i..].to_string(); }
+        }
+        return val.to_string();
+    }
+    // ${var#pattern} (shortest prefix strip)
+    if let Some(pos) = name.find('#') {
+        let var = &name[..pos];
+        let pat = &name[pos + 1..];
+        let val = state.get_var(var).unwrap_or("");
+        for i in 0..=val.len() {
+            if match_glob(pat, &val[..i]) { return val[i..].to_string(); }
+        }
+        return val.to_string();
+    }
+    // ${var%%pattern} (greedy suffix strip)
+    if let Some(pos) = name.find("%%") {
+        let var = &name[..pos];
+        let pat = &name[pos + 2..];
+        let val = state.get_var(var).unwrap_or("");
+        for i in 0..=val.len() {
+            if match_glob(pat, &val[i..]) { return val[..i].to_string(); }
+        }
+        return val.to_string();
+    }
+    // ${var%pattern} (shortest suffix strip)
+    if let Some(pos) = name.find('%') {
+        let var = &name[..pos];
+        let pat = &name[pos + 1..];
+        let val = state.get_var(var).unwrap_or("");
+        for i in (0..=val.len()).rev() {
+            if match_glob(pat, &val[i..]) { return val[..i].to_string(); }
+        }
+        return val.to_string();
+    }
+    // ${var//pattern/replacement} (global replace)
+    if let Some(pos) = name.find("//") {
+        let var = &name[..pos];
+        let rest = &name[pos + 2..];
+        let (pat, rep) = rest.split_once('/').unwrap_or((rest, ""));
+        let val = state.get_var(var).unwrap_or("");
+        return val.replace(pat, rep);
+    }
+    // ${var/pattern/replacement} (first replace)
+    if let Some(pos) = name.find('/') {
+        let var = &name[..pos];
+        let rest = &name[pos + 1..];
+        let (pat, rep) = rest.split_once('/').unwrap_or((rest, ""));
+        let val = state.get_var(var).unwrap_or("");
+        return val.replacen(pat, rep, 1);
+    }
+    // ${#var} (string length)
+    if let Some(var) = name.strip_prefix('#') {
+        let val = state.get_var(var).unwrap_or("");
+        return val.len().to_string();
+    }
+    state.get_var(name).unwrap_or("").to_string()
+}
+
+fn expand_brace_items(items: &[Vec<WordPart>], state: &ShellState) -> Vec<String> {
+    items.iter().map(|parts| {
+        let mut s = String::new();
+        for p in parts { s.push_str(&expand_part(p, state)); }
+        s
+    }).collect()
+}
+
+fn match_glob(pattern: &str, text: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let t: Vec<char> = text.chars().collect();
+    match_glob_rec(&p, 0, &t, 0)
+}
+
+fn match_glob_rec(pat: &[char], pi: usize, text: &[char], ti: usize) -> bool {
+    if pi >= pat.len() { return ti >= text.len(); }
+    if pat[pi] == '*' {
+        for i in ti..=text.len() {
+            if match_glob_rec(pat, pi + 1, text, i) { return true; }
+        }
+        return false;
+    }
+    if ti >= text.len() { return false; }
+    if pat[pi] == '?' || pat[pi] == text[ti] {
+        return match_glob_rec(pat, pi + 1, text, ti + 1);
+    }
+    false
 }
 
 fn expand_tilde(user: &str, state: &ShellState) -> String {
     if user.is_empty() {
         state.home_dir.to_string_lossy().to_string()
     } else {
-        // Try to resolve ~user
-        format!("/home/{}", user)
+        // Resolve ~user via passwd lookup
+        let c_user = std::ffi::CString::new(user).unwrap_or_default();
+        let pw = unsafe { nix::libc::getpwnam(c_user.as_ptr()) };
+        if pw.is_null() {
+            format!("~{}", user)
+        } else {
+            let dir = unsafe { std::ffi::CStr::from_ptr((*pw).pw_dir) };
+            dir.to_string_lossy().to_string()
+        }
     }
 }
 
 fn expand_command_sub(cmd: &str) -> String {
-    match StdCommand::new("sh").arg("-c").arg(cmd).output() {
+    // Use rsh itself for command substitution, falling back to sh
+    let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("sh"));
+    match StdCommand::new(exe).arg("-c").arg(cmd).output() {
         Ok(output) => {
             let mut s = String::from_utf8_lossy(&output.stdout).to_string();
             // Trim trailing newlines (bash behavior)

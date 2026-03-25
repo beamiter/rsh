@@ -2,7 +2,15 @@ use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
 
+use crate::job::JobTable;
 use crate::parser::ast::CompoundCommand;
+
+#[derive(Debug, Clone, Default)]
+pub struct ShellOpts {
+    pub errexit: bool,  // set -e
+    pub xtrace: bool,   // set -x
+    pub pipefail: bool,  // set -o pipefail
+}
 
 pub struct ShellState {
     pub env_vars: HashMap<String, String>,
@@ -14,6 +22,13 @@ pub struct ShellState {
     pub interactive: bool,
     pub home_dir: PathBuf,
     pub path_cache: Vec<String>,
+    pub positional_params: Vec<String>,
+    pub positional_stack: Vec<Vec<String>>,
+    pub dir_stack: Vec<PathBuf>,
+    pub shell_opts: ShellOpts,
+    pub traps: HashMap<String, String>,
+    pub pipestatus: Vec<i32>,
+    pub jobs: JobTable,
 }
 
 impl ShellState {
@@ -35,6 +50,13 @@ impl ShellState {
             interactive,
             home_dir,
             path_cache: Vec::new(),
+            positional_params: Vec::new(),
+            positional_stack: Vec::new(),
+            dir_stack: Vec::new(),
+            shell_opts: ShellOpts::default(),
+            traps: HashMap::new(),
+            pipestatus: Vec::new(),
+            jobs: JobTable::new(),
         };
         state.rebuild_path_cache();
         state
@@ -104,5 +126,15 @@ impl ShellState {
 
     pub fn command_in_path(&self, name: &str) -> bool {
         self.path_cache.binary_search(&name.to_string()).is_ok()
+    }
+
+    pub fn push_positional_params(&mut self, args: Vec<String>) {
+        self.positional_stack.push(std::mem::replace(&mut self.positional_params, args));
+    }
+
+    pub fn pop_positional_params(&mut self) {
+        if let Some(old) = self.positional_stack.pop() {
+            self.positional_params = old;
+        }
     }
 }
