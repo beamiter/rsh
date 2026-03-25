@@ -26,11 +26,15 @@ impl Shell {
     pub fn run(&mut self) {
         signal::install_shell_signals();
 
-        // Load config
-        config::load_config(&mut self.state);
-
         // Check for -c flag or script argument
         let args: Vec<String> = std::env::args().collect();
+
+        // Only load config for interactive mode
+        let is_cmd_mode = args.len() >= 3 && args[1] == "-c";
+        let is_script_mode = args.len() >= 2 && !args[1].starts_with('-');
+        if !is_cmd_mode && !is_script_mode {
+            config::load_config(&mut self.state);
+        }
         if args.len() >= 3 && args[1] == "-c" {
             // Execute command string: rsh -c 'command'
             let cmd_str = &args[2];
