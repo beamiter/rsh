@@ -30,6 +30,7 @@ pub struct Editor {
     completion_menu: Option<CompletionMenu>,
     search_mode: Option<SearchMode>,
     last_rendered_lines: u16,
+    last_cursor_row: u16,  // cursor row within rendered content (for MoveUp on next repaint)
 }
 
 struct CompletionMenu {
@@ -57,6 +58,7 @@ impl Editor {
             completion_menu: None,
             search_mode: None,
             last_rendered_lines: 0,
+            last_cursor_row: 0,
         }
     }
 
@@ -71,7 +73,9 @@ impl Editor {
 
         // Print prompt
         let prompt_str = prompt::render_prompt(state);
-        self.last_rendered_lines = prompt_str.matches('\n').count() as u16;
+        let prompt_lines = prompt_str.matches('\n').count() as u16;
+        self.last_rendered_lines = prompt_lines;
+        self.last_cursor_row = prompt_lines;
         print!("{}", prompt_str);
         io::stdout().flush()?;
 
@@ -180,6 +184,7 @@ impl Editor {
                 out.execute(Clear(ClearType::All))?;
                 out.execute(cursor::MoveTo(0, 0))?;
                 self.last_rendered_lines = 0;
+                self.last_cursor_row = 0;
             }
             (KeyCode::Char('a'), KeyModifiers::CONTROL) => {
                 // Home
@@ -224,6 +229,9 @@ impl Editor {
                     } else {
                         menu.selected -= 1;
                     }
+                    let text = menu.completions[menu.selected].text.clone();
+                    self.buffer.replace_range(menu.word_start..self.cursor, &text);
+                    self.cursor = menu.word_start + text.len();
                 }
             }
             (KeyCode::Right, KeyModifiers::NONE) => {
@@ -341,8 +349,11 @@ impl Editor {
 
     fn handle_tab(&mut self, state: &ShellState) {
         if let Some(ref mut menu) = self.completion_menu {
-            // Cycle highlight only - Enter to confirm
+            // Cycle and preview selected completion in buffer
             menu.selected = (menu.selected + 1) % menu.completions.len();
+            let text = menu.completions[menu.selected].text.clone();
+            self.buffer.replace_range(menu.word_start..self.cursor, &text);
+            self.cursor = menu.word_start + text.len();
             return;
         }
 
@@ -390,14 +401,18 @@ impl Editor {
     fn repaint(&mut self, state: &ShellState) -> io::Result<()> {
         let mut out = stdout();
 
-        // Move back to start of previous render
+        // Move back to start of previous render (from cursor position, not bottom)
         out.queue(MoveToColumn(0))?;
-        if self.last_rendered_lines > 0 {
-            out.queue(MoveUp(self.last_rendered_lines))?;
+        if self.last_cursor_row > 0 {
+            out.queue(MoveUp(self.last_cursor_row))?;
         }
         out.queue(Clear(ClearType::FromCursorDown))?;
 
         let mut rendered_lines: u16 = 0;
+        #[allow(unused_assignments)]
+        let mut cursor_row: u16 = 0;
+        #[allow(unused_assignments)]
+        let mut cursor_col: u16 = 0;
 
         if let Some(ref search) = self.search_mode {
             // Render search prompt (single line)
@@ -405,10 +420,14 @@ impl Editor {
             out.queue(Print(format!("(reverse-i-search)`{}': ", search.query)))?;
             out.queue(ResetColor)?;
             out.queue(Print(&self.buffer))?;
+            let prefix = format!("(reverse-i-search)`{}': ", search.query);
+            cursor_col = (prefix.len() + self.buffer.len()) as u16;
+            cursor_row = 0;
         } else {
             // Render prompt
             let prompt_text = prompt::render_prompt(state);
-            rendered_lines += prompt_text.matches('\n').count() as u16;
+            let prompt_lines = prompt_text.matches('\n').count() as u16;
+            rendered_lines += prompt_lines;
             out.queue(Print(&prompt_text))?;
 
             // Render highlighted buffer
@@ -437,11 +456,25 @@ impl Editor {
                     out.queue(ResetColor)?;
                 }
             }
+
+            // Compute cursor screen position
+            let prompt_last_line = prompt_text.rsplit('\n').next().unwrap_or(&prompt_text);
+            let prompt_width = display_width(prompt_last_line) as u16;
+            let buf_before = &self.buffer[..self.cursor];
+            let buf_cursor_lines = buf_before.matches('\n').count() as u16;
+            let buf_cursor_last = buf_before.rsplit('\n').next().unwrap_or(buf_before);
+            cursor_row = prompt_lines + buf_cursor_lines;
+            cursor_col = if buf_cursor_lines > 0 {
+                buf_cursor_last.len() as u16
+            } else {
+                prompt_width + buf_cursor_last.len() as u16
+            };
         }
 
         // Render completion menu if active
         if let Some(ref menu) = self.completion_menu {
-            out.queue(Print("\n"))?;
+            // Use \r\n because raw mode \n is bare LF (no carriage return)
+            out.queue(Print("\r\n"))?;
             rendered_lines += 1;
             let cols = (self.terminal_width as usize) / 20;
             let cols = cols.max(1);
@@ -458,17 +491,25 @@ impl Editor {
                 }
                 out.queue(Print("  "))?;
                 if (i + 1) % cols == 0 && i + 1 < menu.completions.len() {
-                    out.queue(Print("\n"))?;
+                    out.queue(Print("\r\n"))?;
                     rendered_lines += 1;
                 }
             }
             if menu.completions.len() > 20 {
-                out.queue(Print(format!("\n... and {} more", menu.completions.len() - 20)))?;
+                out.queue(Print(format!("\r\n... and {} more", menu.completions.len() - 20)))?;
                 rendered_lines += 1;
             }
         }
 
+        // Reposition cursor to correct location in input line
+        let go_up = rendered_lines.saturating_sub(cursor_row);
+        if go_up > 0 {
+            out.queue(MoveUp(go_up))?;
+        }
+        out.queue(MoveToColumn(cursor_col))?;
+
         self.last_rendered_lines = rendered_lines;
+        self.last_cursor_row = cursor_row;
         out.flush()?;
         Ok(())
     }
@@ -535,5 +576,23 @@ enum KeyAction {
     Submit,
     Eof,
     Interrupt,
+}
+
+/// Calculate display width of a string, stripping ANSI escape sequences.
+fn display_width(s: &str) -> usize {
+    let mut w = 0;
+    let mut in_esc = false;
+    for c in s.chars() {
+        if in_esc {
+            if c.is_ascii_alphabetic() {
+                in_esc = false;
+            }
+        } else if c == '\x1b' {
+            in_esc = true;
+        } else {
+            w += 1;
+        }
+    }
+    w
 }
 
