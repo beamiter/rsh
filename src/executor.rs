@@ -16,14 +16,12 @@ use std::os::unix::io::{IntoRawFd, RawFd};
 /// the terminal for the shell's own process group.
 fn wait_for_fg(pid: Pid, state: &mut ShellState) -> i32 {
     let shell_pgid = nix::unistd::getpgrp();
-    // Give the child's process group the terminal foreground
     tcsetpgrp(std::io::stdin(), pid).ok();
 
     let status = match waitpid(pid, Some(WaitPidFlag::WUNTRACED)) {
         Ok(WaitStatus::Exited(_, code)) => code,
         Ok(WaitStatus::Signaled(_, sig, _)) => 128 + sig as i32,
         Ok(WaitStatus::Stopped(_, _)) => {
-            // Job got stopped (Ctrl-Z) — add to job table
             let cmd_str = format!("(pid {})", pid);
             let jid = state.jobs.add(pid, cmd_str.clone());
             if let Some(job) = state.jobs.get_by_id(jid) {
@@ -35,7 +33,6 @@ fn wait_for_fg(pid: Pid, state: &mut ShellState) -> i32 {
         _ => 1,
     };
 
-    // Reclaim terminal foreground for the shell
     tcsetpgrp(std::io::stdin(), shell_pgid).ok();
     status
 }
@@ -49,6 +46,34 @@ pub fn execute_program(commands: &[CompleteCommand], state: &mut ShellState) -> 
 }
 
 pub fn execute_complete_command(cmd: &CompleteCommand, state: &mut ShellState) -> i32 {
+    if cmd.background {
+        // Fork for background execution
+        match unsafe { fork() } {
+            Ok(ForkResult::Child) => {
+                signal::reset_child_signals();
+                let pid = nix::unistd::getpid();
+                setpgid(pid, pid).ok();
+                let code = execute_and_or(&cmd.list, state);
+                std::process::exit(code);
+            }
+            Ok(ForkResult::Parent { child }) => {
+                setpgid(child, child).ok();
+                state.last_bg_pid = Some(child.as_raw() as u32);
+                if !cmd.disown {
+                    let cmd_str = "(background)";
+                    let jid = state.jobs.add(child, cmd_str.to_string());
+                    eprintln!("[{}] {}", jid, child);
+                }
+                state.last_exit_code = 0;
+                return 0;
+            }
+            Err(e) => {
+                eprintln!("rsh: fork failed: {}", e);
+                return 1;
+            }
+        }
+    }
+
     let code = execute_and_or(&cmd.list, state);
     state.last_exit_code = code;
     code
@@ -79,20 +104,17 @@ fn execute_pipeline(pipeline: &Pipeline, state: &mut ShellState) -> i32 {
     let cmds = &pipeline.commands;
 
     if cmds.len() == 1 {
-        // Single command - no pipe needed
         let code = execute_command(&cmds[0], state);
         return if pipeline.negated { if code == 0 { 1 } else { 0 } } else { code };
     }
 
-    // Multi-command pipeline
     let mut prev_read_fd: Option<RawFd> = None;
     let mut child_pids: Vec<Pid> = Vec::new();
-    let mut pgid = Pid::from_raw(0); // will be set to first child's pid
+    let mut pgid = Pid::from_raw(0);
 
     for (i, cmd) in cmds.iter().enumerate() {
         let is_last = i == cmds.len() - 1;
 
-        // Create pipe for all but the last command
         let (read_fd, write_fd): (Option<RawFd>, Option<RawFd>) = if !is_last {
             let (r, w) = pipe().expect("pipe failed");
             (Some(r.into_raw_fd()), Some(w.into_raw_fd()))
@@ -103,22 +125,18 @@ fn execute_pipeline(pipeline: &Pipeline, state: &mut ShellState) -> i32 {
         match unsafe { fork() } {
             Ok(ForkResult::Child) => {
                 signal::reset_child_signals();
-                // All pipeline children share the first child's process group
                 let my_pid = nix::unistd::getpid();
                 let target_pgid = if pgid.as_raw() == 0 { my_pid } else { pgid };
                 setpgid(my_pid, target_pgid).ok();
 
-                // Set up stdin from previous pipe
                 if let Some(fd) = prev_read_fd {
                     dup2(fd, 0).ok();
                     close(fd).ok();
                 }
-                // Set up stdout to next pipe
                 if let Some(fd) = write_fd {
                     dup2(fd, 1).ok();
                     close(fd).ok();
                 }
-                // Close read end of current pipe in child
                 if let Some(fd) = read_fd {
                     close(fd).ok();
                 }
@@ -127,17 +145,14 @@ fn execute_pipeline(pipeline: &Pipeline, state: &mut ShellState) -> i32 {
                 std::process::exit(code);
             }
             Ok(ForkResult::Parent { child }) => {
-                // First child becomes the process group leader
                 if pgid.as_raw() == 0 {
                     pgid = child;
                 }
                 setpgid(child, pgid).ok();
                 child_pids.push(child);
-                // Close write end of current pipe in parent
                 if let Some(fd) = write_fd {
                     close(fd).ok();
                 }
-                // Close previous read end
                 if let Some(fd) = prev_read_fd {
                     close(fd).ok();
                 }
@@ -150,13 +165,11 @@ fn execute_pipeline(pipeline: &Pipeline, state: &mut ShellState) -> i32 {
         }
     }
 
-    // Give terminal foreground to the pipeline's process group
     let shell_pgid = nix::unistd::getpgrp();
     if state.interactive && pgid.as_raw() != 0 {
         tcsetpgrp(std::io::stdin(), pgid).ok();
     }
 
-    // Wait for all children and collect PIPESTATUS
     let mut last_status = 0;
     let mut pipestatus = Vec::new();
     for pid in child_pids {
@@ -167,11 +180,9 @@ fn execute_pipeline(pipeline: &Pipeline, state: &mut ShellState) -> i32 {
         }
     }
 
-    // Reclaim terminal foreground for the shell
     if state.interactive {
         tcsetpgrp(std::io::stdin(), shell_pgid).ok();
     }
-    // pipefail: return first non-zero exit code
     if state.shell_opts.pipefail {
         if let Some(&code) = pipestatus.iter().find(|&&c| c != 0) {
             last_status = code;
@@ -193,8 +204,39 @@ fn execute_command(cmd: &Command, state: &mut ShellState) -> i32 {
     }
 }
 
+fn execute_assignment(assign: &Assignment, state: &mut ShellState) {
+    if let Some(ref array_words) = assign.array_value {
+        // Array assignment: arr=(a b c)
+        let values: Vec<String> = array_words.iter()
+            .map(|w| expand_word_to_string(w, state))
+            .collect();
+        if assign.append {
+            let arr = state.arrays.entry(assign.name.clone()).or_default();
+            arr.extend(values);
+        } else {
+            state.arrays.insert(assign.name.clone(), values);
+        }
+    } else if let Some(ref index) = assign.index {
+        // Indexed assignment: arr[idx]=value
+        let value = expand_word_to_string(&assign.value, state);
+        state.set_array_element(&assign.name, index, &value);
+    } else if assign.append {
+        // String append: var+=value
+        let value = expand_word_to_string(&assign.value, state);
+        if state.is_array(&assign.name) {
+            let arr = state.arrays.entry(assign.name.clone()).or_default();
+            arr.push(value);
+        } else {
+            let old = state.get_var(&assign.name).unwrap_or("").to_string();
+            state.set_var(&assign.name, &format!("{}{}", old, value));
+        }
+    } else {
+        let value = expand_word_to_string(&assign.value, state);
+        state.set_var(&assign.name, &value);
+    }
+}
+
 fn execute_simple(cmd: &SimpleCommand, state: &mut ShellState) -> i32 {
-    // xtrace: print command before executing
     if state.shell_opts.xtrace && !cmd.words.is_empty() {
         let trace: Vec<String> = cmd.words.iter().map(|w| expand_word_to_string(w, state)).collect();
         eprintln!("+ {}", trace.join(" "));
@@ -203,8 +245,7 @@ fn execute_simple(cmd: &SimpleCommand, state: &mut ShellState) -> i32 {
     // Handle assignments only (no command)
     if cmd.words.is_empty() {
         for assign in &cmd.assignments {
-            let value = expand_word_to_string(&assign.value, state);
-            state.set_var(&assign.name, &value);
+            execute_assignment(assign, state);
         }
         return 0;
     }
@@ -229,7 +270,7 @@ fn execute_simple(cmd: &SimpleCommand, state: &mut ShellState) -> i32 {
                 }
                 return last;
             }
-            Err(_) => {} // fall through
+            Err(_) => {}
         }
     }
 
@@ -243,9 +284,7 @@ fn execute_simple(cmd: &SimpleCommand, state: &mut ShellState) -> i32 {
 
     // Check for builtin
     if builtins::is_builtin(cmd_name) {
-        // Handle redirections for builtins
         let saved_fds = setup_redirects(&cmd.redirects, state);
-        // Handle pre-command assignments
         let saved_vars: Vec<(String, Option<String>)> = cmd.assignments.iter().map(|a| {
             let old = state.get_var(&a.name).map(|s| s.to_string());
             let val = expand_word_to_string(&a.value, state);
@@ -255,7 +294,6 @@ fn execute_simple(cmd: &SimpleCommand, state: &mut ShellState) -> i32 {
 
         let code = builtins::run_builtin(cmd_name, &args.to_vec(), state);
 
-        // Restore variables (assignments before builtins are temporary unless export)
         for (name, old) in saved_vars {
             match old {
                 Some(v) => state.set_var(&name, &v),
@@ -273,16 +311,13 @@ fn execute_simple(cmd: &SimpleCommand, state: &mut ShellState) -> i32 {
             let pid = nix::unistd::getpid();
             setpgid(pid, pid).ok();
 
-            // Apply redirections
             apply_redirects_in_child(&cmd.redirects, state);
 
-            // Set env vars from assignments
             for assign in &cmd.assignments {
                 let val = expand_word_to_string(&assign.value, state);
                 std::env::set_var(&assign.name, &val);
             }
 
-            // Exec
             let c_cmd = CString::new(cmd_name.as_str()).unwrap_or_default();
             let c_args: Vec<CString> = expanded.iter()
                 .map(|s| CString::new(s.as_str()).unwrap_or_default())
@@ -293,7 +328,6 @@ fn execute_simple(cmd: &SimpleCommand, state: &mut ShellState) -> i32 {
             std::process::exit(127);
         }
         Ok(ForkResult::Parent { child }) => {
-            // Put child in its own process group (race-free: both parent and child call setpgid)
             setpgid(child, child).ok();
             if state.interactive {
                 wait_for_fg(child, state)
@@ -312,7 +346,7 @@ fn execute_simple(cmd: &SimpleCommand, state: &mut ShellState) -> i32 {
     }
 }
 
-fn execute_compound(cmd: &CompoundCommand, state: &mut ShellState) -> i32 {
+pub fn execute_compound(cmd: &CompoundCommand, state: &mut ShellState) -> i32 {
     match cmd {
         CompoundCommand::BraceGroup { body, redirects } => {
             let saved = setup_redirects(redirects, state);
@@ -432,7 +466,6 @@ fn execute_command_list(cmds: &[CompleteCommand], state: &mut ShellState) -> i32
     code
 }
 
-/// Glob-like pattern matching for case statements.
 fn match_pattern(value: &str, pattern: &str) -> bool {
     crate::glob_match::glob_match(pattern, value)
 }
@@ -444,7 +477,6 @@ struct SavedFd {
     saved_fd: RawFd,
 }
 
-/// Apply a single redirect: open the target and dup2 onto `fd`.
 fn apply_one_redirect(kind: &RedirectKind, fd: RawFd, target_str: &str) {
     match kind {
         RedirectKind::Output => {
@@ -501,7 +533,6 @@ fn setup_redirects(redirects: &[Redirect], state: &mut ShellState) -> Vec<SavedF
         let target_str = expand_word_to_string(&redir.target, state);
         let fd = redirect_fd(redir);
 
-        // Save original fd
         if let Ok(sfd) = nix::unistd::dup(fd) {
             saved.push(SavedFd { original_fd: fd, saved_fd: sfd });
         }

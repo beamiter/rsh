@@ -62,6 +62,10 @@ pub fn highlight(buffer: &str, state: &mut ShellState) -> Vec<StyledSpan> {
                 is_command_pos = true;
                 StyledSpan { text, fg: Some(Color::Magenta), bold: true, underline: false }
             }
+            Token::AmpBang => {
+                is_command_pos = true;
+                StyledSpan { text, fg: Some(Color::Magenta), bold: true, underline: false }
+            }
             Token::Semi | Token::Amp => {
                 is_command_pos = true;
                 StyledSpan { text, fg: Some(Color::Magenta), bold: false, underline: false }

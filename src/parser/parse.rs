@@ -2,7 +2,7 @@
 ///
 /// Grammar (simplified):
 ///   program         = complete_command*
-///   complete_command = and_or_list ((';' | '&') and_or_list)* [';' | '&']
+///   complete_command = and_or_list ((';' | '&' | '&!') and_or_list)* [';' | '&' | '&!']
 ///   and_or_list     = pipeline (('&&' | '||') pipeline)*
 ///   pipeline        = ['!'] command ('|' command)*
 ///   command         = simple_command | compound_command | function_def
@@ -120,9 +120,11 @@ impl<'a> Parser<'a> {
     }
 
     fn is_command_start(&self) -> bool {
-        matches!(&self.current.token,
-            Token::Word(_) | Token::LParen | Token::LBrace) ||
-            self.is_redirect()
+        match &self.current.token {
+            Token::Word(w) => !is_list_terminator(w),
+            Token::LParen | Token::LBrace => true,
+            _ => self.is_redirect(),
+        }
     }
 
     fn parse_simple_command(&mut self) -> Result<Command, ParseError> {
@@ -130,18 +132,18 @@ impl<'a> Parser<'a> {
         let mut words: Vec<Word> = Vec::new();
         let mut redirects = Vec::new();
 
-        // Parse leading assignments (VAR=value)
+        // Parse leading assignments (VAR=value, arr[idx]=value, arr=(a b c), var+=value)
         loop {
-            if let Token::Word(w) = &self.current.token {
-                if words.is_empty() && is_assignment(w) {
-                    let (name, value) = split_assignment(w);
-                    assignments.push(Assignment {
-                        name,
-                        value: parse_word_parts(&value),
-                    });
-                    self.advance();
-                    continue;
-                }
+            let is_assign = if let Token::Word(w) = &self.current.token {
+                words.is_empty() && is_assignment(w)
+            } else {
+                false
+            };
+            if is_assign {
+                let w = if let Token::Word(w) = &self.current.token { w.clone() } else { unreachable!() };
+                let assign = parse_assignment(&w, self)?;
+                assignments.push(assign);
+                continue;
             }
             break;
         }
@@ -378,8 +380,6 @@ impl<'a> Parser<'a> {
                         }
                     }
                     // Restore - not a function def
-                    // This is simplified; in practice we'd need proper backtracking
-                    // For now, compound_command handles keywords
                     self.current = saved;
                 }
             }
@@ -450,11 +450,12 @@ impl<'a> Parser<'a> {
 
     fn parse_complete_command(&mut self) -> Result<CompleteCommand, ParseError> {
         let list = self.parse_and_or()?;
-        let background = self.current.token == Token::Amp;
-        if background {
-            self.advance();
-        }
-        Ok(CompleteCommand { list, background })
+        let (background, disown) = match &self.current.token {
+            Token::Amp => { self.advance(); (true, false) }
+            Token::AmpBang => { self.advance(); (true, true) }
+            _ => (false, false),
+        };
+        Ok(CompleteCommand { list, background, disown })
     }
 
     fn parse_command_list(&mut self) -> Result<Vec<CompleteCommand>, ParseError> {
@@ -526,19 +527,151 @@ fn is_compound_keyword(w: &str) -> bool {
     matches!(w, "if" | "for" | "while" | "until" | "case")
 }
 
-fn is_assignment(w: &str) -> bool {
-    if let Some(eq_pos) = w.find('=') {
-        let name = &w[..eq_pos];
-        !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_')
-            && !name.starts_with(|c: char| c.is_ascii_digit())
-    } else {
-        false
-    }
+/// Keywords that terminate a command list (not valid as the start of a new command).
+fn is_list_terminator(w: &str) -> bool {
+    matches!(w, "then" | "else" | "elif" | "fi" | "do" | "done" | "esac" | "}" | ")")
 }
 
-fn split_assignment(w: &str) -> (String, String) {
-    let eq_pos = w.find('=').unwrap();
-    (w[..eq_pos].to_string(), w[eq_pos + 1..].to_string())
+fn is_assignment(w: &str) -> bool {
+    // Support: VAR=value, VAR+=value, arr[idx]=value, arr=(...)
+    let w_bytes = w.as_bytes();
+
+    // Find the = sign (or += pattern)
+    let mut i = 0;
+    while i < w_bytes.len() {
+        let c = w_bytes[i] as char;
+        if c == '=' {
+            // Everything before = must be a valid name (possibly with [idx])
+            let before = &w[..i];
+            return is_valid_assign_lhs(before);
+        }
+        if c == '+' && i + 1 < w_bytes.len() && w_bytes[i + 1] == b'=' {
+            let before = &w[..i];
+            return is_valid_assign_lhs(before);
+        }
+        if c == '[' {
+            // skip to ] for array index
+            while i < w_bytes.len() && w_bytes[i] != b']' {
+                i += 1;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+fn is_valid_assign_lhs(s: &str) -> bool {
+    if s.is_empty() { return false; }
+    // Could be "name" or "name[idx]"
+    let name = if let Some(bracket) = s.find('[') {
+        if !s.ends_with(']') { return false; }
+        &s[..bracket]
+    } else {
+        s
+    };
+    !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_')
+        && !name.starts_with(|c: char| c.is_ascii_digit())
+}
+
+fn parse_assignment(w: &str, parser: &mut Parser) -> Result<Assignment, ParseError> {
+    // Detect += vs =
+    let (before_eq, value_str, append) = if let Some(pos) = w.find("+=") {
+        (&w[..pos], &w[pos + 2..], true)
+    } else {
+        let eq_pos = w.find('=').unwrap();
+        (&w[..eq_pos], &w[eq_pos + 1..], false)
+    };
+
+    // Extract name and optional index from lhs
+    let (name, index) = if let Some(bracket) = before_eq.find('[') {
+        let idx = &before_eq[bracket + 1..before_eq.len() - 1]; // strip [ ]
+        (&before_eq[..bracket], Some(idx.to_string()))
+    } else {
+        (before_eq, None)
+    };
+
+    // Check for array literal: name=(a b c)
+    if value_str == "(" || (value_str.starts_with('(') && !value_str.ends_with(')')) {
+        // Collect words until )
+        let mut array_words = Vec::new();
+        // If value_str is just "(", we need to read from parser
+        let inner = if value_str == "(" {
+            String::new()
+        } else {
+            value_str[1..].to_string()
+        };
+
+        // Parse any words already in the token
+        if !inner.is_empty() {
+            for part in inner.split_whitespace() {
+                array_words.push(parse_word_parts(part));
+            }
+        }
+
+        parser.advance(); // consume the assignment token
+
+        // Read more words until )
+        loop {
+            match &parser.current.token {
+                Token::RParen => {
+                    parser.advance();
+                    break;
+                }
+                Token::Word(w) => {
+                    let w = w.clone();
+                    // Check if word ends with )
+                    if w.ends_with(')') {
+                        let inner = &w[..w.len() - 1];
+                        if !inner.is_empty() {
+                            array_words.push(parse_word_parts(inner));
+                        }
+                        parser.advance();
+                        break;
+                    }
+                    array_words.push(parse_word_parts(&w));
+                    parser.advance();
+                }
+                Token::Eof => return Err(ParseError::Incomplete),
+                _ => {
+                    parser.advance();
+                    break;
+                }
+            }
+        }
+
+        return Ok(Assignment {
+            name: name.to_string(),
+            value: vec![WordPart::Literal(String::new())],
+            index: None,
+            append,
+            array_value: Some(array_words),
+        });
+    }
+
+    // Check for complete array literal: name=(a b c) all in one token
+    if value_str.starts_with('(') && value_str.ends_with(')') {
+        let inner = &value_str[1..value_str.len() - 1];
+        let array_words: Vec<Word> = inner.split_whitespace()
+            .map(|s| parse_word_parts(s))
+            .collect();
+        parser.advance();
+        return Ok(Assignment {
+            name: name.to_string(),
+            value: vec![WordPart::Literal(String::new())],
+            index: None,
+            append,
+            array_value: Some(array_words),
+        });
+    }
+
+    parser.advance();
+    Ok(Assignment {
+        name: name.to_string(),
+        value: parse_word_parts(value_str),
+        index,
+        append,
+        array_value: None,
+    })
 }
 
 /// Parse a raw word string into WordPart components.
@@ -699,6 +832,27 @@ pub fn parse_word_parts(raw: &str) -> Word {
                     chars.next();
                 }
                 parts.push(WordPart::Tilde(user));
+            }
+            '<' | '>' if chars.clone().nth(1) == Some('(') => {
+                // Process substitution: <(cmd) or >(cmd)
+                if !literal.is_empty() {
+                    parts.push(WordPart::Literal(std::mem::take(&mut literal)));
+                }
+                let kind = if c == '<' { ProcessSubKind::Input } else { ProcessSubKind::Output };
+                chars.next(); // consume < or >
+                chars.next(); // consume (
+                let mut cmd = String::new();
+                let mut depth = 1;
+                while let Some(&c2) = chars.peek() {
+                    if c2 == '(' { depth += 1; }
+                    if c2 == ')' {
+                        depth -= 1;
+                        if depth == 0 { chars.next(); break; }
+                    }
+                    cmd.push(c2);
+                    chars.next();
+                }
+                parts.push(WordPart::ProcessSub(cmd, kind));
             }
             '*' | '?' | '[' => {
                 if !literal.is_empty() {

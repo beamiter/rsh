@@ -5,6 +5,7 @@ use crate::editor::Editor;
 use crate::environment::ShellState;
 use crate::executor;
 use crate::history::History;
+use crate::hooks;
 use crate::parser;
 use crate::signal;
 
@@ -85,7 +86,6 @@ pub fn run_noninteractive() -> Option<i32> {
 }
 
 /// Expand history references: !!, !$, !n, !-n
-/// Returns None if a reference is invalid.
 fn expand_history(line: &str, history: &crate::history::History) -> Option<String> {
     if !line.contains('!') {
         return Some(line.to_string());
@@ -105,22 +105,18 @@ fn expand_history(line: &str, history: &crate::history::History) -> Option<Strin
             result.push(c);
             continue;
         }
-        // c == '!' and not in single quotes
         match chars.peek() {
             Some(&'!') => {
                 chars.next();
-                // !! = last command
                 result.push_str(history.last()?);
             }
             Some(&'$') => {
                 chars.next();
-                // !$ = last argument of previous command
                 let prev = history.last()?;
                 let last_arg = prev.split_whitespace().last().unwrap_or(prev);
                 result.push_str(last_arg);
             }
             Some(&c2) if c2.is_ascii_digit() => {
-                // !n = nth history entry (1-based)
                 let mut num_str = String::new();
                 while let Some(&d) = chars.peek() {
                     if d.is_ascii_digit() {
@@ -136,7 +132,6 @@ fn expand_history(line: &str, history: &crate::history::History) -> Option<Strin
             }
             Some(&'-') => {
                 chars.next();
-                // !-n = nth from end
                 let mut num_str = String::new();
                 while let Some(&d) = chars.peek() {
                     if d.is_ascii_digit() {
@@ -151,7 +146,6 @@ fn expand_history(line: &str, history: &crate::history::History) -> Option<Strin
                 result.push_str(history.get(history.len() - n)?);
             }
             _ => {
-                // Lone '!' not followed by special char — keep as-is
                 result.push('!');
             }
         }
@@ -182,18 +176,21 @@ impl Shell {
         signal::install_shell_signals();
         config::load_config(&mut self.state);
 
-        // Interactive mode - main loop
         loop {
             // Check background jobs
             self.state.jobs.check_background();
-            self.state.jobs.notify_done();
+            self.state.jobs.notify_done_with_notification(self.state.notification_threshold);
+
+            // Run precmd hooks
+            let precmd = self.state.hooks.precmd.clone();
+            hooks::run_hooks(&precmd, &mut self.state);
 
             match self.editor.read_line(&mut self.state, &mut self.history) {
                 Ok(Some(line)) => {
                     let line = line.trim().to_string();
                     if line.is_empty() { continue; }
 
-                    // History expansion (!!, !$, !n)
+                    // History expansion
                     let line = match expand_history(&line, &self.history) {
                         Some(expanded) => {
                             if expanded != line {
@@ -207,8 +204,11 @@ impl Shell {
                         }
                     };
 
-                    // Add to history
                     self.history.add(&line);
+
+                    // Run preexec hooks
+                    let preexec = self.state.hooks.preexec.clone();
+                    hooks::run_hooks(&preexec, &mut self.state);
 
                     // Parse and execute
                     match parser::parse(&line) {
@@ -228,7 +228,6 @@ impl Shell {
                     }
                 }
                 Ok(None) => {
-                    // EOF (Ctrl-D)
                     break;
                 }
                 Err(e) => {

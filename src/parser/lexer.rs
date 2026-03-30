@@ -10,6 +10,7 @@ pub enum Token {
     Or,           // ||
     Semi,         // ;
     Amp,          // &
+    AmpBang,      // &!  (background + disown)
     RedirectOut,  // >
     RedirectAppend, // >>
     RedirectIn,   // <
@@ -126,7 +127,27 @@ impl<'a> Lexer<'a> {
             match self.peek_char() {
                 None => break,
                 Some(c) => match c {
-                    ' ' | '\t' | '\n' | '|' | '&' | ';' | '(' | ')' | '<' | '>' => break,
+                    ' ' | '\t' | '\n' | '|' | '&' | ';' | '(' | ')' => break,
+                    '<' | '>' => {
+                        // Check for process substitution <(...) or >(...)
+                        if self.peek_char_at(1) == Some('(') {
+                            self.next_char(); // consume < or >
+                            self.next_char(); // consume (
+                            word.push(c);
+                            word.push('(');
+                            let mut depth = 1;
+                            while let Some(c2) = self.next_char() {
+                                word.push(c2);
+                                if c2 == '(' { depth += 1; }
+                                if c2 == ')' {
+                                    depth -= 1;
+                                    if depth == 0 { break; }
+                                }
+                            }
+                        } else {
+                            break; // normal redirect
+                        }
+                    }
                     '\'' => {
                         self.next_char();
                         word.push('\'');
@@ -181,6 +202,7 @@ impl<'a> Lexer<'a> {
                 self.next_char();
                 match self.peek_char() {
                     Some('&') => { self.next_char(); Token::And }
+                    Some('!') => { self.next_char(); Token::AmpBang }
                     _ => Token::Amp,
                 }
             }
@@ -198,6 +220,12 @@ impl<'a> Lexer<'a> {
                 match self.peek_char() {
                     Some('>') => { self.next_char(); Token::RedirectAppend }
                     Some('&') => { self.next_char(); Token::DupFd }
+                    Some('(') => {
+                        // Process substitution >(cmd) -- back up and read as word
+                        self.pos = start;
+                        let w = self.read_word();
+                        Token::Word(w)
+                    }
                     _ => Token::RedirectOut,
                 }
             }
@@ -210,6 +238,12 @@ impl<'a> Lexer<'a> {
                             Some('<') => { self.next_char(); Token::HereString }
                             _ => Token::HereDoc,
                         }
+                    }
+                    Some('(') => {
+                        // Process substitution <(cmd) -- back up and read as word
+                        self.pos = start;
+                        let w = self.read_word();
+                        Token::Word(w)
                     }
                     _ => Token::RedirectIn,
                 }
@@ -232,7 +266,7 @@ impl<'a> Lexer<'a> {
                         self.next_char();
                         match self.peek_char() {
                             Some('>') => { self.next_char(); Token::RedirectFd(fd, RedirectOp::Append) }
-                            Some('&') => { self.next_char(); Token::RedirectFd(fd, RedirectOp::Output) } // fd>&target
+                            Some('&') => { self.next_char(); Token::RedirectFd(fd, RedirectOp::Output) }
                             _ => Token::RedirectFd(fd, RedirectOp::Output),
                         }
                     }

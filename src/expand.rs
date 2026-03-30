@@ -1,11 +1,21 @@
-/// Variable, tilde, glob, command substitution, and arithmetic expansion.
+/// Variable, tilde, glob, command substitution, arithmetic, array, and process
+/// substitution expansion.
 
 use crate::environment::ShellState;
-use crate::parser::ast::{Word, WordPart};
+use crate::parser::ast::{Word, WordPart, ProcessSubKind};
 
 /// Expand a Word (Vec<WordPart>) into a list of strings.
 /// Word splitting and globbing may produce multiple strings from one Word.
 pub fn expand_word(word: &Word, state: &mut ShellState) -> Vec<String> {
+    // Check for array expansions that produce multiple words: ${arr[@]} or ${arr[*]}
+    for part in word {
+        if let WordPart::Variable(name) = part {
+            if let Some(result) = try_expand_array_split(name, state) {
+                return result;
+            }
+        }
+    }
+
     let expanded = expand_word_to_string(word, state);
 
     // Glob expansion
@@ -28,6 +38,25 @@ pub fn expand_word(word: &Word, state: &mut ShellState) -> Vec<String> {
     } else {
         vec![expanded]
     }
+}
+
+/// Check if a variable name refers to an array with [@] or [*] and should word-split.
+fn try_expand_array_split(name: &str, state: &mut ShellState) -> Option<Vec<String>> {
+    // ${arr[@]} or ${arr[*]} → split into individual words
+    if let Some(bracket) = name.find('[') {
+        let var_name = &name[..bracket];
+        let subscript = &name[bracket + 1..name.len().saturating_sub(1)];
+        if subscript == "@" || subscript == "*" {
+            if state.is_array(var_name) {
+                let vals = state.array_values(var_name);
+                if vals.is_empty() {
+                    return Some(Vec::new());
+                }
+                return Some(vals);
+            }
+        }
+    }
+    None
 }
 
 /// Expand a Word into a single string (no word splitting/globbing).
@@ -56,9 +85,9 @@ fn expand_part(part: &WordPart, state: &mut ShellState) -> String {
         WordPart::CommandSub(cmd) => expand_command_sub(cmd, state),
         WordPart::Arithmetic(expr) => expand_arithmetic(expr, state),
         WordPart::BraceExpansion(items) => {
-            // Single-part fallback: expand and join (full multi-word handled in expand_word)
             expand_brace_items(items, state).join(" ")
         }
+        WordPart::ProcessSub(cmd, kind) => expand_process_sub(cmd, kind, state),
     }
 }
 
@@ -85,6 +114,47 @@ fn expand_variable(name: &str, state: &mut ShellState) -> String {
 }
 
 fn expand_parameter(name: &str, state: &mut ShellState) -> String {
+    // ${#arr[@]} or ${#arr[*]} → array length
+    if let Some(inner) = name.strip_prefix('#') {
+        if let Some(bracket) = inner.find('[') {
+            let var_name = &inner[..bracket];
+            let subscript = &inner[bracket + 1..inner.len().saturating_sub(1)];
+            if (subscript == "@" || subscript == "*") && state.is_array(var_name) {
+                return state.array_length(var_name).to_string();
+            }
+        }
+    }
+
+    // ${!arr[@]} → array keys
+    if let Some(inner) = name.strip_prefix('!') {
+        if let Some(bracket) = inner.find('[') {
+            let var_name = &inner[..bracket];
+            let subscript = &inner[bracket + 1..inner.len().saturating_sub(1)];
+            if (subscript == "@" || subscript == "*") && state.is_array(var_name) {
+                return state.array_keys(var_name).join(" ");
+            }
+        }
+    }
+
+    // Array element access: ${arr[idx]}
+    if let Some(bracket) = name.find('[') {
+        if name.ends_with(']') {
+            let var_name = &name[..bracket];
+            let subscript = &name[bracket + 1..name.len() - 1];
+
+            // ${arr[@]} or ${arr[*]} as string
+            if subscript == "@" || subscript == "*" {
+                if state.is_array(var_name) {
+                    return state.array_values(var_name).join(" ");
+                }
+            }
+            // ${arr[idx]}
+            if state.is_array(var_name) {
+                return state.get_array_element(var_name, subscript).unwrap_or_default();
+            }
+        }
+    }
+
     // ${var:-default}
     if let Some(pos) = name.find(":-") {
         let var = &name[..pos];
@@ -136,6 +206,13 @@ fn expand_parameter(name: &str, state: &mut ShellState) -> String {
             }
         }
     }
+    // ${#var} (string length) — must be checked before ${var#pattern}
+    if let Some(var) = name.strip_prefix('#') {
+        if !var.is_empty() && !var.contains('#') && !var.contains('[') {
+            let val = state.get_var(var).unwrap_or("");
+            return val.len().to_string();
+        }
+    }
     // ${var##pattern} (greedy prefix strip)
     if let Some(pos) = name.find("##") {
         let var = &name[..pos];
@@ -150,11 +227,13 @@ fn expand_parameter(name: &str, state: &mut ShellState) -> String {
     if let Some(pos) = name.find('#') {
         let var = &name[..pos];
         let pat = &name[pos + 1..];
-        let val = state.get_var(var).unwrap_or("");
-        for i in 0..=val.len() {
-            if match_glob(pat, &val[..i]) { return val[i..].to_string(); }
+        if !var.is_empty() {
+            let val = state.get_var(var).unwrap_or("");
+            for i in 0..=val.len() {
+                if match_glob(pat, &val[..i]) { return val[i..].to_string(); }
+            }
+            return val.to_string();
         }
-        return val.to_string();
     }
     // ${var%%pattern} (greedy suffix strip)
     if let Some(pos) = name.find("%%") {
@@ -192,11 +271,6 @@ fn expand_parameter(name: &str, state: &mut ShellState) -> String {
         let val = state.get_var(var).unwrap_or("");
         return val.replacen(pat, rep, 1);
     }
-    // ${#var} (string length)
-    if let Some(var) = name.strip_prefix('#') {
-        let val = state.get_var(var).unwrap_or("");
-        return val.len().to_string();
-    }
     state.get_var(name).unwrap_or("").to_string()
 }
 
@@ -216,7 +290,6 @@ fn expand_tilde(user: &str, state: &mut ShellState) -> String {
     if user.is_empty() {
         state.home_dir.to_string_lossy().to_string()
     } else {
-        // Resolve ~user via passwd lookup
         let c_user = std::ffi::CString::new(user).unwrap_or_default();
         let pw = unsafe { nix::libc::getpwnam(c_user.as_ptr()) };
         if pw.is_null() {
@@ -229,7 +302,6 @@ fn expand_tilde(user: &str, state: &mut ShellState) -> String {
 }
 
 fn expand_command_sub(cmd: &str, state: &mut crate::environment::ShellState) -> String {
-    // Fork and capture stdout in-process, avoiding re-exec of rsh binary.
     use nix::unistd::{close, fork, pipe, read, ForkResult};
     use std::os::unix::io::IntoRawFd;
 
@@ -241,11 +313,9 @@ fn expand_command_sub(cmd: &str, state: &mut crate::environment::ShellState) -> 
     match unsafe { fork() } {
         Ok(ForkResult::Child) => {
             close(r).ok();
-            // Redirect stdout to write end of pipe
             nix::unistd::dup2(w, 1).ok();
             close(w).ok();
 
-            // Parse and execute inside the child (inherits parent state via fork COW)
             state.interactive = false;
             match crate::parser::parse(cmd) {
                 Ok(cmds) => {
@@ -260,7 +330,6 @@ fn expand_command_sub(cmd: &str, state: &mut crate::environment::ShellState) -> 
         }
         Ok(ForkResult::Parent { child }) => {
             close(w).ok();
-            // Read all output from child
             let mut output = Vec::new();
             let mut buf = [0u8; 4096];
             loop {
@@ -272,7 +341,6 @@ fn expand_command_sub(cmd: &str, state: &mut crate::environment::ShellState) -> 
             close(r).ok();
             nix::sys::wait::waitpid(child, None).ok();
             let mut s = String::from_utf8_lossy(&output).to_string();
-            // Trim trailing newlines (bash behavior)
             while s.ends_with('\n') || s.ends_with('\r') {
                 s.pop();
             }
@@ -286,8 +354,65 @@ fn expand_command_sub(cmd: &str, state: &mut crate::environment::ShellState) -> 
     }
 }
 
+fn expand_process_sub(cmd: &str, kind: &ProcessSubKind, state: &mut ShellState) -> String {
+    use nix::unistd::{close, fork, pipe, ForkResult};
+    use std::os::unix::io::IntoRawFd;
+
+    let (r, w) = match pipe() {
+        Ok(fds) => (fds.0.into_raw_fd(), fds.1.into_raw_fd()),
+        Err(_) => return String::new(),
+    };
+
+    match unsafe { fork() } {
+        Ok(ForkResult::Child) => {
+            match kind {
+                ProcessSubKind::Input => {
+                    // <(cmd): child writes to pipe, parent reads from /dev/fd/N
+                    close(r).ok();
+                    nix::unistd::dup2(w, 1).ok();
+                    close(w).ok();
+                }
+                ProcessSubKind::Output => {
+                    // >(cmd): child reads from pipe, parent writes to /dev/fd/N
+                    close(w).ok();
+                    nix::unistd::dup2(r, 0).ok();
+                    close(r).ok();
+                }
+            }
+            crate::signal::reset_child_signals();
+            state.interactive = false;
+            match crate::parser::parse(cmd) {
+                Ok(cmds) => {
+                    let mut code = 0;
+                    for c in &cmds {
+                        code = crate::executor::execute_complete_command(c, state);
+                    }
+                    std::process::exit(code);
+                }
+                Err(_) => std::process::exit(2),
+            }
+        }
+        Ok(ForkResult::Parent { .. }) => {
+            match kind {
+                ProcessSubKind::Input => {
+                    close(w).ok();
+                    format!("/dev/fd/{}", r)
+                }
+                ProcessSubKind::Output => {
+                    close(r).ok();
+                    format!("/dev/fd/{}", w)
+                }
+            }
+        }
+        Err(_) => {
+            close(r).ok();
+            close(w).ok();
+            String::new()
+        }
+    }
+}
+
 fn expand_arithmetic(expr: &str, state: &mut ShellState) -> String {
-    // Simple integer arithmetic evaluator
     let expanded = expand_arith_vars(expr, state);
     match eval_arithmetic(&expanded) {
         Ok(n) => n.to_string(),
@@ -314,7 +439,6 @@ fn expand_arith_vars(expr: &str, state: &mut ShellState) -> String {
                 result.push_str(state.get_var(&var).unwrap_or("0"));
             }
         } else if c.is_alphabetic() || c == '_' {
-            // Bare variable name in arithmetic context
             let mut var = String::new();
             while let Some(&c2) = chars.peek() {
                 if c2.is_alphanumeric() || c2 == '_' {

@@ -1,4 +1,5 @@
-/// Tab completion engine: context-aware completion for commands, paths, variables.
+/// Tab completion engine: context-aware completion for commands, paths, variables,
+/// with configurable completion specs (Phase 7).
 
 use crate::environment::ShellState;
 use std::fs;
@@ -7,24 +8,34 @@ use std::fs;
 pub struct Completion {
     pub text: String,
     pub display: String,
+    pub description: Option<String>,
     pub is_dir: bool,
 }
 
-/// Perform completion for the current buffer at the cursor position.
-/// Returns the start position of the word being completed and the list of completions.
 pub fn complete(buffer: &str, cursor: usize, state: &mut ShellState) -> (usize, Vec<Completion>) {
     let buf = &buffer[..cursor];
     let (word, word_start) = extract_word_at(buf);
     let is_cmd_pos = is_command_position(buf, word_start);
 
     let cmd = first_command(buf);
+
+    // Check user-defined completion specs first
+    if !is_cmd_pos {
+        if let Some(spec) = state.completion_specs.get(&cmd).cloned() {
+            let completions = apply_completion_spec(&spec, &word, state);
+            if !completions.is_empty() {
+                return (word_start, completions);
+            }
+        }
+    }
+
     let completions = if word.starts_with('$') {
         complete_variable(&word[1..], state)
     } else if is_cmd_pos {
         complete_command(&word, state)
     } else if let Some(subs) = subcommand_completions(&cmd, &word, buf, word_start) {
         subs
-    } else if cmd == "cd" || cmd == "mkdir" || cmd == "rmdir" {
+    } else if cmd == "cd" || cmd == "mkdir" || cmd == "rmdir" || cmd == "z" {
         complete_path(&word, state).into_iter().filter(|c| c.is_dir).collect()
     } else {
         complete_path(&word, state)
@@ -33,10 +44,51 @@ pub fn complete(buffer: &str, cursor: usize, state: &mut ShellState) -> (usize, 
     (word_start, completions)
 }
 
-/// Extract the first command word from the buffer (before cursor).
+fn apply_completion_spec(spec: &crate::environment::CompletionSpec, prefix: &str, state: &mut ShellState) -> Vec<Completion> {
+    let mut completions = Vec::new();
+
+    // -W word list
+    if let Some(ref words) = spec.word_list {
+        for w in words {
+            if w.starts_with(prefix) {
+                completions.push(Completion {
+                    text: w.clone(),
+                    display: w.clone(),
+                    description: None,
+                    is_dir: false,
+                });
+            }
+        }
+    }
+
+    // -d directory
+    if spec.directory {
+        completions.extend(complete_path(prefix, state).into_iter().filter(|c| c.is_dir));
+    }
+
+    // -f file
+    if spec.file {
+        completions.extend(complete_path(prefix, state));
+    }
+
+    // -X filter pattern
+    if let Some(ref pattern) = spec.filter_pattern {
+        completions.retain(|c| !crate::glob_match::glob_match(pattern, &c.text));
+    }
+
+    // -P prefix, -S suffix
+    if let Some(ref pfx) = spec.prefix {
+        for c in &mut completions { c.text = format!("{}{}", pfx, c.text); }
+    }
+    if let Some(ref sfx) = spec.suffix {
+        for c in &mut completions { c.text = format!("{}{}", c.text, sfx); }
+    }
+
+    completions
+}
+
 fn first_command(buf: &str) -> String {
     let trimmed = buf.trim_start();
-    // Find after the last pipe/semicolon/&& /|| to get the current simple command
     let cmd_start = trimmed.rfind(|c: char| c == '|' || c == ';')
         .map(|i| i + 1)
         .unwrap_or(0);
@@ -44,13 +96,9 @@ fn first_command(buf: &str) -> String {
     segment.split_whitespace().next().unwrap_or("").to_string()
 }
 
-/// Return subcommand completions for known commands, or None to fall back to path completion.
 fn subcommand_completions(cmd: &str, prefix: &str, buf: &str, word_start: usize) -> Option<Vec<Completion>> {
-    // Only complete subcommands in the second word position
     let before = buf[..word_start].trim_end();
     let word_count = before.split_whitespace().count();
-    // For "git ch", before is "git", word_count is 1 → second position
-    // For "git checkout ma", before is "git checkout", word_count is 2 → third position (path completion)
     if word_count != 1 {
         return None;
     }
@@ -85,6 +133,7 @@ fn subcommand_completions(cmd: &str, prefix: &str, buf: &str, word_start: usize)
             "publish", "rebuild", "remove", "run", "search", "start",
             "test", "uninstall", "update", "version",
         ],
+        "hook" => &["add", "remove", "list"],
         _ => return None,
     };
 
@@ -93,6 +142,7 @@ fn subcommand_completions(cmd: &str, prefix: &str, buf: &str, word_start: usize)
         .map(|s| Completion {
             text: s.to_string(),
             display: s.to_string(),
+            description: None,
             is_dir: false,
         })
         .collect::<Vec<_>>();
@@ -101,7 +151,6 @@ fn subcommand_completions(cmd: &str, prefix: &str, buf: &str, word_start: usize)
 }
 
 fn extract_word_at(buf: &str) -> (String, usize) {
-    // Find the start of the current word (going backwards)
     let bytes = buf.as_bytes();
     let mut start = buf.len();
     for i in (0..buf.len()).rev() {
@@ -133,51 +182,50 @@ fn is_command_position(buf: &str, word_start: usize) -> bool {
 fn complete_command(prefix: &str, state: &mut ShellState) -> Vec<Completion> {
     let mut completions = Vec::new();
 
-    // Builtins
     for cmd in crate::builtins::BUILTIN_NAMES {
         if cmd.starts_with(prefix) {
             completions.push(Completion {
                 text: cmd.to_string(),
                 display: cmd.to_string(),
+                description: Some("builtin".to_string()),
                 is_dir: false,
             });
         }
     }
 
-    // Aliases
     for name in state.aliases.keys() {
         if name.starts_with(prefix) {
             completions.push(Completion {
                 text: name.clone(),
-                display: format!("{} (alias)", name),
+                display: name.clone(),
+                description: Some("alias".to_string()),
                 is_dir: false,
             });
         }
     }
 
-    // Functions
     for name in state.functions.keys() {
         if name.starts_with(prefix) {
             completions.push(Completion {
                 text: name.clone(),
-                display: format!("{} (function)", name),
+                display: name.clone(),
+                description: Some("function".to_string()),
                 is_dir: false,
             });
         }
     }
 
-    // PATH executables
     for cmd in state.path_cache().iter() {
         if cmd.starts_with(prefix) {
             completions.push(Completion {
                 text: cmd.clone(),
                 display: cmd.clone(),
+                description: None,
                 is_dir: false,
             });
         }
     }
 
-    // If prefix contains /, also try path completion
     if prefix.contains('/') {
         completions.extend(complete_path(prefix, state));
     }
@@ -203,7 +251,7 @@ fn complete_path(prefix: &str, state: &ShellState) -> Vec<Completion> {
         (expanded.as_str(), "")
     } else {
         match expanded.rfind('/') {
-            Some(pos) => (&expanded[..=pos], &expanded[pos + 1..])  ,
+            Some(pos) => (&expanded[..=pos], &expanded[pos + 1..]),
             None => (".", expanded.as_str()),
         }
     };
@@ -214,7 +262,6 @@ fn complete_path(prefix: &str, state: &ShellState) -> Vec<Completion> {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
             if !name.starts_with(file_prefix) { continue; }
-            // Skip hidden files unless prefix starts with .
             if name.starts_with('.') && !file_prefix.starts_with('.') { continue; }
 
             let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
@@ -245,6 +292,7 @@ fn complete_path(prefix: &str, state: &ShellState) -> Vec<Completion> {
             completions.push(Completion {
                 text: full,
                 display: if is_dir { format!("{}/", name) } else { name },
+                description: None,
                 is_dir,
             });
         }
@@ -262,6 +310,7 @@ fn complete_variable(prefix: &str, state: &ShellState) -> Vec<Completion> {
             completions.push(Completion {
                 text: format!("${}", name),
                 display: name.clone(),
+                description: None,
                 is_dir: false,
             });
         }
@@ -271,6 +320,28 @@ fn complete_variable(prefix: &str, state: &ShellState) -> Vec<Completion> {
             completions.push(Completion {
                 text: format!("${}", name),
                 display: name.clone(),
+                description: None,
+                is_dir: false,
+            });
+        }
+    }
+    // Also complete array names
+    for name in state.arrays.keys() {
+        if name.starts_with(prefix) {
+            completions.push(Completion {
+                text: format!("${}", name),
+                display: format!("{} (array)", name),
+                description: Some("array".to_string()),
+                is_dir: false,
+            });
+        }
+    }
+    for name in state.assoc_arrays.keys() {
+        if name.starts_with(prefix) {
+            completions.push(Completion {
+                text: format!("${}", name),
+                display: format!("{} (assoc)", name),
+                description: Some("assoc array".to_string()),
                 is_dir: false,
             });
         }
@@ -280,7 +351,6 @@ fn complete_variable(prefix: &str, state: &ShellState) -> Vec<Completion> {
     completions
 }
 
-/// Find the longest common prefix among completions.
 pub fn common_prefix(completions: &[Completion]) -> String {
     if completions.is_empty() { return String::new(); }
     let first = &completions[0].text;

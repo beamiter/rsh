@@ -12,6 +12,28 @@ pub struct ShellOpts {
     pub pipefail: bool,  // set -o pipefail
 }
 
+/// Hook lists for shell events.
+#[derive(Debug, Clone, Default)]
+pub struct ShellHooks {
+    pub precmd: Vec<String>,   // run before each prompt
+    pub preexec: Vec<String>,  // run before each command
+    pub chpwd: Vec<String>,    // run after directory change
+}
+
+/// Completion specification for a command.
+#[derive(Debug, Clone)]
+pub struct CompletionSpec {
+    pub command: String,
+    pub word_list: Option<Vec<String>>,
+    pub function: Option<String>,
+    pub directory: bool,
+    pub file: bool,
+    pub glob_pattern: Option<String>,
+    pub filter_pattern: Option<String>,
+    pub prefix: Option<String>,
+    pub suffix: Option<String>,
+}
+
 pub struct ShellState {
     pub env_vars: HashMap<String, String>,
     pub local_vars: HashMap<String, String>,
@@ -30,6 +52,15 @@ pub struct ShellState {
     pub traps: HashMap<String, String>,
     pub pipestatus: Vec<i32>,
     pub jobs: JobTable,
+    // Arrays (Phase 1)
+    pub arrays: HashMap<String, Vec<String>>,
+    pub assoc_arrays: HashMap<String, HashMap<String, String>>,
+    // Hooks (Phase 4)
+    pub hooks: ShellHooks,
+    // Completion specs (Phase 7)
+    pub completion_specs: HashMap<String, CompletionSpec>,
+    // Notification threshold (Phase 8)
+    pub notification_threshold: std::time::Duration,
 }
 
 impl ShellState {
@@ -62,11 +93,15 @@ impl ShellState {
             traps: HashMap::new(),
             pipestatus: Vec::new(),
             jobs: JobTable::new(),
+            arrays: HashMap::new(),
+            assoc_arrays: HashMap::new(),
+            hooks: ShellHooks::default(),
+            completion_specs: HashMap::new(),
+            notification_threshold: std::time::Duration::from_secs(10),
         }
     }
 
     pub fn get_var(&self, name: &str) -> Option<&str> {
-        // Special variables
         match name {
             "?" => return None, // handled by expand
             _ => {}
@@ -100,18 +135,18 @@ impl ShellState {
     pub fn unset_var(&mut self, name: &str) {
         self.env_vars.remove(name);
         self.local_vars.remove(name);
+        self.arrays.remove(name);
+        self.assoc_arrays.remove(name);
         env::remove_var(name);
         if name == "PATH" {
             self.invalidate_path_cache();
         }
     }
 
-    /// Invalidate the cache so it is rebuilt on next access.
     fn invalidate_path_cache(&mut self) {
         self.path_cache = None;
     }
 
-    /// Lazily build (or return) the path cache.
     pub fn path_cache(&mut self) -> &HashSet<String> {
         if self.path_cache.is_none() {
             let mut cache = HashSet::new();
@@ -147,5 +182,66 @@ impl ShellState {
         if let Some(old) = self.positional_stack.pop() {
             self.positional_params = old;
         }
+    }
+
+    // Array helpers
+    pub fn get_array_element(&self, name: &str, index: &str) -> Option<String> {
+        if let Some(arr) = self.arrays.get(name) {
+            let idx: usize = index.parse().ok()?;
+            arr.get(idx).cloned()
+        } else if let Some(map) = self.assoc_arrays.get(name) {
+            map.get(index).cloned()
+        } else {
+            None
+        }
+    }
+
+    pub fn set_array_element(&mut self, name: &str, index: &str, value: &str) {
+        if self.assoc_arrays.contains_key(name) {
+            self.assoc_arrays.get_mut(name).unwrap()
+                .insert(index.to_string(), value.to_string());
+        } else {
+            let arr = self.arrays.entry(name.to_string()).or_default();
+            if let Ok(idx) = index.parse::<usize>() {
+                if idx >= arr.len() {
+                    arr.resize(idx + 1, String::new());
+                }
+                arr[idx] = value.to_string();
+            }
+        }
+    }
+
+    pub fn array_values(&self, name: &str) -> Vec<String> {
+        if let Some(arr) = self.arrays.get(name) {
+            arr.clone()
+        } else if let Some(map) = self.assoc_arrays.get(name) {
+            map.values().cloned().collect()
+        } else {
+            Vec::new()
+        }
+    }
+
+    pub fn array_keys(&self, name: &str) -> Vec<String> {
+        if let Some(arr) = self.arrays.get(name) {
+            (0..arr.len()).map(|i| i.to_string()).collect()
+        } else if let Some(map) = self.assoc_arrays.get(name) {
+            map.keys().cloned().collect()
+        } else {
+            Vec::new()
+        }
+    }
+
+    pub fn array_length(&self, name: &str) -> usize {
+        if let Some(arr) = self.arrays.get(name) {
+            arr.len()
+        } else if let Some(map) = self.assoc_arrays.get(name) {
+            map.len()
+        } else {
+            0
+        }
+    }
+
+    pub fn is_array(&self, name: &str) -> bool {
+        self.arrays.contains_key(name) || self.assoc_arrays.contains_key(name)
     }
 }

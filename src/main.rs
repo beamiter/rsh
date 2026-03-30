@@ -10,12 +10,15 @@ mod expand;
 mod glob_match;
 mod highlighter;
 mod history;
+mod hooks;
 mod job;
 mod parser;
 mod prompt;
 mod shell;
 mod signal;
+mod structured;
 mod suggest;
+mod zjump;
 
 use crossterm::terminal;
 

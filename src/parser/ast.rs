@@ -1,6 +1,6 @@
 /// AST node definitions for bash-compatible shell grammar.
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum WordPart {
     Literal(String),
     SingleQuoted(String),
@@ -11,17 +11,27 @@ pub enum WordPart {
     Tilde(String),
     BraceExpansion(Vec<Vec<WordPart>>),
     Arithmetic(String),
+    ProcessSub(String, ProcessSubKind),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProcessSubKind {
+    Input,  // <(cmd) -- provides input
+    Output, // >(cmd) -- accepts output
 }
 
 pub type Word = Vec<WordPart>;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Assignment {
     pub name: String,
     pub value: Word,
+    pub index: Option<String>,       // For arr[idx]=value
+    pub append: bool,                 // For var+=value or arr+=(...)
+    pub array_value: Option<Vec<Word>>, // For arr=(a b c)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum RedirectKind {
     Output,
     Append,
@@ -32,27 +42,27 @@ pub enum RedirectKind {
     DupInput,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Redirect {
     pub fd: Option<i32>,
     pub kind: RedirectKind,
     pub target: Word,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SimpleCommand {
     pub assignments: Vec<Assignment>,
     pub words: Vec<Word>,
     pub redirects: Vec<Redirect>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CaseArm {
     pub patterns: Vec<Word>,
     pub body: Vec<CompleteCommand>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum CompoundCommand {
     BraceGroup {
         body: Vec<CompleteCommand>,
@@ -90,7 +100,7 @@ pub enum CompoundCommand {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Command {
     Simple(SimpleCommand),
     Compound(CompoundCommand),
@@ -100,7 +110,7 @@ pub enum Command {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Pipeline {
     pub negated: bool,
     pub commands: Vec<Command>,
@@ -112,14 +122,15 @@ pub enum Connector {
     Or,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AndOrList {
     pub first: Pipeline,
     pub rest: Vec<(Connector, Pipeline)>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CompleteCommand {
     pub list: AndOrList,
     pub background: bool,
+    pub disown: bool,
 }

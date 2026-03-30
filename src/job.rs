@@ -1,9 +1,10 @@
-/// Job control: process groups, fg/bg, job table.
+/// Job control: process groups, fg/bg, job table, async notifications.
 
 use nix::sys::signal::{kill, Signal};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::{Pid, tcsetpgrp};
 use std::fmt;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum JobStatus {
@@ -28,6 +29,7 @@ pub struct Job {
     pub pid: Pid,
     pub command: String,
     pub status: JobStatus,
+    pub start_time: Instant,
 }
 
 pub struct JobTable {
@@ -48,6 +50,7 @@ impl JobTable {
             pid,
             command,
             status: JobStatus::Running,
+            start_time: Instant::now(),
         });
         id
     }
@@ -70,9 +73,17 @@ impl JobTable {
     }
 
     pub fn notify_done(&mut self) {
+        self.notify_done_with_notification(Duration::from_secs(u64::MAX));
+    }
+
+    pub fn notify_done_with_notification(&mut self, threshold: Duration) {
         for job in &self.jobs {
             if let JobStatus::Done(code) = job.status {
-                eprintln!("[{}]+  Done({})                    {}", job.id, code, job.command);
+                let elapsed = job.start_time.elapsed();
+                eprintln!("[{}]+  Done({})  ({:.1}s)  {}", job.id, code, elapsed.as_secs_f64(), job.command);
+                if elapsed > threshold {
+                    send_notification(&job.command, code, elapsed);
+                }
             }
         }
         self.remove_done();
@@ -91,7 +102,7 @@ impl JobTable {
                     Ok(WaitStatus::Stopped(_, _)) => {
                         job.status = JobStatus::Stopped;
                     }
-                    _ => {} // still running
+                    _ => {}
                 }
             }
         }
@@ -99,7 +110,8 @@ impl JobTable {
 
     pub fn print_jobs(&self) {
         for job in &self.jobs {
-            println!("[{}]+  {}                    {}", job.id, job.status, job.command);
+            let elapsed = job.start_time.elapsed();
+            println!("[{}]+  {}  ({:.1}s)  {}", job.id, job.status, elapsed.as_secs_f64(), job.command);
         }
     }
 
@@ -109,12 +121,11 @@ impl JobTable {
                 Ok(WaitStatus::Exited(_, code)) => return code,
                 Ok(WaitStatus::Signaled(_, sig, _)) => return 128 + sig as i32,
                 Ok(WaitStatus::Stopped(_, _)) => {
-                    // Job got stopped (Ctrl-Z)
                     if let Some(job) = self.jobs.iter_mut().find(|j| j.pid == pid) {
                         job.status = JobStatus::Stopped;
                         eprintln!("\n[{}]+  Stopped                    {}", job.id, job.command);
                     }
-                    return 148; // 128 + SIGTSTP
+                    return 148;
                 }
                 Err(_) => return 1,
                 _ => continue,
@@ -127,12 +138,10 @@ impl JobTable {
             let pid = job.pid;
             job.status = JobStatus::Running;
             eprintln!("{}", job.command);
-            // Give terminal foreground to the job's process group
             let shell_pgid = nix::unistd::getpgrp();
             tcsetpgrp(std::io::stdin(), pid).ok();
             kill(pid, Signal::SIGCONT).ok();
             let code = self.wait_fg(pid);
-            // Reclaim terminal foreground for the shell
             tcsetpgrp(std::io::stdin(), shell_pgid).ok();
             code
         } else {
@@ -152,4 +161,19 @@ impl JobTable {
             1
         }
     }
+}
+
+fn send_notification(command: &str, exit_code: i32, elapsed: Duration) {
+    let status = if exit_code == 0 { "completed" } else { "failed" };
+    let summary = format!("Command {}", status);
+    let body = format!("{} ({:.1}s)", command, elapsed.as_secs_f64());
+
+    // OSC 777 terminal notification (iTerm2, Kitty, etc.)
+    eprint!("\x1b]777;notify;{};{}\x07", summary, body);
+
+    // Also try notify-send (Linux desktop)
+    std::process::Command::new("notify-send")
+        .args([&summary, &body])
+        .spawn()
+        .ok();
 }

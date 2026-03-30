@@ -550,6 +550,9 @@ dependencies = [
  "dirs",
  "glob",
  "nix",
+ "regex",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
