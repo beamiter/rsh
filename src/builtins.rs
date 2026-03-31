@@ -13,6 +13,7 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "pushd", "popd", "dirs", "trap", "command", "builtin", "[[",
     "declare", "z", "hook", "complete", "compgen", "disown",
     "from-json", "to-json", "to-table", "where", "sort-by", "select",
+    "bookmark", "from-csv", "group-by", "unique", "count", "math",
 ];
 
 pub fn is_builtin(name: &str) -> bool {
@@ -41,7 +42,7 @@ pub fn run_builtin(name: &str, args: &[String], state: &mut ShellState) -> i32 {
         "local" => builtin_local(args, state),
         "return" | "break" | "continue" => 0,
         "shift" => builtin_shift(state),
-        "help" => { println!("rsh: a fish-like shell with bash compatibility\nBuiltins: cd, exit, export, unset, echo, printf, pwd, alias, type, source,\n  eval, read, test, set, local, shift, jobs, fg, bg, history, pushd, popd,\n  dirs, trap, command, builtin, declare, z, hook, complete, compgen, disown,\n  from-json, to-json, to-table, where, sort-by, select, help"); 0 }
+        "help" => { println!("rsh: a fish-like shell with bash compatibility\nBuiltins: cd, exit, export, unset, echo, printf, pwd, alias, type, source,\n  eval, read, test, set, local, shift, jobs, fg, bg, history, pushd, popd,\n  dirs, trap, command, builtin, declare, z, bookmark, hook, complete, compgen,\n  disown, from-json, to-json, to-table, where, sort-by, select, help"); 0 }
         "history" => builtin_history(state),
         "pushd" => builtin_pushd(args, state),
         "popd" => builtin_popd(state),
@@ -109,6 +110,12 @@ pub fn run_builtin(name: &str, args: &[String], state: &mut ShellState) -> i32 {
         "where" => builtin_where(args),
         "sort-by" => builtin_sort_by(args),
         "select" => builtin_select(args),
+        "bookmark" => builtin_bookmark(args, state),
+        "from-csv" => builtin_from_csv(),
+        "group-by" => builtin_group_by(args),
+        "unique" => builtin_unique(args),
+        "count" => builtin_count(),
+        "math" => builtin_math(args),
         _ => { eprintln!("rsh: {}: builtin not yet implemented", name); 1 }
     }
 }
@@ -537,6 +544,9 @@ fn builtin_set(args: &[String], state: &mut ShellState) -> i32 {
                         "errexit" => state.shell_opts.errexit = true,
                         "xtrace" => state.shell_opts.xtrace = true,
                         "pipefail" => state.shell_opts.pipefail = true,
+                        "globstar" => state.shell_opts.globstar = true,
+                        "vi" => state.editing_mode = crate::environment::EditingMode::Vi,
+                        "emacs" => state.editing_mode = crate::environment::EditingMode::Emacs,
                         _ => { eprintln!("rsh: set: unknown option: {}", args[i]); return 1; }
                     }
                 }
@@ -548,6 +558,9 @@ fn builtin_set(args: &[String], state: &mut ShellState) -> i32 {
                         "errexit" => state.shell_opts.errexit = false,
                         "xtrace" => state.shell_opts.xtrace = false,
                         "pipefail" => state.shell_opts.pipefail = false,
+                        "globstar" => state.shell_opts.globstar = false,
+                        "vi" => state.editing_mode = crate::environment::EditingMode::Emacs,
+                        "emacs" => state.editing_mode = crate::environment::EditingMode::Vi,
                         _ => { eprintln!("rsh: set: unknown option: {}", args[i]); return 1; }
                     }
                 }
@@ -1219,4 +1232,143 @@ fn builtin_select(args: &[String]) -> i32 {
     let projected = crate::structured::select_fields(&records, &fields);
     crate::structured::write_json_stdout(&projected);
     0
+}
+
+// ============================================================
+// bookmark (Feature 10)
+// ============================================================
+
+fn builtin_bookmark(args: &[String], state: &mut ShellState) -> i32 {
+    if args.is_empty() {
+        eprintln!("Usage: bookmark <add|go|ls|rm> [args...]");
+        return 1;
+    }
+    match args[0].as_str() {
+        "add" => {
+            let name = match args.get(1) {
+                Some(n) => n.clone(),
+                None => { eprintln!("Usage: bookmark add <name> [path]"); return 1; }
+            };
+            let path = args.get(2)
+                .map(|p| p.clone())
+                .unwrap_or_else(|| std::env::current_dir()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|_| ".".to_string()));
+            if let Ok(mut db) = crate::bookmarks::get_bookmark_db().lock() {
+                db.add(&name, &path);
+                println!("Bookmark '{}' -> {}", name, path);
+            }
+            0
+        }
+        "go" => {
+            let name = match args.get(1) {
+                Some(n) => n,
+                None => { eprintln!("Usage: bookmark go <name>"); return 1; }
+            };
+            let path = {
+                if let Ok(db) = crate::bookmarks::get_bookmark_db().lock() {
+                    db.get(name).cloned()
+                } else {
+                    None
+                }
+            };
+            match path {
+                Some(path) => {
+                    if let Err(e) = std::env::set_current_dir(&path) {
+                        eprintln!("rsh: bookmark go: {}: {}", path, e);
+                        return 1;
+                    }
+                    state.env_vars.insert("OLDPWD".to_string(),
+                        state.env_vars.get("PWD").cloned().unwrap_or_default());
+                    state.env_vars.insert("PWD".to_string(), path);
+                    let chpwd = state.hooks.chpwd.clone();
+                    crate::hooks::run_hooks(&chpwd, state);
+                    0
+                }
+                None => {
+                    eprintln!("rsh: bookmark '{}' not found", name);
+                    1
+                }
+            }
+        }
+        "ls" => {
+            if let Ok(db) = crate::bookmarks::get_bookmark_db().lock() {
+                for (name, path) in db.list() {
+                    println!("  {:<16} {}", name, path);
+                }
+            }
+            0
+        }
+        "rm" => {
+            let name = match args.get(1) {
+                Some(n) => n,
+                None => { eprintln!("Usage: bookmark rm <name>"); return 1; }
+            };
+            if let Ok(mut db) = crate::bookmarks::get_bookmark_db().lock() {
+                if db.remove(name) {
+                    println!("Removed bookmark '{}'", name);
+                    0
+                } else {
+                    eprintln!("rsh: bookmark '{}' not found", name);
+                    1
+                }
+            } else {
+                1
+            }
+        }
+        _ => {
+            eprintln!("Usage: bookmark <add|go|ls|rm> [args...]");
+            1
+        }
+    }
+}
+
+// ============================================================
+// Enhanced structured data pipeline builtins (Feature 13)
+// ============================================================
+
+fn builtin_from_csv() -> i32 {
+    let records = crate::structured::read_csv_stdin();
+    crate::structured::write_json_stdout(&records);
+    0
+}
+
+fn builtin_group_by(args: &[String]) -> i32 {
+    if args.is_empty() {
+        eprintln!("Usage: group-by <field>");
+        return 1;
+    }
+    let records = crate::structured::read_json_stdin();
+    let grouped = crate::structured::group_by(&records, &args[0]);
+    let out = serde_json::to_string_pretty(&grouped).unwrap_or_default();
+    println!("{}", out);
+    0
+}
+
+fn builtin_unique(args: &[String]) -> i32 {
+    let field = args.first().map(|s| s.as_str());
+    let records = crate::structured::read_json_stdin();
+    let unique = crate::structured::unique(&records, field);
+    crate::structured::write_json_stdout(&unique);
+    0
+}
+
+fn builtin_count() -> i32 {
+    let records = crate::structured::read_json_stdin();
+    println!("{}", crate::structured::count(&records));
+    0
+}
+
+fn builtin_math(args: &[String]) -> i32 {
+    if args.len() < 2 {
+        eprintln!("Usage: math <sum|avg|min|max> <field>");
+        return 1;
+    }
+    let op = &args[0];
+    let field = &args[1];
+    let records = crate::structured::read_json_stdin();
+    match crate::structured::math_op(&records, op, field) {
+        Some(result) => { println!("{}", result); 0 }
+        None => { eprintln!("math: no numeric values for field '{}'", field); 1 }
+    }
 }

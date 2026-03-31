@@ -80,7 +80,12 @@ impl JobTable {
         for job in &self.jobs {
             if let JobStatus::Done(code) = job.status {
                 let elapsed = job.start_time.elapsed();
-                eprintln!("[{}]+  Done({})  ({:.1}s)  {}", job.id, code, elapsed.as_secs_f64(), job.command);
+                let dur = format_job_duration(elapsed);
+                if code == 0 {
+                    eprintln!("[{}]+  Done  ({})  {}", job.id, dur, job.command);
+                } else {
+                    eprintln!("[{}]+  Failed({})  ({})  {}", job.id, code, dur, job.command);
+                }
                 if elapsed > threshold {
                     send_notification(&job.command, code, elapsed);
                 }
@@ -164,9 +169,12 @@ impl JobTable {
 }
 
 fn send_notification(command: &str, exit_code: i32, elapsed: Duration) {
-    let status = if exit_code == 0 { "completed" } else { "failed" };
-    let summary = format!("Command {}", status);
-    let body = format!("{} ({:.1}s)", command, elapsed.as_secs_f64());
+    let dur = format_job_duration(elapsed);
+    let (summary, body) = if exit_code == 0 {
+        ("Command completed".to_string(), format!("{} ({})", command, dur))
+    } else {
+        (format!("Command failed (exit {})", exit_code), format!("{} ({})", command, dur))
+    };
 
     // OSC 777 terminal notification (iTerm2, Kitty, etc.)
     eprint!("\x1b]777;notify;{};{}\x07", summary, body);
@@ -176,4 +184,15 @@ fn send_notification(command: &str, exit_code: i32, elapsed: Duration) {
         .args([&summary, &body])
         .spawn()
         .ok();
+}
+
+fn format_job_duration(d: Duration) -> String {
+    let secs = d.as_secs();
+    if secs >= 3600 {
+        format!("{}h{}m{}s", secs / 3600, (secs % 3600) / 60, secs % 60)
+    } else if secs >= 60 {
+        format!("{}m{:.0}s", secs / 60, secs % 60)
+    } else {
+        format!("{:.1}s", d.as_secs_f64())
+    }
 }

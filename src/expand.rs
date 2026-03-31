@@ -16,6 +16,30 @@ pub fn expand_word(word: &Word, state: &mut ShellState) -> Vec<String> {
         }
     }
 
+    // Check for brace expansion/range that produces multiple words
+    for (i, part) in word.iter().enumerate() {
+        let items = match part {
+            WordPart::BraceExpansion(items) => Some(expand_brace_items(items, state)),
+            WordPart::BraceRange { start, end, step } => Some(expand_brace_range(start, end, step.as_deref())),
+            _ => None,
+        };
+        if let Some(items) = items {
+            let mut results = Vec::new();
+            for item in &items {
+                let mut new_word: Word = Vec::new();
+                for (j, p) in word.iter().enumerate() {
+                    if j == i {
+                        new_word.push(WordPart::Literal(item.clone()));
+                    } else {
+                        new_word.push(p.clone());
+                    }
+                }
+                results.extend(expand_word(&new_word, state));
+            }
+            return results;
+        }
+    }
+
     let expanded = expand_word_to_string(word, state);
 
     // Glob expansion
@@ -86,6 +110,9 @@ fn expand_part(part: &WordPart, state: &mut ShellState) -> String {
         WordPart::Arithmetic(expr) => expand_arithmetic(expr, state),
         WordPart::BraceExpansion(items) => {
             expand_brace_items(items, state).join(" ")
+        }
+        WordPart::BraceRange { start, end, step } => {
+            expand_brace_range(start, end, step.as_deref()).join(" ")
         }
         WordPart::ProcessSub(cmd, kind) => expand_process_sub(cmd, kind, state),
     }
@@ -280,6 +307,74 @@ fn expand_brace_items(items: &[Vec<WordPart>], state: &mut ShellState) -> Vec<St
         for p in parts { s.push_str(&expand_part(p, state)); }
         s
     }).collect()
+}
+
+fn expand_brace_range(start: &str, end: &str, step: Option<&str>) -> Vec<String> {
+    // Try integer range
+    if let (Ok(s), Ok(e)) = (start.parse::<i64>(), end.parse::<i64>()) {
+        let step_abs = step.and_then(|s| s.parse::<i64>().ok().map(|v| v.abs())).unwrap_or(1);
+        if step_abs == 0 { return vec![]; }
+        let step_val = if s <= e { step_abs } else { -step_abs };
+
+        // Check for zero-padding
+        let pad_width = start.len().max(end.len());
+        let needs_pad = (start.starts_with('0') && start.len() > 1)
+                      || (end.starts_with('0') && end.len() > 1);
+
+        let mut results = Vec::new();
+        let mut i = s;
+        if step_val > 0 {
+            while i <= e {
+                if needs_pad {
+                    results.push(format!("{:0>width$}", i, width = pad_width));
+                } else {
+                    results.push(i.to_string());
+                }
+                i += step_val;
+            }
+        } else {
+            while i >= e {
+                if needs_pad {
+                    results.push(format!("{:0>width$}", i, width = pad_width));
+                } else {
+                    results.push(i.to_string());
+                }
+                i += step_val;
+            }
+        }
+        return results;
+    }
+
+    // Try character range
+    if start.len() == 1 && end.len() == 1 {
+        let s = start.chars().next().unwrap();
+        let e = end.chars().next().unwrap();
+        let step_abs = step.and_then(|s| s.parse::<i32>().ok().map(|v| v.abs())).unwrap_or(1);
+        if step_abs == 0 { return vec![]; }
+        let step_val = if s <= e { step_abs } else { -step_abs };
+
+        let mut results = Vec::new();
+        let mut i = s as i32;
+        let end_i = e as i32;
+        if step_val > 0 {
+            while i <= end_i {
+                if let Some(c) = char::from_u32(i as u32) {
+                    results.push(c.to_string());
+                }
+                i += step_val;
+            }
+        } else {
+            while i >= end_i {
+                if let Some(c) = char::from_u32(i as u32) {
+                    results.push(c.to_string());
+                }
+                i += step_val;
+            }
+        }
+        return results;
+    }
+
+    vec![]
 }
 
 fn match_glob(pattern: &str, text: &str) -> bool {

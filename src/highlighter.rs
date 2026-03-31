@@ -99,6 +99,25 @@ pub fn highlight(buffer: &str, state: &mut ShellState) -> Vec<StyledSpan> {
         });
     }
 
+    // Syntax error detection: mark errors with red underline
+    // Only check if the input appears "complete" (not just typing a pipe, etc.)
+    let trailing = buffer.trim_end();
+    let looks_complete = !trailing.is_empty()
+        && !trailing.ends_with('|')
+        && !trailing.ends_with("&&")
+        && !trailing.ends_with("||")
+        && !trailing.ends_with('\\');
+
+    if looks_complete && !crate::parser::is_incomplete(buffer) {
+        if crate::parser::parse(buffer).is_err() {
+            // Mark the last token/span as error
+            if let Some(last_span) = spans.last_mut() {
+                last_span.fg = Some(Color::Red);
+                last_span.underline = true;
+            }
+        }
+    }
+
     spans
 }
 

@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+mod bookmarks;
 mod builtins;
 mod completer;
 mod config;

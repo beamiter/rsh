@@ -196,6 +196,121 @@ pub fn to_table(records: &[Value]) -> String {
     output
 }
 
+/// Read CSV from stdin (first line = headers).
+pub fn read_csv_stdin() -> Vec<Value> {
+    let stdin = io::stdin();
+    let mut lines = Vec::new();
+    for line in stdin.lock().lines() {
+        match line {
+            Ok(l) => lines.push(l),
+            Err(_) => break,
+        }
+    }
+    if lines.is_empty() { return Vec::new(); }
+
+    let headers = parse_csv_line(&lines[0]);
+    let mut records = Vec::new();
+    for line in &lines[1..] {
+        let values = parse_csv_line(line);
+        let mut map = serde_json::Map::new();
+        for (i, header) in headers.iter().enumerate() {
+            let val = values.get(i).map(|s| s.as_str()).unwrap_or("");
+            // Try to parse as number
+            if let Ok(n) = val.parse::<f64>() {
+                map.insert(header.clone(), Value::Number(serde_json::Number::from_f64(n).unwrap_or(serde_json::Number::from(0))));
+            } else {
+                map.insert(header.clone(), Value::String(val.to_string()));
+            }
+        }
+        records.push(Value::Object(map));
+    }
+    records
+}
+
+fn parse_csv_line(line: &str) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if in_quotes {
+            if c == '"' {
+                if chars.peek() == Some(&'"') {
+                    current.push('"');
+                    chars.next();
+                } else {
+                    in_quotes = false;
+                }
+            } else {
+                current.push(c);
+            }
+        } else {
+            match c {
+                '"' => in_quotes = true,
+                ',' => {
+                    fields.push(current.trim().to_string());
+                    current = String::new();
+                }
+                _ => current.push(c),
+            }
+        }
+    }
+    fields.push(current.trim().to_string());
+    fields
+}
+
+/// Group records by a field value.
+pub fn group_by(records: &[Value], field: &str) -> Value {
+    let mut groups: serde_json::Map<String, Value> = serde_json::Map::new();
+    for record in records {
+        let key = record.get(field)
+            .map(|v| value_to_string(v))
+            .unwrap_or_else(|| "null".to_string());
+        let entry = groups.entry(key).or_insert_with(|| Value::Array(Vec::new()));
+        if let Value::Array(arr) = entry {
+            arr.push(record.clone());
+        }
+    }
+    Value::Object(groups)
+}
+
+/// Deduplicate records by entire record or by a specific field.
+pub fn unique(records: &[Value], field: Option<&str>) -> Vec<Value> {
+    let mut seen = std::collections::HashSet::new();
+    let mut result = Vec::new();
+    for record in records {
+        let key = match field {
+            Some(f) => record.get(f).map(|v| v.to_string()).unwrap_or_default(),
+            None => record.to_string(),
+        };
+        if seen.insert(key) {
+            result.push(record.clone());
+        }
+    }
+    result
+}
+
+/// Count the number of records.
+pub fn count(records: &[Value]) -> usize {
+    records.len()
+}
+
+/// Perform a math operation (sum, avg, min, max) on a numeric field.
+pub fn math_op(records: &[Value], op: &str, field: &str) -> Option<f64> {
+    let values: Vec<f64> = records.iter()
+        .filter_map(|r| r.get(field))
+        .filter_map(|v| v.as_f64().or_else(|| value_to_string(v).parse::<f64>().ok()))
+        .collect();
+    if values.is_empty() { return None; }
+    match op {
+        "sum" => Some(values.iter().sum()),
+        "avg" => Some(values.iter().sum::<f64>() / values.len() as f64),
+        "min" => values.iter().copied().reduce(f64::min),
+        "max" => values.iter().copied().reduce(f64::max),
+        _ => None,
+    }
+}
+
 /// Write JSON array to stdout.
 pub fn write_json_stdout(records: &[Value]) {
     let out = serde_json::to_string_pretty(records).unwrap_or_default();

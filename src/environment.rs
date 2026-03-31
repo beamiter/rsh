@@ -5,11 +5,29 @@ use std::path::PathBuf;
 use crate::job::JobTable;
 use crate::parser::ast::CompoundCommand;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, PartialEq)]
+pub enum EditingMode {
+    Emacs,
+    Vi,
+}
+
+#[derive(Debug, Clone)]
 pub struct ShellOpts {
     pub errexit: bool,  // set -e
     pub xtrace: bool,   // set -x
     pub pipefail: bool,  // set -o pipefail
+    pub globstar: bool,  // set -o globstar
+}
+
+impl Default for ShellOpts {
+    fn default() -> Self {
+        ShellOpts {
+            errexit: false,
+            xtrace: false,
+            pipefail: false,
+            globstar: true,
+        }
+    }
 }
 
 /// Hook lists for shell events.
@@ -61,6 +79,10 @@ pub struct ShellState {
     pub completion_specs: HashMap<String, CompletionSpec>,
     // Notification threshold (Phase 8)
     pub notification_threshold: std::time::Duration,
+    // Last command duration for rprompt
+    pub last_command_duration: Option<std::time::Duration>,
+    // Editing mode (vi or emacs)
+    pub editing_mode: EditingMode,
 }
 
 impl ShellState {
@@ -98,6 +120,8 @@ impl ShellState {
             hooks: ShellHooks::default(),
             completion_specs: HashMap::new(),
             notification_threshold: std::time::Duration::from_secs(10),
+            last_command_duration: None,
+            editing_mode: EditingMode::Emacs,
         }
     }
 

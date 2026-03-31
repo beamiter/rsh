@@ -131,4 +131,63 @@ impl History {
             .map(|s| s.as_str())
             .collect()
     }
+
+    /// Fuzzy search: find entries where all query chars appear in order.
+    /// Returns (entry, matched_indices, score) sorted by score descending.
+    pub fn search_fuzzy(&self, query: &str) -> Vec<(String, Vec<usize>)> {
+        if query.is_empty() { return Vec::new(); }
+        let query_lower: Vec<char> = query.to_lowercase().chars().collect();
+        let mut results: Vec<(String, Vec<usize>, i32)> = Vec::new();
+
+        for entry in self.entries.iter().rev() {
+            let entry_lower: Vec<char> = entry.to_lowercase().chars().collect();
+            if let Some((indices, score)) = fuzzy_match_score(&query_lower, &entry_lower) {
+                // Dedup: skip if we already have this exact entry
+                if !results.iter().any(|(e, _, _)| e == entry) {
+                    results.push((entry.clone(), indices, score));
+                }
+            }
+            if results.len() >= 20 { break; }
+        }
+
+        results.sort_by(|a, b| b.2.cmp(&a.2));
+        results.into_iter().map(|(e, idx, _)| (e, idx)).collect()
+    }
+}
+
+fn fuzzy_match_score(query: &[char], candidate: &[char]) -> Option<(Vec<usize>, i32)> {
+    let mut qi = 0;
+    let mut indices = Vec::new();
+    let mut score: i32 = 0;
+    let mut prev_match_idx: Option<usize> = None;
+
+    for (ci, &cc) in candidate.iter().enumerate() {
+        if qi < query.len() && cc == query[qi] {
+            indices.push(ci);
+            // Consecutive match bonus
+            if let Some(prev) = prev_match_idx {
+                if ci == prev + 1 {
+                    score += 5;
+                }
+            }
+            // Word boundary bonus
+            if ci == 0 || !candidate[ci - 1].is_alphanumeric() {
+                score += 3;
+            }
+            // Prefix bonus
+            if ci == qi {
+                score += 2;
+            }
+            prev_match_idx = Some(ci);
+            qi += 1;
+        }
+    }
+
+    if qi == query.len() {
+        // Shorter candidates score higher (more relevant)
+        score += (100i32).saturating_sub(candidate.len() as i32);
+        Some((indices, score))
+    } else {
+        None
+    }
 }

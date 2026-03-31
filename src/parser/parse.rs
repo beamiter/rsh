@@ -877,6 +877,50 @@ pub fn parse_word_parts(raw: &str) -> Word {
                     chars.next();
                 }
             }
+            '{' => {
+                // Try brace expansion: {a,b,c} or {1..10}
+                if !literal.is_empty() {
+                    parts.push(WordPart::Literal(std::mem::take(&mut literal)));
+                }
+                chars.next(); // consume '{'
+                let mut content = String::new();
+                let mut depth = 1;
+                let mut found_close = false;
+                let save = chars.clone();
+                while let Some(&c2) = chars.peek() {
+                    if c2 == '{' { depth += 1; }
+                    if c2 == '}' {
+                        depth -= 1;
+                        if depth == 0 { chars.next(); found_close = true; break; }
+                    }
+                    content.push(c2);
+                    chars.next();
+                }
+                if !found_close {
+                    // No closing brace - treat as literal
+                    literal.push('{');
+                    literal.push_str(&content);
+                    chars = save;
+                    // Consume all characters we already consumed from save
+                    for _ in 0..content.len() { chars.next(); }
+                    continue;
+                }
+                // Check if it's a range: start..end[..step]
+                if let Some(range) = parse_brace_range(&content) {
+                    parts.push(range);
+                } else if content.contains(',') {
+                    // Comma-separated brace expansion: {a,b,c}
+                    let items: Vec<Vec<WordPart>> = content.split(',')
+                        .map(|s| parse_word_parts(s))
+                        .collect();
+                    parts.push(WordPart::BraceExpansion(items));
+                } else {
+                    // Not a valid brace expansion - treat as literal
+                    literal.push('{');
+                    literal.push_str(&content);
+                    literal.push('}');
+                }
+            }
             _ => {
                 literal.push(c);
                 chars.next();
@@ -958,4 +1002,23 @@ fn parse_word_parts_inner(input: &str) -> Vec<WordPart> {
         parts.push(WordPart::Literal(literal));
     }
     parts
+}
+
+fn parse_brace_range(content: &str) -> Option<WordPart> {
+    let parts: Vec<&str> = content.split("..").collect();
+    if parts.len() == 2 {
+        Some(WordPart::BraceRange {
+            start: parts[0].to_string(),
+            end: parts[1].to_string(),
+            step: None,
+        })
+    } else if parts.len() == 3 {
+        Some(WordPart::BraceRange {
+            start: parts[0].to_string(),
+            end: parts[1].to_string(),
+            step: Some(parts[2].to_string()),
+        })
+    } else {
+        None
+    }
 }

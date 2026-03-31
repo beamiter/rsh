@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+pub mod bookmarks;
 pub mod builtins;
 pub mod completer;
 pub mod config;

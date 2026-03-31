@@ -10,6 +10,7 @@ pub enum WordPart {
     Glob(String),
     Tilde(String),
     BraceExpansion(Vec<Vec<WordPart>>),
+    BraceRange { start: String, end: String, step: Option<String> },
     Arithmetic(String),
     ProcessSub(String, ProcessSubKind),
 }

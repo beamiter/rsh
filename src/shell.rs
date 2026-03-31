@@ -211,6 +211,7 @@ impl Shell {
                     hooks::run_hooks(&preexec, &mut self.state);
 
                     // Parse and execute
+                    let cmd_start = std::time::Instant::now();
                     match parser::parse(&line) {
                         Ok(commands) => {
                             for cmd in &commands {
@@ -226,6 +227,7 @@ impl Shell {
                             self.state.last_exit_code = 2;
                         }
                     }
+                    self.state.last_command_duration = Some(cmd_start.elapsed());
                 }
                 Ok(None) => {
                     break;
