@@ -398,7 +398,7 @@ fn expand_tilde(user: &str, state: &mut ShellState) -> String {
 
 fn expand_command_sub(cmd: &str, state: &mut crate::environment::ShellState) -> String {
     use nix::unistd::{close, fork, pipe, read, ForkResult};
-    use std::os::unix::io::IntoRawFd;
+    use std::os::unix::io::{IntoRawFd, BorrowedFd};
 
     let (r, w) = match pipe() {
         Ok(fds) => (fds.0.into_raw_fd(), fds.1.into_raw_fd()),
@@ -408,7 +408,7 @@ fn expand_command_sub(cmd: &str, state: &mut crate::environment::ShellState) -> 
     match unsafe { fork() } {
         Ok(ForkResult::Child) => {
             close(r).ok();
-            nix::unistd::dup2(w, 1).ok();
+            unsafe { nix::libc::dup2(w, 1); }
             close(w).ok();
 
             state.interactive = false;
@@ -428,7 +428,8 @@ fn expand_command_sub(cmd: &str, state: &mut crate::environment::ShellState) -> 
             let mut output = Vec::new();
             let mut buf = [0u8; 4096];
             loop {
-                match read(r, &mut buf) {
+                // Safe because r is a valid file descriptor
+                match unsafe { read(BorrowedFd::borrow_raw(r), &mut buf) } {
                     Ok(0) | Err(_) => break,
                     Ok(n) => output.extend_from_slice(&buf[..n]),
                 }
@@ -464,13 +465,13 @@ fn expand_process_sub(cmd: &str, kind: &ProcessSubKind, state: &mut ShellState) 
                 ProcessSubKind::Input => {
                     // <(cmd): child writes to pipe, parent reads from /dev/fd/N
                     close(r).ok();
-                    nix::unistd::dup2(w, 1).ok();
+                    unsafe { nix::libc::dup2(w, 1); }
                     close(w).ok();
                 }
                 ProcessSubKind::Output => {
                     // >(cmd): child reads from pipe, parent writes to /dev/fd/N
                     close(w).ok();
-                    nix::unistd::dup2(r, 0).ok();
+                    unsafe { nix::libc::dup2(r, 0); }
                     close(r).ok();
                 }
             }

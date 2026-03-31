@@ -7,10 +7,10 @@ use crate::parser::ast::*;
 use crate::signal;
 
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
-use nix::unistd::{close, dup2, execvp, fork, pipe, setpgid, tcsetpgrp, ForkResult, Pid};
+use nix::unistd::{close, execvp, fork, pipe, setpgid, tcsetpgrp, ForkResult, Pid};
 use std::ffi::CString;
 use std::fs::{File, OpenOptions};
-use std::os::unix::io::{IntoRawFd, RawFd};
+use std::os::unix::io::{IntoRawFd, RawFd, AsRawFd, OwnedFd, BorrowedFd};
 
 /// Give terminal foreground to `pgrp`, then wait for the process, then reclaim
 /// the terminal for the shell's own process group.
@@ -130,11 +130,11 @@ fn execute_pipeline(pipeline: &Pipeline, state: &mut ShellState) -> i32 {
                 setpgid(my_pid, target_pgid).ok();
 
                 if let Some(fd) = prev_read_fd {
-                    dup2(fd, 0).ok();
+                    dup2_raw(fd, 0).ok();
                     close(fd).ok();
                 }
                 if let Some(fd) = write_fd {
-                    dup2(fd, 1).ok();
+                    dup2_raw(fd, 1).ok();
                     close(fd).ok();
                 }
                 if let Some(fd) = read_fd {
@@ -474,7 +474,17 @@ fn match_pattern(value: &str, pattern: &str) -> bool {
 
 struct SavedFd {
     original_fd: RawFd,
-    saved_fd: RawFd,
+    saved_fd: OwnedFd,
+}
+
+/// Helper to call dup2 with raw file descriptors
+fn dup2_raw(oldfd: RawFd, newfd: RawFd) -> nix::Result<()> {
+    unsafe {
+        match nix::libc::dup2(oldfd, newfd) {
+            -1 => Err(nix::Error::last()),
+            _ => Ok(()),
+        }
+    }
 }
 
 fn apply_one_redirect(kind: &RedirectKind, fd: RawFd, target_str: &str) {
@@ -482,21 +492,21 @@ fn apply_one_redirect(kind: &RedirectKind, fd: RawFd, target_str: &str) {
         RedirectKind::Output => {
             if let Ok(file) = File::create(target_str) {
                 let src = file.into_raw_fd();
-                dup2(src, fd).ok();
+                dup2_raw(src, fd).ok();
                 if src != fd { close(src).ok(); }
             }
         }
         RedirectKind::Append => {
             if let Ok(file) = OpenOptions::new().create(true).append(true).open(target_str) {
                 let src = file.into_raw_fd();
-                dup2(src, fd).ok();
+                dup2_raw(src, fd).ok();
                 if src != fd { close(src).ok(); }
             }
         }
         RedirectKind::Input => {
             if let Ok(file) = File::open(target_str) {
                 let src = file.into_raw_fd();
-                dup2(src, fd).ok();
+                dup2_raw(src, fd).ok();
                 if src != fd { close(src).ok(); }
             }
         }
@@ -507,12 +517,12 @@ fn apply_one_redirect(kind: &RedirectKind, fd: RawFd, target_str: &str) {
             let data = format!("{}\n", target_str);
             unsafe { nix::libc::write(w_fd, data.as_ptr() as *const _, data.len()); }
             close(w_fd).ok();
-            dup2(r_fd, fd).ok();
+            dup2_raw(r_fd, fd).ok();
             close(r_fd).ok();
         }
         RedirectKind::DupOutput => {
             if let Ok(target_fd) = target_str.parse::<RawFd>() {
-                dup2(target_fd, fd).ok();
+                dup2_raw(target_fd, fd).ok();
             }
         }
         _ => {}
@@ -533,8 +543,11 @@ fn setup_redirects(redirects: &[Redirect], state: &mut ShellState) -> Vec<SavedF
         let target_str = expand_word_to_string(&redir.target, state);
         let fd = redirect_fd(redir);
 
-        if let Ok(sfd) = nix::unistd::dup(fd) {
-            saved.push(SavedFd { original_fd: fd, saved_fd: sfd });
+        // Safe because fd is a valid file descriptor at this point
+        unsafe {
+            if let Ok(sfd) = nix::unistd::dup(BorrowedFd::borrow_raw(fd)) {
+                saved.push(SavedFd { original_fd: fd, saved_fd: sfd });
+            }
         }
 
         apply_one_redirect(&redir.kind, fd, &target_str);
@@ -544,8 +557,8 @@ fn setup_redirects(redirects: &[Redirect], state: &mut ShellState) -> Vec<SavedF
 
 fn restore_fds(saved: Vec<SavedFd>) {
     for s in saved.into_iter().rev() {
-        dup2(s.saved_fd, s.original_fd).ok();
-        close(s.saved_fd).ok();
+        dup2_raw(s.saved_fd.as_raw_fd(), s.original_fd).ok();
+        // OwnedFd will be dropped here and close the fd
     }
 }
 
