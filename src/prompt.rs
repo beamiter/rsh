@@ -1,10 +1,38 @@
 /// Prompt rendering with colors, git branch, exit code.
 
-use crate::environment::ShellState;
+use crate::environment::{ShellState, PromptStyle};
 use crossterm::style::{Color, Stylize};
 use std::env;
 
 pub fn render_prompt(state: &ShellState) -> String {
+    // Determine effective style
+    let style = match state.prompt_style {
+        PromptStyle::Auto => {
+            // Auto-select based on terminal width
+            // If terminal < 60 cols, use minimal
+            // If terminal < 100 cols, use compact
+            // Otherwise use full
+            if state.terminal_width < 60 {
+                PromptStyle::Minimal
+            } else if state.terminal_width < 100 {
+                PromptStyle::Compact
+            } else {
+                PromptStyle::Full
+            }
+        }
+        other => other,
+    };
+
+    match style {
+        PromptStyle::Full => render_prompt_full(state),
+        PromptStyle::Compact => render_prompt_compact(state),
+        PromptStyle::Minimal => render_prompt_minimal(state),
+        PromptStyle::Auto => unreachable!(), // Already resolved above
+    }
+}
+
+/// Full prompt: user@host ~/path (branch) took duration ❯
+fn render_prompt_full(state: &ShellState) -> String {
     let user = env::var("USER").unwrap_or_else(|_| String::from("user"));
     let hostname = &state.hostname;
     let cwd = get_short_cwd(state);
@@ -46,6 +74,63 @@ pub fn render_prompt(state: &ShellState) -> String {
 
     prompt
 }
+
+/// Compact prompt: user ~/path (branch) ❯
+fn render_prompt_compact(state: &ShellState) -> String {
+    let user = env::var("USER").unwrap_or_else(|_| String::from("user"));
+    let cwd = get_short_cwd(state);
+    let git_branch = get_git_branch();
+    let exit_indicator = if state.last_exit_code == 0 {
+        "❯".green().bold().to_string()
+    } else {
+        "❯".red().bold().to_string()
+    };
+
+    let mut prompt = String::new();
+
+    // User only (no hostname)
+    prompt.push_str(&format!("{}", user
+        .with(Color::Rgb { r: 0, g: 210, b: 210 }).bold()));
+    prompt.push(' ');
+
+    // CWD
+    prompt.push_str(&format!("{}", cwd
+        .with(Color::Rgb { r: 80, g: 255, b: 120 }).bold()));
+
+    // Git branch in magenta
+    if let Some(branch) = &git_branch {
+        prompt.push_str(&format!(" {}", format!("({})", branch).magenta()));
+    }
+
+    prompt.push(' ');
+    prompt.push_str(&exit_indicator);
+    prompt.push(' ');
+
+    prompt
+}
+
+/// Minimal prompt: ~/path ❯
+fn render_prompt_minimal(state: &ShellState) -> String {
+    let cwd = get_short_cwd(state);
+    let exit_indicator = if state.last_exit_code == 0 {
+        "❯".green().bold().to_string()
+    } else {
+        "❯".red().bold().to_string()
+    };
+
+    let mut prompt = String::new();
+
+    // CWD only
+    prompt.push_str(&format!("{}", cwd
+        .with(Color::Rgb { r: 80, g: 255, b: 120 }).bold()));
+
+    prompt.push(' ');
+    prompt.push_str(&exit_indicator);
+    prompt.push(' ');
+
+    prompt
+}
+
 
 fn get_short_cwd(state: &ShellState) -> String {
     let cwd = env::current_dir()

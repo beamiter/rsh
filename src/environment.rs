@@ -11,6 +11,20 @@ pub enum EditingMode {
     Vi,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptStyle {
+    Full,     // user@host ~/path (branch) took duration ❯
+    Compact,  // user ~/path (branch) ❯
+    Minimal,  // ~/path ❯
+    Auto,     // Automatically choose based on terminal width
+}
+
+impl Default for PromptStyle {
+    fn default() -> Self {
+        PromptStyle::Auto
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ShellOpts {
     pub errexit: bool,  // set -e
@@ -83,6 +97,9 @@ pub struct ShellState {
     pub last_command_duration: Option<std::time::Duration>,
     // Editing mode (vi or emacs)
     pub editing_mode: EditingMode,
+    // Prompt style and terminal width
+    pub prompt_style: PromptStyle,
+    pub terminal_width: usize,
 }
 
 impl ShellState {
@@ -122,6 +139,8 @@ impl ShellState {
             notification_threshold: std::time::Duration::from_secs(10),
             last_command_duration: None,
             editing_mode: EditingMode::Emacs,
+            prompt_style: PromptStyle::Auto,
+            terminal_width: Self::detect_terminal_width(),
         }
     }
 
@@ -134,6 +153,37 @@ impl ShellState {
             .or_else(|| self.env_vars.get(name))
             .map(|s| s.as_str())
     }
+
+    fn detect_terminal_width() -> usize {
+        // Try COLUMNS environment variable first
+        if let Ok(cols_str) = env::var("COLUMNS") {
+            if let Ok(cols) = cols_str.parse::<usize>() {
+                if cols > 0 {
+                    return cols;
+                }
+            }
+        }
+
+        // Try stty size
+        if let Ok(output) = std::process::Command::new("stty")
+            .arg("size")
+            .output() {
+            if let Ok(output_str) = String::from_utf8(output.stdout) {
+                let parts: Vec<&str> = output_str.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    if let Ok(cols) = parts[1].parse::<usize>() {
+                        if cols > 0 {
+                            return cols;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Default fallback
+        80
+    }
+
 
     pub fn set_var(&mut self, name: &str, value: &str) {
         if self.env_vars.contains_key(name) {
