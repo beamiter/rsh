@@ -27,10 +27,21 @@ impl Default for PromptStyle {
 
 #[derive(Debug, Clone)]
 pub struct ShellOpts {
-    pub errexit: bool,  // set -e
-    pub xtrace: bool,   // set -x
-    pub pipefail: bool,  // set -o pipefail
-    pub globstar: bool,  // set -o globstar
+    pub errexit: bool,        // set -e
+    pub xtrace: bool,         // set -x
+    pub pipefail: bool,       // set -o pipefail
+    pub globstar: bool,       // set -o globstar
+    pub dotglob: bool,        // shopt dotglob: match hidden files
+    pub nullglob: bool,       // shopt nullglob: empty string for no matches
+    pub failglob: bool,       // shopt failglob: error on no matches
+    pub extglob: bool,        // shopt extglob: extended glob patterns
+    pub nocaseglob: bool,     // shopt nocaseglob: case-insensitive matching
+    pub noglob: bool,         // shopt noglob: disable pathname expansion
+    pub lastpipe: bool,       // shopt lastpipe: last pipe component in current shell
+    pub autocd: bool,         // shopt autocd: cd to bare directory names
+    pub cdspell: bool,        // shopt cdspell: correct cd spelling errors
+    pub checkwinsize: bool,   // shopt checkwinsize: update LINES/COLUMNS
+    pub inherit_errexit: bool,// shopt inherit_errexit: subshells inherit errexit
 }
 
 impl Default for ShellOpts {
@@ -40,6 +51,17 @@ impl Default for ShellOpts {
             xtrace: false,
             pipefail: false,
             globstar: true,
+            dotglob: false,
+            nullglob: false,
+            failglob: false,
+            extglob: false,
+            nocaseglob: false,
+            noglob: false,
+            lastpipe: false,
+            autocd: false,
+            cdspell: false,
+            checkwinsize: false,
+            inherit_errexit: false,
         }
     }
 }

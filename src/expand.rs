@@ -43,15 +43,37 @@ pub fn expand_word(word: &Word, state: &mut ShellState) -> Vec<String> {
     let expanded = expand_word_to_string(word, state);
 
     // Glob expansion
-    if contains_glob(&expanded) {
+    if contains_glob(&expanded) && !state.shell_opts.noglob {
         match glob::glob(&expanded) {
             Ok(paths) => {
                 let mut results: Vec<String> = paths
                     .filter_map(|p| p.ok())
                     .map(|p| p.to_string_lossy().to_string())
                     .collect();
+
+                // Apply dotglob filtering: remove hidden files if dotglob is off and pattern doesn't explicitly match them
+                if !state.shell_opts.dotglob && !pattern_explicitly_includes_dot(&expanded) {
+                    results.retain(|path| {
+                        let filename = std::path::Path::new(path)
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("");
+                        !filename.starts_with('.')
+                    });
+                }
+
                 if results.is_empty() {
-                    vec![expanded] // No matches: return pattern as-is
+                    // No matches
+                    if state.shell_opts.nullglob {
+                        // nullglob: return empty, don't expand to pattern
+                        vec![]
+                    } else if state.shell_opts.failglob {
+                        // failglob: would error, but for now just return pattern
+                        vec![expanded]
+                    } else {
+                        // Default: return pattern as-is
+                        vec![expanded]
+                    }
                 } else {
                     results.sort();
                     results
@@ -696,6 +718,41 @@ fn contains_glob(s: &str) -> bool {
             '"' if !in_single => in_double = !in_double,
             '*' | '?' | '[' if !in_single && !in_double => return true,
             _ => {}
+        }
+    }
+    false
+}
+
+/// Check if a glob pattern explicitly includes a dot (meaning it will match hidden files).
+/// Examples:
+/// - "*" -> false (doesn't explicitly match hidden files)
+/// - ".*" -> true (explicitly matches hidden files)
+/// - "./*" -> true (explicitly includes hidden files)
+/// - "*.txt" -> false
+/// - ".*.txt" -> true
+fn pattern_explicitly_includes_dot(pattern: &str) -> bool {
+    let mut escaped = false;
+    let mut in_single = false;
+    let mut in_double = false;
+
+    for c in pattern.chars() {
+        if escaped { escaped = false; continue; }
+        match c {
+            '\\' => escaped = true,
+            '\'' if !in_double => {
+                in_single = !in_single;
+                continue;
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+                continue;
+            }
+            _ => {}
+        }
+
+        if !in_single && !in_double && c == '.' {
+            // Found an explicit dot not in quotes
+            return true;
         }
     }
     false

@@ -11,7 +11,7 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "true", "false", "test", "[", "return", "break", "continue",
     "shift", "set", "local", "jobs", "fg", "bg", "history", "help",
     "pushd", "popd", "dirs", "trap", "command", "builtin", "[[",
-    "declare", "z", "hook", "complete", "compgen", "disown",
+    "declare", "z", "hook", "complete", "compgen", "disown", "shopt",
     "from-json", "to-json", "to-table", "where", "sort-by", "select",
     "bookmark", "from-csv", "group-by", "unique", "count", "math",
 ];
@@ -104,6 +104,7 @@ pub fn run_builtin(name: &str, args: &[String], state: &mut ShellState) -> i32 {
         "complete" => builtin_complete(args, state),
         "compgen" => builtin_compgen(args, state),
         "disown" => builtin_disown(args, state),
+        "shopt" => builtin_shopt(args, state),
         "from-json" => builtin_from_json(),
         "to-json" => builtin_to_json(),
         "to-table" => builtin_to_table(),
@@ -362,7 +363,27 @@ fn builtin_source(args: &[String], state: &mut ShellState) -> i32 {
         return 1;
     }
     let path = &args[0];
-    match std::fs::read_to_string(path) {
+
+    // Try to find the file
+    let resolved_path = if Path::new(path).is_file() {
+        // File exists at given path
+        path.to_string()
+    } else if !path.contains('/') {
+        // No slashes in path, try $PATH search
+        match find_in_path(path) {
+            Some(found) => found,
+            None => {
+                eprintln!("rsh: source: {}: No such file or directory", path);
+                return 1;
+            }
+        }
+    } else {
+        // Absolute or relative path doesn't exist
+        eprintln!("rsh: source: {}: No such file or directory", path);
+        return 1;
+    };
+
+    match std::fs::read_to_string(&resolved_path) {
         Ok(content) => {
             match parser::parse(&content) {
                 Ok(commands) => {
@@ -373,13 +394,13 @@ fn builtin_source(args: &[String], state: &mut ShellState) -> i32 {
                     last
                 }
                 Err(e) => {
-                    eprintln!("rsh: source: {}: {}", path, e);
+                    eprintln!("rsh: source: {}: parse error: {}", resolved_path, e);
                     1
                 }
             }
         }
         Err(e) => {
-            eprintln!("rsh: source: {}: {}", path, e);
+            eprintln!("rsh: source: {}: {}", resolved_path, e);
             1
         }
     }
@@ -1167,6 +1188,152 @@ fn builtin_disown(args: &[String], state: &mut ShellState) -> i32 {
         None => {
             eprintln!("rsh: disown: {}: no such job", args[0]);
             1
+        }
+    }
+}
+
+// ============================================================
+// shopt (shell options)
+// ============================================================
+
+fn builtin_shopt(args: &[String], state: &mut ShellState) -> i32 {
+    // shopt [-psuE] [optname ...]
+    // -p: print all options (default when no args)
+    // -s: set option
+    // -u: unset option
+
+    if args.is_empty() {
+        // Print all options
+        print_shopt_options(&state.shell_opts);
+        return 0;
+    }
+
+    let mut setting = None;
+    let mut print_all = false;
+    let mut opts = Vec::new();
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "-s" => setting = Some(true),
+            "-u" => setting = Some(false),
+            "-p" => print_all = true,
+            s if s.starts_with('-') => {
+                // Unknown option, treat as option name (for compat)
+                opts.push(s[1..].to_string());
+            }
+            _ => opts.push(args[i].clone()),
+        }
+        i += 1;
+    }
+
+    if print_all {
+        print_shopt_options(&state.shell_opts);
+        return 0;
+    }
+
+    if opts.is_empty() {
+        // No options specified, print all
+        print_shopt_options(&state.shell_opts);
+        return 0;
+    }
+
+    let mut exit_code = 0;
+    for opt in opts {
+        match setting {
+            Some(true) => {
+                // Set option
+                match opt.as_str() {
+                    "dotglob" => state.shell_opts.dotglob = true,
+                    "nullglob" => state.shell_opts.nullglob = true,
+                    "failglob" => state.shell_opts.failglob = true,
+                    "extglob" => state.shell_opts.extglob = true,
+                    "nocaseglob" => state.shell_opts.nocaseglob = true,
+                    "noglob" => state.shell_opts.noglob = true,
+                    "lastpipe" => state.shell_opts.lastpipe = true,
+                    "autocd" => state.shell_opts.autocd = true,
+                    "cdspell" => state.shell_opts.cdspell = true,
+                    "checkwinsize" => state.shell_opts.checkwinsize = true,
+                    "inherit_errexit" => state.shell_opts.inherit_errexit = true,
+                    _ => {
+                        eprintln!("rsh: shopt: {}: invalid option name", opt);
+                        exit_code = 1;
+                    }
+                }
+            }
+            Some(false) => {
+                // Unset option
+                match opt.as_str() {
+                    "dotglob" => state.shell_opts.dotglob = false,
+                    "nullglob" => state.shell_opts.nullglob = false,
+                    "failglob" => state.shell_opts.failglob = false,
+                    "extglob" => state.shell_opts.extglob = false,
+                    "nocaseglob" => state.shell_opts.nocaseglob = false,
+                    "noglob" => state.shell_opts.noglob = false,
+                    "lastpipe" => state.shell_opts.lastpipe = false,
+                    "autocd" => state.shell_opts.autocd = false,
+                    "cdspell" => state.shell_opts.cdspell = false,
+                    "checkwinsize" => state.shell_opts.checkwinsize = false,
+                    "inherit_errexit" => state.shell_opts.inherit_errexit = false,
+                    _ => {
+                        eprintln!("rsh: shopt: {}: invalid option name", opt);
+                        exit_code = 1;
+                    }
+                }
+            }
+            None => {
+                // No -s or -u specified, just report status
+                let value = match opt.as_str() {
+                    "dotglob" => Some(state.shell_opts.dotglob),
+                    "nullglob" => Some(state.shell_opts.nullglob),
+                    "failglob" => Some(state.shell_opts.failglob),
+                    "extglob" => Some(state.shell_opts.extglob),
+                    "nocaseglob" => Some(state.shell_opts.nocaseglob),
+                    "noglob" => Some(state.shell_opts.noglob),
+                    "lastpipe" => Some(state.shell_opts.lastpipe),
+                    "autocd" => Some(state.shell_opts.autocd),
+                    "cdspell" => Some(state.shell_opts.cdspell),
+                    "checkwinsize" => Some(state.shell_opts.checkwinsize),
+                    "inherit_errexit" => Some(state.shell_opts.inherit_errexit),
+                    _ => None,
+                };
+
+                match value {
+                    Some(true) => println!("{}\ton", opt),
+                    Some(false) => println!("{}\toff", opt),
+                    None => {
+                        eprintln!("rsh: shopt: {}: invalid option name", opt);
+                        exit_code = 1;
+                    }
+                }
+            }
+        }
+    }
+
+    exit_code
+}
+
+fn print_shopt_options(opts: &crate::environment::ShellOpts) {
+    // Print all options and their status (like bash)
+    let options = vec![
+        ("autocd", opts.autocd),
+        ("cdspell", opts.cdspell),
+        ("checkwinsize", opts.checkwinsize),
+        ("dotglob", opts.dotglob),
+        ("extglob", opts.extglob),
+        ("failglob", opts.failglob),
+        ("inherit_errexit", opts.inherit_errexit),
+        ("lastpipe", opts.lastpipe),
+        ("nocaseglob", opts.nocaseglob),
+        ("noglob", opts.noglob),
+        ("nullglob", opts.nullglob),
+    ];
+
+    for (name, value) in options {
+        if value {
+            println!("{}\ton", name);
+        } else {
+            println!("{}\toff", name);
         }
     }
 }
