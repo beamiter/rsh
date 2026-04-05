@@ -42,8 +42,14 @@ pub fn expand_word(word: &Word, state: &mut ShellState) -> Vec<String> {
 
     let expanded = expand_word_to_string(word, state);
 
-    // Glob expansion
-    if contains_glob(&expanded) && !state.shell_opts.noglob {
+    // Check for extglob patterns
+    let has_extglob = state.shell_opts.extglob && crate::glob_match::contains_extglob(&expanded);
+
+    if has_extglob {
+        // Handle extglob patterns
+        expand_with_extglob(&expanded, state)
+    } else if contains_glob(&expanded) && !state.shell_opts.noglob {
+        // Handle regular glob patterns
         match glob::glob(&expanded) {
             Ok(paths) => {
                 let mut results: Vec<String> = paths
@@ -756,6 +762,94 @@ fn pattern_explicitly_includes_dot(pattern: &str) -> bool {
         }
     }
     false
+}
+
+/// Handle extglob pattern expansion by directory traversal
+fn expand_with_extglob(pattern: &str, state: &ShellState) -> Vec<String> {
+    use std::fs;
+
+    // Split pattern into directory and file pattern parts
+    let (dir_path, file_pattern) = split_pattern_dir(pattern);
+
+    // Get the directory to search
+    let search_dir = if dir_path.is_empty() || dir_path == "." {
+        std::env::current_dir().unwrap_or_default()
+    } else {
+        let expanded_dir = if dir_path.starts_with('~') {
+            dirs::home_dir()
+                .unwrap_or_default()
+                .join(&dir_path[1..])
+        } else {
+            std::path::PathBuf::from(dir_path)
+        };
+        expanded_dir
+    };
+
+    let mut results = Vec::new();
+
+    if let Ok(entries) = fs::read_dir(&search_dir) {
+        for entry in entries.flatten() {
+            if let Ok(path) = entry.path().canonicalize() {
+                if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
+                    // Apply dotglob filtering
+                    if !state.shell_opts.dotglob && filename.starts_with('.') {
+                        continue;
+                    }
+
+                    // Apply extglob matching
+                    if crate::glob_match::extglob_match(&file_pattern, filename) {
+                        results.push(path.to_string_lossy().to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    if results.is_empty() {
+        if state.shell_opts.nullglob {
+            vec![]
+        } else {
+            vec![pattern.to_string()]
+        }
+    } else {
+        results.sort();
+        results
+    }
+}
+
+/// Split a glob pattern into directory and filename pattern
+fn split_pattern_dir(pattern: &str) -> (String, String) {
+    // Find the last '/' that is part of the literal path (not in glob syntax)
+    let mut last_slash = None;
+    let mut in_extglob = false;
+    let mut paren_depth = 0;
+
+    for (i, c) in pattern.chars().enumerate() {
+        match c {
+            '(' if i > 0 && matches!(pattern.chars().nth(i.saturating_sub(1)), Some('!' | '?' | '*' | '+' | '@')) => {
+                in_extglob = true;
+                paren_depth += 1;
+            }
+            ')' if in_extglob => {
+                paren_depth -= 1;
+                if paren_depth == 0 {
+                    in_extglob = false;
+                }
+            }
+            '/' if !in_extglob && paren_depth == 0 => {
+                last_slash = Some(i);
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(pos) = last_slash {
+        let dir = pattern[..pos].to_string();
+        let file = pattern[pos + 1..].to_string();
+        (if dir.is_empty() { ".".to_string() } else { dir }, file)
+    } else {
+        (".".to_string(), pattern.to_string())
+    }
 }
 
 /// Expand all words in a command, performing word splitting on the results.
