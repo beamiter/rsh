@@ -387,15 +387,38 @@ fn builtin_source(args: &[String], state: &mut ShellState) -> i32 {
         Ok(content) => {
             match parser::parse(&content) {
                 Ok(commands) => {
+                    // Full parse succeeded, execute all commands
                     let mut last = 0;
                     for cmd in &commands {
                         last = crate::executor::execute_complete_command(cmd, state);
                     }
                     last
                 }
-                Err(e) => {
-                    eprintln!("rsh: source: {}: parse error: {}", resolved_path, e);
-                    1
+                Err(_) => {
+                    // Full parse failed, try parsing line by line for bash compatibility
+                    let mut last = 0;
+                    for line in content.lines() {
+                        let trimmed = line.trim();
+
+                        // Skip empty lines and comments
+                        if trimmed.is_empty() || trimmed.starts_with('#') {
+                            continue;
+                        }
+
+                        // Try to parse this line
+                        match parser::parse(trimmed) {
+                            Ok(commands) => {
+                                for cmd in &commands {
+                                    last = crate::executor::execute_complete_command(cmd, state);
+                                }
+                            }
+                            Err(_) => {
+                                // Silently skip unparseable lines
+                                // This allows sourcing bash-specific files
+                            }
+                        }
+                    }
+                    last
                 }
             }
         }
