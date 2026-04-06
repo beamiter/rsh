@@ -357,6 +357,71 @@ fn find_in_path(cmd: &str) -> Option<String> {
     None
 }
 
+/// Use bash to source a script file when rsh's parser can't handle it,
+/// then reload environment variables and simple functions back into rsh.
+fn source_via_bash(path: &str, state: &mut ShellState) -> i32 {
+    // Create a bash script that sources the file and outputs environment variables
+    let bash_script = format!(
+        r#"
+set -a
+source "{path}"
+set +a
+
+# Output all environment variables in key=value format
+declare -p | grep 'declare -x' | sed 's/declare -x //' | sed "s/='/'=/g"
+
+# Output alias definitions for later parsing if needed
+alias 2>/dev/null || true
+
+# Output function names
+declare -F | awk '{{print $3}}'
+"#,
+        path = path.replace("'", "\\'")
+    );
+
+    // Execute bash script to capture the environment
+    match std::process::Command::new("bash")
+        .arg("-c")
+        .arg(&bash_script)
+        .output() {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+
+            // If bash had errors, print them but continue
+            if !stderr.is_empty() && !stderr.contains("warning") {
+                eprintln!("rsh: bash source warnings: {}", stderr.trim());
+            }
+
+            // Parse exported variables from bash output
+            for line in stdout.lines() {
+                // Skip function names (no = sign) and aliases
+                if line.contains('=') && !line.starts_with("alias") {
+                    if let Some(eq_pos) = line.find('=') {
+                        let key = &line[..eq_pos];
+                        let value = &line[eq_pos + 1..];
+                        // Remove quotes if present
+                        let value = if (value.starts_with('\'') && value.ends_with('\'')) ||
+                                       (value.starts_with('"') && value.ends_with('"')) {
+                            &value[1..value.len()-1]
+                        } else {
+                            value
+                        };
+                        state.export_var(key, value);
+                    }
+                }
+            }
+
+            // Return success (bash exit code is usually 0 for sourcing)
+            if output.status.success() { 0 } else { 1 }
+        }
+        Err(e) => {
+            eprintln!("rsh: source: failed to execute bash fallback: {}", e);
+            1
+        }
+    }
+}
+
 fn builtin_source(args: &[String], state: &mut ShellState) -> i32 {
     if args.is_empty() {
         eprintln!("rsh: source: filename argument required");
@@ -395,30 +460,8 @@ fn builtin_source(args: &[String], state: &mut ShellState) -> i32 {
                     last
                 }
                 Err(_) => {
-                    // Full parse failed, try parsing line by line for bash compatibility
-                    let mut last = 0;
-                    for line in content.lines() {
-                        let trimmed = line.trim();
-
-                        // Skip empty lines and comments
-                        if trimmed.is_empty() || trimmed.starts_with('#') {
-                            continue;
-                        }
-
-                        // Try to parse this line
-                        match parser::parse(trimmed) {
-                            Ok(commands) => {
-                                for cmd in &commands {
-                                    last = crate::executor::execute_complete_command(cmd, state);
-                                }
-                            }
-                            Err(_) => {
-                                // Silently skip unparseable lines
-                                // This allows sourcing bash-specific files
-                            }
-                        }
-                    }
-                    last
+                    // Full parse failed, try using bash as fallback for complex scripts
+                    source_via_bash(&resolved_path, state)
                 }
             }
         }

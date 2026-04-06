@@ -13,7 +13,7 @@ pub fn load_config(state: &mut ShellState) {
     }
 }
 
-/// Load bash file with lenient error handling - skip unparseable lines
+/// Load bash file with lenient error handling - use bash as fallback for complex scripts
 fn source_file_lenient(path: &PathBuf, state: &mut ShellState) {
     match std::fs::read_to_string(path) {
         Ok(content) => {
@@ -26,33 +26,55 @@ fn source_file_lenient(path: &PathBuf, state: &mut ShellState) {
                     }
                 }
                 Err(_) => {
-                    // Full parse failed, try parsing line by line
-                    eprintln!("rsh: {} has some unsupported bash syntax, loading available parts...", path.display());
-                    for (_line_no, line) in content.lines().enumerate() {
-                        let trimmed = line.trim();
-
-                        // Skip empty lines and comments
-                        if trimmed.is_empty() || trimmed.starts_with('#') {
-                            continue;
-                        }
-
-                        // Try to parse this line
-                        match parser::parse(trimmed) {
-                            Ok(commands) => {
-                                for cmd in &commands {
-                                    executor::execute_complete_command(cmd, state);
-                                }
-                            }
-                            Err(_) => {
-                                // Silently skip unparseable lines
-                                // eprintln!("rsh: {} line {}: skipped due to syntax", path.display(), line_no + 1);
-                            }
-                        }
-                    }
+                    // Full parse failed, use bash as fallback for complex scripts
+                    source_via_bash_fallback(path, state);
                 }
             }
         }
         Err(_) => {} // Silent if can't read
+    }
+}
+
+/// Use bash to source a script file and reload environment variables
+fn source_via_bash_fallback(path: &PathBuf, state: &mut ShellState) {
+    let path_str = path.to_string_lossy().to_string();
+    let bash_script = format!(
+        r#"
+set -a
+source "{path}"
+set +a
+
+# Output all environment variables in key=value format
+declare -p | grep 'declare -x' | sed 's/declare -x //' | sed "s/='/'=/g"
+"#,
+        path = path_str.replace("'", "\\'")
+    );
+
+    // Execute bash script to capture the environment
+    if let Ok(output) = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(&bash_script)
+        .output() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+
+        // Parse exported variables from bash output
+        for line in stdout.lines() {
+            // Skip function names (no = sign)
+            if line.contains('=') {
+                if let Some(eq_pos) = line.find('=') {
+                    let key = &line[..eq_pos];
+                    let value = &line[eq_pos + 1..];
+                    // Remove quotes if present
+                    let value = if (value.starts_with('\'') && value.ends_with('\'')) ||
+                                   (value.starts_with('"') && value.ends_with('"')) {
+                        &value[1..value.len()-1]
+                    } else {
+                        value
+                    };
+                    state.export_var(key, value);
+                }
+            }
+        }
     }
 }
 
