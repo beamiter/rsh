@@ -422,7 +422,62 @@ pub fn execute_compound(cmd: &CompoundCommand, state: &mut ShellState) -> i32 {
             for w in &word_list {
                 state.set_var(var, w);
                 code = execute_command_list(body, state);
+
+                // Check for break/continue control flow
+                if state.loop_break {
+                    state.loop_break = false;
+                    break;
+                }
+                if state.loop_continue {
+                    state.loop_continue = false;
+                    continue;
+                }
             }
+            restore_fds(saved);
+            code
+        }
+        CompoundCommand::CStyleFor { init, condition, update, body, redirects } => {
+            let saved = setup_redirects(redirects, state);
+
+            // Execute init expression
+            if !init.is_empty() {
+                let _ = crate::expand::expand_arithmetic(init, state);
+            }
+
+            let mut code = 0;
+            loop {
+                // Check condition
+                let cond_result = if condition.is_empty() {
+                    // Empty condition means infinite loop (like for ((;;)))
+                    true
+                } else {
+                    let cond_str = crate::expand::expand_arithmetic(condition, state);
+                    cond_str.parse::<i32>().unwrap_or(0) != 0
+                };
+
+                if !cond_result {
+                    break;
+                }
+
+                // Execute body
+                code = execute_command_list(body, state);
+
+                // Check for break/continue
+                if state.loop_break {
+                    state.loop_break = false;
+                    break;
+                }
+                if state.loop_continue {
+                    state.loop_continue = false;
+                    // Continue to update without breaking
+                }
+
+                // Execute update expression
+                if !update.is_empty() {
+                    let _ = crate::expand::expand_arithmetic(update, state);
+                }
+            }
+
             restore_fds(saved);
             code
         }

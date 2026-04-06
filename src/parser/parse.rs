@@ -267,6 +267,14 @@ impl<'a> Parser<'a> {
 
     fn parse_for(&mut self) -> Result<Command, ParseError> {
         self.advance(); // consume "for"
+
+        // Check if this is C-style for: for ((
+        if let Token::LParen = self.current.token {
+            if let Token::LParen = self.peek() {
+                return self.parse_c_style_for();
+            }
+        }
+
         let var = self.expect_word()?;
         self.skip_newlines();
 
@@ -297,6 +305,96 @@ impl<'a> Parser<'a> {
         self.expect_keyword("done")?;
         let redirects = self.parse_optional_redirects()?;
         Ok(Command::Compound(CompoundCommand::For { var, words, body, redirects }))
+    }
+
+    fn parse_c_style_for(&mut self) -> Result<Command, ParseError> {
+        self.advance(); // consume first (
+        self.advance(); // consume second (
+
+        // Parse init expression (up to first semicolon)
+        let mut init = String::new();
+        while self.current.token != Token::Semi && self.current.token != Token::Eof {
+            if let Token::Word(w) = &self.current.token {
+                init.push_str(w);
+                init.push(' ');
+            }
+            self.advance();
+        }
+        if self.current.token == Token::Semi {
+            self.advance();
+        } else {
+            return Err(ParseError::Incomplete);
+        }
+
+        // Parse condition expression (up to second semicolon)
+        let mut condition = String::new();
+        while self.current.token != Token::Semi && self.current.token != Token::Eof {
+            if let Token::Word(w) = &self.current.token {
+                condition.push_str(w);
+                condition.push(' ');
+            }
+            self.advance();
+        }
+        if self.current.token == Token::Semi {
+            self.advance();
+        } else {
+            return Err(ParseError::Incomplete);
+        }
+
+        // Parse update expression (up to ))
+        let mut update = String::new();
+        let mut paren_depth = 0;
+        loop {
+            match &self.current.token {
+                Token::RParen => {
+                    if paren_depth == 0 {
+                        if let Token::RParen = self.peek() {
+                            self.advance(); // consume first )
+                            self.advance(); // consume second )
+                            break;
+                        }
+                    }
+                    paren_depth -= 1;
+                    if let Token::Word(w) = &self.current.token {
+                        update.push_str(w);
+                        update.push(' ');
+                    }
+                    self.advance();
+                }
+                Token::LParen => {
+                    paren_depth += 1;
+                    if let Token::Word(w) = &self.current.token {
+                        update.push_str(w);
+                        update.push(' ');
+                    }
+                    self.advance();
+                }
+                Token::Eof => return Err(ParseError::Incomplete),
+                Token::Word(w) => {
+                    update.push_str(w);
+                    update.push(' ');
+                    self.advance();
+                }
+                _ => {
+                    self.advance();
+                }
+            }
+        }
+
+        self.skip_newlines();
+        self.expect_keyword("do")?;
+        self.skip_newlines();
+        let body = self.parse_command_list()?;
+        self.expect_keyword("done")?;
+        let redirects = self.parse_optional_redirects()?;
+
+        Ok(Command::Compound(CompoundCommand::CStyleFor {
+            init: init.trim().to_string(),
+            condition: condition.trim().to_string(),
+            update: update.trim().to_string(),
+            body,
+            redirects,
+        }))
     }
 
     fn parse_while(&mut self) -> Result<Command, ParseError> {

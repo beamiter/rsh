@@ -102,6 +102,13 @@ pub enum CompoundCommand {
         body: Vec<CompleteCommand>,
         redirects: Vec<Redirect>,
     },
+    CStyleFor {
+        init: String,
+        condition: String,
+        update: String,
+        body: Vec<CompleteCommand>,
+        redirects: Vec<Redirect>,
+    },
     While {
         condition: Vec<CompleteCommand>,
         body: Vec<CompleteCommand>,
