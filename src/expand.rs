@@ -673,24 +673,59 @@ fn tokenize_arith(expr: &str) -> Vec<ArithToken> {
             '%' => { chars.next(); tokens.push(ArithToken::Percent); }
             '(' => { chars.next(); tokens.push(ArithToken::LParen); }
             ')' => { chars.next(); tokens.push(ArithToken::RParen); }
+            '?' => { chars.next(); tokens.push(ArithToken::Question); }
+            ':' => { chars.next(); tokens.push(ArithToken::Colon); }
+            '~' => { chars.next(); tokens.push(ArithToken::BitNot); }
+            '&' => {
+                chars.next();
+                if chars.peek() == Some(&'&') {
+                    chars.next();
+                    tokens.push(ArithToken::LogicalAnd);
+                } else {
+                    tokens.push(ArithToken::BitAnd);
+                }
+            }
+            '|' => {
+                chars.next();
+                if chars.peek() == Some(&'|') {
+                    chars.next();
+                    tokens.push(ArithToken::LogicalOr);
+                } else {
+                    tokens.push(ArithToken::BitOr);
+                }
+            }
+            '^' => { chars.next(); tokens.push(ArithToken::BitXor); }
             '<' => {
                 chars.next();
-                if chars.peek() == Some(&'=') { chars.next(); tokens.push(ArithToken::Le); }
-                else { tokens.push(ArithToken::Lt); }
+                match chars.peek() {
+                    Some(&'=') => { chars.next(); tokens.push(ArithToken::Le); }
+                    Some(&'<') => { chars.next(); tokens.push(ArithToken::LShift); }
+                    _ => { tokens.push(ArithToken::Lt); }
+                }
             }
             '>' => {
                 chars.next();
-                if chars.peek() == Some(&'=') { chars.next(); tokens.push(ArithToken::Ge); }
-                else { tokens.push(ArithToken::Gt); }
+                match chars.peek() {
+                    Some(&'=') => { chars.next(); tokens.push(ArithToken::Ge); }
+                    Some(&'>') => { chars.next(); tokens.push(ArithToken::RShift); }
+                    _ => { tokens.push(ArithToken::Gt); }
+                }
             }
             '=' => {
                 chars.next();
-                if chars.peek() == Some(&'=') { chars.next(); tokens.push(ArithToken::Eq); }
+                if chars.peek() == Some(&'=') {
+                    chars.next();
+                    tokens.push(ArithToken::Eq);
+                }
             }
             '!' => {
                 chars.next();
-                if chars.peek() == Some(&'=') { chars.next(); tokens.push(ArithToken::Ne); }
-                else { tokens.push(ArithToken::Not); }
+                if chars.peek() == Some(&'=') {
+                    chars.next();
+                    tokens.push(ArithToken::Ne);
+                } else {
+                    tokens.push(ArithToken::Not);
+                }
             }
             _ => { chars.next(); }
         }
@@ -700,32 +735,136 @@ fn tokenize_arith(expr: &str) -> Vec<ArithToken> {
 
 #[derive(Debug, Clone)]
 enum ArithToken {
-    Num(i64), Plus, Minus, Star, Slash, Percent, LParen, RParen,
-    Lt, Le, Gt, Ge, Eq, Ne, Not,
+    // Literals
+    Num(i64),
+
+    // Arithmetic operators
+    Plus, Minus, Star, Slash, Percent,
+
+    // Bitwise operators
+    BitAnd, BitOr, BitXor, BitNot,
+    LShift, RShift,
+
+    // Logical operators
+    LogicalAnd, LogicalOr, Not,
+
+    // Comparison operators
+    Lt, Le, Gt, Ge, Eq, Ne,
+
+    // Ternary operator
+    Question, Colon,
+
+    // Parentheses
+    LParen, RParen,
 }
 
 fn parse_arith_expr(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, String> {
+    parse_arith_ternary(tokens, pos)
+}
+
+fn parse_arith_ternary(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, String> {
+    let mut cond = parse_arith_logical_or(tokens, pos)?;
+    if *pos < tokens.len() && matches!(tokens.get(*pos), Some(ArithToken::Question)) {
+        *pos += 1;
+        let true_val = parse_arith_ternary(tokens, pos)?;
+        if *pos < tokens.len() && matches!(tokens.get(*pos), Some(ArithToken::Colon)) {
+            *pos += 1;
+            let false_val = parse_arith_ternary(tokens, pos)?;
+            cond = if cond != 0 { true_val } else { false_val };
+        }
+    }
+    Ok(cond)
+}
+
+fn parse_arith_logical_or(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, String> {
+    let mut left = parse_arith_logical_and(tokens, pos)?;
+    while *pos < tokens.len() && matches!(tokens.get(*pos), Some(ArithToken::LogicalOr)) {
+        *pos += 1;
+        // Short-circuit evaluation: if left is non-zero, result is 1
+        if left != 0 {
+            return Ok(1);
+        }
+        let right = parse_arith_logical_and(tokens, pos)?;
+        left = if right != 0 { 1 } else { 0 };
+    }
+    Ok(left)
+}
+
+fn parse_arith_logical_and(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, String> {
+    let mut left = parse_arith_bitwise_or(tokens, pos)?;
+    while *pos < tokens.len() && matches!(tokens.get(*pos), Some(ArithToken::LogicalAnd)) {
+        *pos += 1;
+        // Short-circuit evaluation: if left is zero, result is 0
+        if left == 0 {
+            return Ok(0);
+        }
+        let right = parse_arith_bitwise_or(tokens, pos)?;
+        left = if right != 0 { 1 } else { 0 };
+    }
+    Ok(left)
+}
+
+fn parse_arith_bitwise_or(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, String> {
+    let mut left = parse_arith_bitwise_xor(tokens, pos)?;
+    while *pos < tokens.len() && matches!(tokens.get(*pos), Some(ArithToken::BitOr)) {
+        *pos += 1;
+        left |= parse_arith_bitwise_xor(tokens, pos)?;
+    }
+    Ok(left)
+}
+
+fn parse_arith_bitwise_xor(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, String> {
+    let mut left = parse_arith_bitwise_and(tokens, pos)?;
+    while *pos < tokens.len() && matches!(tokens.get(*pos), Some(ArithToken::BitXor)) {
+        *pos += 1;
+        left ^= parse_arith_bitwise_and(tokens, pos)?;
+    }
+    Ok(left)
+}
+
+fn parse_arith_bitwise_and(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, String> {
     let mut left = parse_arith_comparison(tokens, pos)?;
+    while *pos < tokens.len() && matches!(tokens.get(*pos), Some(ArithToken::BitAnd)) {
+        *pos += 1;
+        left &= parse_arith_comparison(tokens, pos)?;
+    }
+    Ok(left)
+}
+
+fn parse_arith_comparison(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, String> {
+    let mut left = parse_arith_shift(tokens, pos)?;
     while *pos < tokens.len() {
         match tokens.get(*pos) {
-            Some(ArithToken::Plus) => { *pos += 1; left += parse_arith_comparison(tokens, pos)?; }
-            Some(ArithToken::Minus) => { *pos += 1; left -= parse_arith_comparison(tokens, pos)?; }
+            Some(ArithToken::Lt) => { *pos += 1; let r = parse_arith_shift(tokens, pos)?; left = if left < r { 1 } else { 0 }; }
+            Some(ArithToken::Le) => { *pos += 1; let r = parse_arith_shift(tokens, pos)?; left = if left <= r { 1 } else { 0 }; }
+            Some(ArithToken::Gt) => { *pos += 1; let r = parse_arith_shift(tokens, pos)?; left = if left > r { 1 } else { 0 }; }
+            Some(ArithToken::Ge) => { *pos += 1; let r = parse_arith_shift(tokens, pos)?; left = if left >= r { 1 } else { 0 }; }
+            Some(ArithToken::Eq) => { *pos += 1; let r = parse_arith_shift(tokens, pos)?; left = if left == r { 1 } else { 0 }; }
+            Some(ArithToken::Ne) => { *pos += 1; let r = parse_arith_shift(tokens, pos)?; left = if left != r { 1 } else { 0 }; }
             _ => break,
         }
     }
     Ok(left)
 }
 
-fn parse_arith_comparison(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, String> {
+fn parse_arith_shift(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, String> {
+    let mut left = parse_arith_additive(tokens, pos)?;
+    while *pos < tokens.len() {
+        match tokens.get(*pos) {
+            Some(ArithToken::LShift) => { *pos += 1; left <<= parse_arith_additive(tokens, pos)?; }
+            Some(ArithToken::RShift) => { *pos += 1; left >>= parse_arith_additive(tokens, pos)?; }
+            _ => break,
+        }
+    }
+    Ok(left)
+}
+
+fn parse_arith_additive(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, String> {
     let mut left = parse_arith_term(tokens, pos)?;
     while *pos < tokens.len() {
         match tokens.get(*pos) {
-            Some(ArithToken::Lt) => { *pos += 1; let r = parse_arith_term(tokens, pos)?; left = if left < r { 1 } else { 0 }; }
-            Some(ArithToken::Le) => { *pos += 1; let r = parse_arith_term(tokens, pos)?; left = if left <= r { 1 } else { 0 }; }
-            Some(ArithToken::Gt) => { *pos += 1; let r = parse_arith_term(tokens, pos)?; left = if left > r { 1 } else { 0 }; }
-            Some(ArithToken::Ge) => { *pos += 1; let r = parse_arith_term(tokens, pos)?; left = if left >= r { 1 } else { 0 }; }
-            Some(ArithToken::Eq) => { *pos += 1; let r = parse_arith_term(tokens, pos)?; left = if left == r { 1 } else { 0 }; }
-            Some(ArithToken::Ne) => { *pos += 1; let r = parse_arith_term(tokens, pos)?; left = if left != r { 1 } else { 0 }; }
+            Some(ArithToken::Plus) => { *pos += 1; left += parse_arith_term(tokens, pos)?; }
+            Some(ArithToken::Minus) => { *pos += 1; left -= parse_arith_term(tokens, pos)?; }
             _ => break,
         }
     }
@@ -757,9 +896,10 @@ fn parse_arith_term(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, Strin
 
 fn parse_arith_unary(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, String> {
     match tokens.get(*pos) {
-        Some(ArithToken::Minus) => { *pos += 1; Ok(-parse_arith_primary(tokens, pos)?) }
-        Some(ArithToken::Plus) => { *pos += 1; parse_arith_primary(tokens, pos) }
-        Some(ArithToken::Not) => { *pos += 1; let v = parse_arith_primary(tokens, pos)?; Ok(if v == 0 { 1 } else { 0 }) }
+        Some(ArithToken::Minus) => { *pos += 1; Ok(-parse_arith_unary(tokens, pos)?) }
+        Some(ArithToken::Plus) => { *pos += 1; parse_arith_unary(tokens, pos) }
+        Some(ArithToken::Not) => { *pos += 1; let v = parse_arith_unary(tokens, pos)?; Ok(if v == 0 { 1 } else { 0 }) }
+        Some(ArithToken::BitNot) => { *pos += 1; Ok(!parse_arith_unary(tokens, pos)?) }
         _ => parse_arith_primary(tokens, pos),
     }
 }
