@@ -17,6 +17,8 @@ pub enum Token {
     HereDoc,      // <<
     HereString,   // <<<
     DupFd,        // >&
+    RedirectAllOut, // &> (redirect stdout and stderr)
+    RedirectAllAppend, // &>> (append stdout and stderr)
     RedirectFd(i32, RedirectOp),
     LParen,       // (
     RParen,       // )
@@ -203,6 +205,13 @@ impl<'a> Lexer<'a> {
                 match self.peek_char() {
                     Some('&') => { self.next_char(); Token::And }
                     Some('!') => { self.next_char(); Token::AmpBang }
+                    Some('>') => {
+                        self.next_char();
+                        match self.peek_char() {
+                            Some('>') => { self.next_char(); Token::RedirectAllAppend }
+                            _ => Token::RedirectAllOut,
+                        }
+                    }
                     _ => Token::Amp,
                 }
             }

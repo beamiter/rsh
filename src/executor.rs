@@ -525,6 +525,24 @@ fn apply_one_redirect(kind: &RedirectKind, fd: RawFd, target_str: &str) {
                 dup2_raw(target_fd, fd).ok();
             }
         }
+        RedirectKind::OutputAll => {
+            // &> redirects both stdout (1) and stderr (2) to the file
+            if let Ok(file) = File::create(target_str) {
+                let src = file.into_raw_fd();
+                dup2_raw(src, 1).ok(); // stdout
+                dup2_raw(src, 2).ok(); // stderr
+                if src != 1 && src != 2 { close(src).ok(); }
+            }
+        }
+        RedirectKind::AppendAll => {
+            // &>> appends both stdout (1) and stderr (2) to the file
+            if let Ok(file) = OpenOptions::new().create(true).append(true).open(target_str) {
+                let src = file.into_raw_fd();
+                dup2_raw(src, 1).ok(); // stdout
+                dup2_raw(src, 2).ok(); // stderr
+                if src != 1 && src != 2 { close(src).ok(); }
+            }
+        }
         _ => {}
     }
 }
@@ -532,6 +550,7 @@ fn apply_one_redirect(kind: &RedirectKind, fd: RawFd, target_str: &str) {
 fn redirect_fd(redir: &Redirect) -> RawFd {
     match redir.kind {
         RedirectKind::Output | RedirectKind::Append | RedirectKind::DupOutput => redir.fd.unwrap_or(1),
+        RedirectKind::OutputAll | RedirectKind::AppendAll => 1,  // Both stdout and stderr, but use 1 as marker
         RedirectKind::Input | RedirectKind::HereString | RedirectKind::HereDoc => redir.fd.unwrap_or(0),
         _ => redir.fd.unwrap_or(1),
     }
@@ -541,16 +560,32 @@ fn setup_redirects(redirects: &[Redirect], state: &mut ShellState) -> Vec<SavedF
     let mut saved = Vec::new();
     for redir in redirects {
         let target_str = expand_word_to_string(&redir.target, state);
-        let fd = redirect_fd(redir);
 
-        // Safe because fd is a valid file descriptor at this point
-        unsafe {
-            if let Ok(sfd) = nix::unistd::dup(BorrowedFd::borrow_raw(fd)) {
-                saved.push(SavedFd { original_fd: fd, saved_fd: sfd });
+        // For OutputAll and AppendAll, we need to save both stdout and stderr
+        match redir.kind {
+            RedirectKind::OutputAll | RedirectKind::AppendAll => {
+                // Save both fd 1 (stdout) and fd 2 (stderr)
+                unsafe {
+                    if let Ok(sfd1) = nix::unistd::dup(BorrowedFd::borrow_raw(1)) {
+                        saved.push(SavedFd { original_fd: 1, saved_fd: sfd1 });
+                    }
+                    if let Ok(sfd2) = nix::unistd::dup(BorrowedFd::borrow_raw(2)) {
+                        saved.push(SavedFd { original_fd: 2, saved_fd: sfd2 });
+                    }
+                }
+                apply_one_redirect(&redir.kind, 1, &target_str);
+            }
+            _ => {
+                let fd = redirect_fd(redir);
+                // Safe because fd is a valid file descriptor at this point
+                unsafe {
+                    if let Ok(sfd) = nix::unistd::dup(BorrowedFd::borrow_raw(fd)) {
+                        saved.push(SavedFd { original_fd: fd, saved_fd: sfd });
+                    }
+                }
+                apply_one_redirect(&redir.kind, fd, &target_str);
             }
         }
-
-        apply_one_redirect(&redir.kind, fd, &target_str);
     }
     saved
 }

@@ -91,6 +91,7 @@ impl<'a> Parser<'a> {
         matches!(self.current.token,
             Token::RedirectOut | Token::RedirectAppend | Token::RedirectIn |
             Token::HereDoc | Token::HereString | Token::DupFd |
+            Token::RedirectAllOut | Token::RedirectAllAppend |
             Token::RedirectFd(_, _))
     }
 
@@ -102,6 +103,8 @@ impl<'a> Parser<'a> {
             Token::HereString => (None, RedirectKind::HereString),
             Token::HereDoc => (None, RedirectKind::HereDoc),
             Token::DupFd => (None, RedirectKind::DupOutput),
+            Token::RedirectAllOut => (None, RedirectKind::OutputAll),
+            Token::RedirectAllAppend => (None, RedirectKind::AppendAll),
             Token::RedirectFd(n, op) => {
                 let fd = Some(*n);
                 let kind = match op {

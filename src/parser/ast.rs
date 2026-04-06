@@ -41,6 +41,8 @@ pub enum RedirectKind {
     HereString,
     DupOutput,
     DupInput,
+    OutputAll,    // &> (redirect stdout and stderr)
+    AppendAll,    // &>> (append stdout and stderr)
 }
 
 #[derive(Debug, Clone, PartialEq)]
