@@ -603,7 +603,7 @@ fn expand_process_sub(cmd: &str, kind: &ProcessSubKind, state: &mut ShellState) 
     }
 }
 
-fn expand_arithmetic(expr: &str, state: &mut ShellState) -> String {
+pub fn expand_arithmetic(expr: &str, state: &mut ShellState) -> String {
     let expanded = expand_arith_vars(expr, state);
     match eval_arithmetic(&expanded) {
         Ok(n) => n.to_string(),

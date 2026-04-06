@@ -536,6 +536,26 @@ pub fn execute_compound(cmd: &CompoundCommand, state: &mut ShellState) -> i32 {
             restore_fds(saved);
             code
         }
+        CompoundCommand::Arithmetic { expr, redirects } => {
+            let saved = setup_redirects(redirects, state);
+
+            // Evaluate the arithmetic expression
+            let result_str = crate::expand::expand_arithmetic(expr, state);
+            let code = if let Ok(result) = result_str.parse::<i32>() {
+                // In bash, (( expr )) returns 0 if expr != 0, and 1 if expr == 0
+                // This is the opposite of C - expressions are checked for truthiness
+                if result != 0 {
+                    0
+                } else {
+                    1
+                }
+            } else {
+                1
+            };
+
+            restore_fds(saved);
+            code
+        }
     }
 }
 

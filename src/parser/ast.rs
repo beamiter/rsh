@@ -123,6 +123,10 @@ pub enum CompoundCommand {
         body: Vec<CompleteCommand>,
         redirects: Vec<Redirect>,
     },
+    Arithmetic {
+        expr: String,
+        redirects: Vec<Redirect>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

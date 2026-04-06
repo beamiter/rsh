@@ -175,7 +175,14 @@ impl<'a> Parser<'a> {
 
     fn parse_compound_command(&mut self) -> Result<Command, ParseError> {
         match &self.current.token {
-            Token::LParen => self.parse_subshell(),
+            Token::LParen => {
+                // Check if it's (( )) or ( )
+                if let Token::LParen = self.peek() {
+                    self.parse_arithmetic_command()
+                } else {
+                    self.parse_subshell()
+                }
+            }
             Token::LBrace => self.parse_brace_group(),
             Token::Word(w) => {
                 match w.as_str() {
@@ -387,6 +394,71 @@ impl<'a> Parser<'a> {
         self.expect_keyword("done")?;
         let redirects = self.parse_optional_redirects()?;
         Ok(Command::Compound(CompoundCommand::Select { var, words, body, redirects }))
+    }
+
+    fn parse_arithmetic_command(&mut self) -> Result<Command, ParseError> {
+        self.advance(); // consume first (
+        self.advance(); // consume second (
+
+        // Read tokens until we find ))
+        let mut expr_tokens = Vec::new();
+        let mut paren_depth = 0;
+
+        loop {
+            match &self.current.token {
+                Token::RParen => {
+                    if paren_depth == 0 {
+                        // Check if next is also RParen
+                        if let Token::RParen = self.peek() {
+                            self.advance(); // consume first )
+                            self.advance(); // consume second )
+                            break;
+                        } else {
+                            paren_depth -= 1;
+                            expr_tokens.push(format!("{:?}", self.current.token));
+                            self.advance();
+                        }
+                    } else {
+                        paren_depth -= 1;
+                        expr_tokens.push(format!("{:?}", self.current.token));
+                        self.advance();
+                    }
+                }
+                Token::LParen => {
+                    paren_depth += 1;
+                    expr_tokens.push(format!("{:?}", self.current.token));
+                    self.advance();
+                }
+                Token::Eof => {
+                    return Err(ParseError::Incomplete);
+                }
+                Token::Word(w) => {
+                    expr_tokens.push(w.clone());
+                    self.advance();
+                }
+                Token::Newline => {
+                    self.skip_newlines();
+                }
+                other => {
+                    // For operators like &&, ||, |, etc., convert to string
+                    expr_tokens.push(match other {
+                        Token::And => "&&".to_string(),
+                        Token::Or => "||".to_string(),
+                        Token::Pipe => "|".to_string(),
+                        Token::Semi => ";".to_string(),
+                        Token::RedirectOut => ">".to_string(),
+                        Token::RedirectAppend => ">>".to_string(),
+                        Token::RedirectIn => "<".to_string(),
+                        _ => format!("{:?}", other),
+                    });
+                    self.advance();
+                }
+            }
+        }
+
+        let expr = expr_tokens.join(" ");
+        let redirects = self.parse_optional_redirects()?;
+        Ok(Command::Compound(CompoundCommand::Arithmetic { expr, redirects }))
     }
 
     fn parse_optional_redirects(&mut self) -> Result<Vec<Redirect>, ParseError> {
