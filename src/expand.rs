@@ -180,6 +180,44 @@ fn expand_parameter(name: &str, state: &mut ShellState) -> String {
         }
     }
 
+    // ${!var} - Indirect variable reference
+    if let Some(var_name) = name.strip_prefix('!') {
+        // Check if it's not the special array keys syntax (${!arr[@]})
+        if !var_name.contains('[') && !var_name.contains('@') && !var_name.contains('*') {
+            // Get the value of the variable named by var_name
+            if let Some(ref_name) = state.get_var(var_name) {
+                return state.get_var(ref_name).unwrap_or("").to_string();
+            }
+        }
+    }
+
+    // ${!prefix@} and ${!prefix*} - List variable names with prefix
+    if let Some(var_spec) = name.strip_prefix('!') {
+        if var_spec.ends_with('@') || var_spec.ends_with('*') {
+            let prefix = &var_spec[..var_spec.len() - 1];
+            let mut names = Vec::new();
+
+            // Collect all variable names starting with prefix
+            for (k, _) in state.env_vars.iter() {
+                if k.starts_with(prefix) {
+                    names.push(k.clone());
+                }
+            }
+            for (k, _) in state.local_vars.iter() {
+                if k.starts_with(prefix) && !names.contains(k) {
+                    names.push(k.clone());
+                }
+            }
+
+            names.sort();
+            if var_spec.ends_with('@') {
+                return names.iter().map(|n| format!("\"{}\"", n)).collect::<Vec<_>>().join(" ");
+            } else {
+                return names.join(" ");
+            }
+        }
+    }
+
     // ${!arr[@]} → array keys
     if let Some(inner) = name.strip_prefix('!') {
         if let Some(bracket) = inner.find('[') {
@@ -191,21 +229,50 @@ fn expand_parameter(name: &str, state: &mut ShellState) -> String {
         }
     }
 
-    // Array element access: ${arr[idx]}
+    // Array element access and slicing: ${arr[idx]}, ${arr[@]}, ${arr[@]:offset:length}
     if let Some(bracket) = name.find('[') {
-        if name.ends_with(']') {
+        if let Some(bracket_end) = name[bracket..].find(']') {
+            let bracket_pos = bracket + bracket_end;
             let var_name = &name[..bracket];
-            let subscript = &name[bracket + 1..name.len() - 1];
+            let subscript_part = &name[bracket + 1..bracket_pos];
+            let after_bracket = &name[bracket_pos + 1..];
 
-            // ${arr[@]} or ${arr[*]} as string
-            if subscript == "@" || subscript == "*" {
+            // Handle array slicing: ${arr[@]:offset:length} or ${arr[*]:offset:length}
+            if (subscript_part == "@" || subscript_part == "*") {
+                // Check if there's slicing syntax after the bracket
+                if after_bracket.starts_with(':') {
+                    let slice_part = &after_bracket[1..]; // Remove the ':'
+                    let parts: Vec<&str> = slice_part.split(':').collect();
+                    if let Ok(offset) = parts[0].parse::<usize>() {
+                        let arr_vals = state.array_values(var_name);
+                        let length = if parts.len() > 1 {
+                            parts[1].parse::<usize>().unwrap_or(arr_vals.len())
+                        } else {
+                            arr_vals.len()
+                        };
+                        let sliced: Vec<String> = arr_vals.iter()
+                            .skip(offset)
+                            .take(length)
+                            .cloned()
+                            .collect();
+                        return sliced.join(" ");
+                    }
+                } else if state.is_array(var_name) {
+                    // No slicing, just return array values
+                    return state.array_values(var_name).join(" ");
+                }
+            }
+
+            // ${arr[@]} or ${arr[*]} as string (without slicing)
+            if (subscript_part == "@" || subscript_part == "*") && after_bracket.is_empty() {
                 if state.is_array(var_name) {
                     return state.array_values(var_name).join(" ");
                 }
             }
-            // ${arr[idx]}
-            if state.is_array(var_name) {
-                return state.get_array_element(var_name, subscript).unwrap_or_default();
+
+            // ${arr[idx]} - single element access
+            if after_bracket.is_empty() && state.is_array(var_name) {
+                return state.get_array_element(var_name, subscript_part).unwrap_or_default();
             }
         }
     }
