@@ -357,13 +357,23 @@ fn execute_simple(cmd: &SimpleCommand, state: &mut ShellState) -> i32 {
     }
 }
 
+// Helper function to wrap compound command execution with redirect handling
+fn with_redirects<F>(redirects: &[Redirect], state: &mut ShellState, f: F) -> i32
+where
+    F: FnOnce(&mut ShellState) -> i32,
+{
+    let saved = setup_redirects(redirects, state);
+    let result = f(state);
+    restore_fds(saved);
+    result
+}
+
 pub fn execute_compound(cmd: &CompoundCommand, state: &mut ShellState) -> i32 {
     match cmd {
         CompoundCommand::BraceGroup { body, redirects } => {
-            let saved = setup_redirects(redirects, state);
-            let code = execute_command_list(body, state);
-            restore_fds(saved);
-            code
+            with_redirects(redirects, state, |state| {
+                execute_command_list(body, state)
+            })
         }
         CompoundCommand::Subshell { body, redirects } => {
             match unsafe { fork() } {
@@ -390,226 +400,217 @@ pub fn execute_compound(cmd: &CompoundCommand, state: &mut ShellState) -> i32 {
             }
         }
         CompoundCommand::If { conditions, else_branch, redirects } => {
-            let saved = setup_redirects(redirects, state);
-            let mut code = 0;
-            let mut matched = false;
+            with_redirects(redirects, state, |state| {
+                let mut code = 0;
+                let mut matched = false;
 
-            for (condition, body) in conditions {
-                let cond_code = execute_command_list(condition, state);
-                if cond_code == 0 {
-                    code = execute_command_list(body, state);
-                    matched = true;
-                    break;
+                for (condition, body) in conditions {
+                    let cond_code = execute_command_list(condition, state);
+                    if cond_code == 0 {
+                        code = execute_command_list(body, state);
+                        matched = true;
+                        break;
+                    }
                 }
-            }
 
-            if !matched {
-                if let Some(else_body) = else_branch {
-                    code = execute_command_list(else_body, state);
+                if !matched {
+                    if let Some(else_body) = else_branch {
+                        code = execute_command_list(else_body, state);
+                    }
                 }
-            }
-            restore_fds(saved);
-            code
+                code
+            })
         }
         CompoundCommand::For { var, words, body, redirects } => {
-            let saved = setup_redirects(redirects, state);
-            let word_list = match words {
-                Some(ws) => expand_words(ws, state),
-                None => state.positional_params.clone(),
-            };
-
-            let mut code = 0;
-            for w in &word_list {
-                state.set_var(var, w);
-                code = execute_command_list(body, state);
-
-                // Check for break/continue control flow
-                if state.loop_break {
-                    state.loop_break = false;
-                    break;
-                }
-                if state.loop_continue {
-                    state.loop_continue = false;
-                    continue;
-                }
-            }
-            restore_fds(saved);
-            code
-        }
-        CompoundCommand::CStyleFor { init, condition, update, body, redirects } => {
-            let saved = setup_redirects(redirects, state);
-
-            // Execute init expression
-            if !init.is_empty() {
-                let _ = crate::expand::expand_arithmetic(init, state);
-            }
-
-            let mut code = 0;
-            loop {
-                // Check condition
-                let cond_result = if condition.is_empty() {
-                    // Empty condition means infinite loop (like for ((;;)))
-                    true
-                } else {
-                    let cond_str = crate::expand::expand_arithmetic(condition, state);
-                    cond_str.parse::<i32>().unwrap_or(0) != 0
+            with_redirects(redirects, state, |state| {
+                let word_list = match words {
+                    Some(ws) => expand_words(ws, state),
+                    None => state.positional_params.clone(),
                 };
 
-                if !cond_result {
-                    break;
+                let mut code = 0;
+                for w in &word_list {
+                    state.set_var(var, w);
+                    code = execute_command_list(body, state);
+
+                    // Check for break/continue control flow
+                    if state.loop_break {
+                        state.loop_break = false;
+                        break;
+                    }
+                    if state.loop_continue {
+                        state.loop_continue = false;
+                        continue;
+                    }
+                }
+                code
+            })
+        }
+        CompoundCommand::CStyleFor { init, condition, update, body, redirects } => {
+            with_redirects(redirects, state, |state| {
+                // Execute init expression
+                if !init.is_empty() {
+                    let _ = crate::expand::expand_arithmetic(init, state);
                 }
 
-                // Execute body
-                code = execute_command_list(body, state);
+                let mut code = 0;
+                loop {
+                    // Check condition
+                    let cond_result = if condition.is_empty() {
+                        // Empty condition means infinite loop (like for ((;;)))
+                        true
+                    } else {
+                        let cond_str = crate::expand::expand_arithmetic(condition, state);
+                        cond_str.parse::<i32>().unwrap_or(0) != 0
+                    };
 
-                // Check for break/continue
-                if state.loop_break {
-                    state.loop_break = false;
-                    break;
-                }
-                if state.loop_continue {
-                    state.loop_continue = false;
-                    // Continue to update without breaking
+                    if !cond_result {
+                        break;
+                    }
+
+                    // Execute body
+                    code = execute_command_list(body, state);
+
+                    // Check for break/continue
+                    if state.loop_break {
+                        state.loop_break = false;
+                        break;
+                    }
+                    if state.loop_continue {
+                        state.loop_continue = false;
+                        // Continue to update without breaking
+                    }
+
+                    // Execute update expression
+                    if !update.is_empty() {
+                        let _ = crate::expand::expand_arithmetic(update, state);
+                    }
                 }
 
-                // Execute update expression
-                if !update.is_empty() {
-                    let _ = crate::expand::expand_arithmetic(update, state);
-                }
-            }
-
-            restore_fds(saved);
-            code
+                code
+            })
         }
         CompoundCommand::While { condition, body, redirects } => {
-            let saved = setup_redirects(redirects, state);
-            let mut code = 0;
-            loop {
-                let cond = execute_command_list(condition, state);
-                if cond != 0 { break; }
-                code = execute_command_list(body, state);
-            }
-            restore_fds(saved);
-            code
+            with_redirects(redirects, state, |state| {
+                let mut code = 0;
+                loop {
+                    let cond = execute_command_list(condition, state);
+                    if cond != 0 { break; }
+                    code = execute_command_list(body, state);
+                }
+                code
+            })
         }
         CompoundCommand::Until { condition, body, redirects } => {
-            let saved = setup_redirects(redirects, state);
-            let mut code = 0;
-            loop {
-                let cond = execute_command_list(condition, state);
-                if cond == 0 { break; }
-                code = execute_command_list(body, state);
-            }
-            restore_fds(saved);
-            code
+            with_redirects(redirects, state, |state| {
+                let mut code = 0;
+                loop {
+                    let cond = execute_command_list(condition, state);
+                    if cond == 0 { break; }
+                    code = execute_command_list(body, state);
+                }
+                code
+            })
         }
         CompoundCommand::Case { word, arms, redirects } => {
-            let saved = setup_redirects(redirects, state);
-            let value = expand_word_to_string(word, state);
-            let mut code = 0;
+            with_redirects(redirects, state, |state| {
+                let value = expand_word_to_string(word, state);
 
-            for arm in arms {
-                for pattern in &arm.patterns {
-                    let pat = expand_word_to_string(pattern, state);
-                    if match_pattern(&value, &pat) {
-                        code = execute_command_list(&arm.body, state);
-                        restore_fds(saved);
-                        return code;
+                for arm in arms {
+                    for pattern in &arm.patterns {
+                        let pat = expand_word_to_string(pattern, state);
+                        if match_pattern(&value, &pat) {
+                            return execute_command_list(&arm.body, state);
+                        }
                     }
                 }
-            }
-            restore_fds(saved);
-            code
+                0
+            })
         }
         CompoundCommand::Select { var, words, body, redirects } => {
-            let saved = setup_redirects(redirects, state);
+            with_redirects(redirects, state, |state| {
+                // Expand items list
+                let items = match words {
+                    Some(ws) => expand_words(ws, state),
+                    None => state.positional_params.clone(),
+                };
 
-            // Expand items list
-            let items = match words {
-                Some(ws) => expand_words(ws, state),
-                None => state.positional_params.clone(),
-            };
-
-            if items.is_empty() {
-                restore_fds(saved);
-                return 0;
-            }
-
-            let mut code = 0;
-            loop {
-                // Display menu
-                for (i, item) in items.iter().enumerate() {
-                    println!("{}) {}", i + 1, item);
+                if items.is_empty() {
+                    return 0;
                 }
 
-                // Get PS3 prompt (default "#? ")
-                let ps3 = state.get_var("PS3").unwrap_or("#? ").to_string();
-                eprint!("{}", ps3);
-                use std::io::Write;
-                std::io::stderr().flush().ok();
-
-                // Read user input
-                let mut reply = String::new();
-                match std::io::stdin().read_line(&mut reply) {
-                    Ok(0) => {
-                        // EOF reached
-                        code = 0;
-                        break;
+                let mut code = 0;
+                loop {
+                    // Display menu
+                    for (i, item) in items.iter().enumerate() {
+                        println!("{}) {}", i + 1, item);
                     }
-                    Ok(_) => {
-                        let reply_trimmed = reply.trim_end_matches('\n').trim_end_matches('\r');
-                        state.set_var("REPLY", reply_trimmed);
 
-                        // Validate selection
-                        if let Ok(n) = reply_trimmed.parse::<usize>() {
-                            if n >= 1 && n <= items.len() {
-                                let selected = &items[n - 1];
-                                state.set_var(var, selected);
-                                code = execute_command_list(body, state);
+                    // Get PS3 prompt (default "#? ")
+                    let ps3 = state.get_var("PS3").unwrap_or("#? ").to_string();
+                    eprint!("{}", ps3);
+                    use std::io::Write;
+                    std::io::stderr().flush().ok();
 
-                                // Check for break/continue control flow
-                                if state.loop_break {
-                                    state.loop_break = false;
-                                    break;
-                                }
-                                if state.loop_continue {
-                                    state.loop_continue = false;
-                                    continue;
-                                }
-                            }
-                            // Invalid choice (out of range): show menu again without executing body
+                    // Read user input
+                    let mut reply = String::new();
+                    match std::io::stdin().read_line(&mut reply) {
+                        Ok(0) => {
+                            // EOF reached
+                            code = 0;
+                            break;
                         }
-                        // Empty input or non-numeric: show menu again
-                    }
-                    Err(_) => {
-                        code = 1;
-                        break;
+                        Ok(_) => {
+                            let reply_trimmed = reply.trim_end_matches('\n').trim_end_matches('\r');
+                            state.set_var("REPLY", reply_trimmed);
+
+                            // Validate selection
+                            if let Ok(n) = reply_trimmed.parse::<usize>() {
+                                if n >= 1 && n <= items.len() {
+                                    let selected = &items[n - 1];
+                                    state.set_var(var, selected);
+                                    code = execute_command_list(body, state);
+
+                                    // Check for break/continue control flow
+                                    if state.loop_break {
+                                        state.loop_break = false;
+                                        break;
+                                    }
+                                    if state.loop_continue {
+                                        state.loop_continue = false;
+                                        continue;
+                                    }
+                                }
+                                // Invalid choice (out of range): show menu again without executing body
+                            }
+                            // Empty input or non-numeric: show menu again
+                        }
+                        Err(_) => {
+                            code = 1;
+                            break;
+                        }
                     }
                 }
-            }
 
-            restore_fds(saved);
-            code
+                code
+            })
         }
         CompoundCommand::Arithmetic { expr, redirects } => {
-            let saved = setup_redirects(redirects, state);
-
-            // Evaluate the arithmetic expression
-            let result_str = crate::expand::expand_arithmetic(expr, state);
-            let code = if let Ok(result) = result_str.parse::<i32>() {
-                // In bash, (( expr )) returns 0 if expr != 0, and 1 if expr == 0
-                // This is the opposite of C - expressions are checked for truthiness
-                if result != 0 {
-                    0
+            with_redirects(redirects, state, |state| {
+                // Evaluate the arithmetic expression
+                let result_str = crate::expand::expand_arithmetic(expr, state);
+                if let Ok(result) = result_str.parse::<i32>() {
+                    // In bash, (( expr )) returns 0 if expr != 0, and 1 if expr == 0
+                    // This is the opposite of C - expressions are checked for truthiness
+                    if result != 0 {
+                        0
+                    } else {
+                        1
+                    }
                 } else {
                     1
                 }
-            } else {
-                1
-            };
-
-            restore_fds(saved);
-            code
+            })
         }
     }
 }
