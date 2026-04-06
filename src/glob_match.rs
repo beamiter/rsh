@@ -185,6 +185,106 @@ pub fn extglob_match(pattern: &str, value: &str) -> bool {
     match_extglob_recursive(pattern, value, 0, 0)
 }
 
+/// Helper: Check if value from start position matches any of the patterns exactly
+fn matches_any_pattern(patterns: &[String], value: &[char], start: usize) -> Option<usize> {
+    for subpat in patterns {
+        if let Some(len) = try_match_subpattern(subpat, value, start) {
+            return Some(len);
+        }
+    }
+    None
+}
+
+/// Helper: Try to match a subpattern starting at a position, return matched length if successful
+fn try_match_subpattern(pattern: &str, value: &[char], start: usize) -> Option<usize> {
+    let pat_chars: Vec<char> = pattern.chars().collect();
+    let mut pi = 0;
+    let mut vi = start;
+
+    while pi < pat_chars.len() && vi < value.len() {
+        match pat_chars[pi] {
+            '*' => {
+                if pi + 1 >= pat_chars.len() {
+                    return Some(value.len() - start);
+                }
+                // Star: try to match rest
+                loop {
+                    if try_match_subpattern_from(&pat_chars, pi + 1, value, vi).is_some() {
+                        return Some(vi - start);
+                    }
+                    if vi >= value.len() {
+                        break;
+                    }
+                    vi += 1;
+                }
+                return None;
+            }
+            '?' => {
+                pi += 1;
+                vi += 1;
+            }
+            c => {
+                if c == value[vi] {
+                    pi += 1;
+                    vi += 1;
+                } else {
+                    return None;
+                }
+            }
+        }
+    }
+
+    if pi == pat_chars.len() {
+        Some(vi - start)
+    } else {
+        None
+    }
+}
+
+/// Helper: Try to match pattern from pi position
+fn try_match_subpattern_from(pattern: &[char], pi: usize, value: &[char], vi: usize) -> Option<usize> {
+    let mut pi = pi;
+    let mut vi = vi;
+
+    while pi < pattern.len() && vi < value.len() {
+        match pattern[pi] {
+            '*' => {
+                if pi + 1 >= pattern.len() {
+                    return Some(value.len() - vi);
+                }
+                loop {
+                    if try_match_subpattern_from(pattern, pi + 1, value, vi).is_some() {
+                        return Some(vi - vi);
+                    }
+                    if vi >= value.len() {
+                        break;
+                    }
+                    vi += 1;
+                }
+                return None;
+            }
+            '?' => {
+                pi += 1;
+                vi += 1;
+            }
+            c => {
+                if c == value[vi] {
+                    pi += 1;
+                    vi += 1;
+                } else {
+                    return None;
+                }
+            }
+        }
+    }
+
+    if pi == pattern.len() {
+        Some(vi - vi)
+    } else {
+        None
+    }
+}
+
 /// Recursive helper for extglob matching
 fn match_extglob_recursive(pattern: &str, value: &str, pi: usize, vi: usize) -> bool {
     let p: Vec<char> = pattern.chars().collect();
@@ -200,8 +300,7 @@ fn match_extglob_recursive(pattern: &str, value: &str, pi: usize, vi: usize) -> 
                 '!' => {
                     // !(pat): match anything NOT matching pat
                     if let Some((patterns, end)) = parse_extglob_group(&p, pi) {
-                        pi = end;
-                        // Try to match with any of the negated patterns
+                        // Check if remaining value matches any of the patterns
                         let mut matched_any = false;
                         for subpat in &patterns {
                             if match_extglob_pattern(subpat, &v, vi) {
@@ -210,17 +309,21 @@ fn match_extglob_recursive(pattern: &str, value: &str, pi: usize, vi: usize) -> 
                             }
                         }
 
-                        // If we matched one of the patterns, we're at a dead end
                         if matched_any {
+                            // One of the patterns matched, so !(pat) fails
                             return false;
                         }
 
-                        // Otherwise, consume one character and continue
-                        if vi < v.len() {
-                            vi += 1;
-                        } else {
-                            return false;
+                        // None of the patterns matched - this is what !(pat) wants
+                        if end >= p.len() {
+                            // This is the end of the pattern, so we matched!
+                            // Return true since the remaining value successfully didn't match pat
+                            return true;
                         }
+
+                        // There's more pattern after !(pat) - continue parsing
+                        pi = end;
+                        // !(pat) doesn't consume characters by itself
                     } else {
                         // Invalid extglob, treat as literal
                         if vi < v.len() && v[vi] == p[pi] {
@@ -234,14 +337,15 @@ fn match_extglob_recursive(pattern: &str, value: &str, pi: usize, vi: usize) -> 
                 '?' => {
                     // ?(pat): match 0 or 1 occurrence of pat
                     if let Some((patterns, end)) = parse_extglob_group(&p, pi) {
-                        pi = end;
-                        for subpat in &patterns {
-                            if match_extglob_pattern(subpat, &v, vi) {
-                                // Pattern matched at current position
-                                return match_extglob_recursive(pattern, value, pi, vi + subpat.len());
+                        // Try matching exactly one occurrence
+                        if let Some(matched_len) = matches_any_pattern(&patterns, &v, vi) {
+                            let new_vi = vi + matched_len;
+                            if match_extglob_recursive(pattern, value, end, new_vi) {
+                                return true;
                             }
                         }
-                        // No match, continue without consuming (0 occurrences)
+                        // Try matching zero occurrences (just skip to end)
+                        return match_extglob_recursive(pattern, value, end, vi);
                     } else {
                         // Invalid extglob, treat as literal
                         if vi < v.len() && v[vi] == p[pi] {
@@ -255,26 +359,38 @@ fn match_extglob_recursive(pattern: &str, value: &str, pi: usize, vi: usize) -> 
                 '*' => {
                     // *(pat): match 0 or more occurrences of pat
                     if let Some((patterns, end)) = parse_extglob_group(&p, pi) {
-                        pi = end;
-                        // Try matching 0, 1, 2, ... occurrences
+                        // Greedy: match as many as possible, then backtrack if needed
                         let mut current_vi = vi;
                         loop {
-                            // Try continuing from current position
-                            if match_extglob_recursive(pattern, value, pi, current_vi) {
+                            // Try to match one more occurrence
+                            if let Some(matched_len) = matches_any_pattern(&patterns, &v, current_vi) {
+                                current_vi += matched_len;
+                            } else {
+                                break;
+                            }
+                        }
+
+                        // Now try from longest to shortest match
+                        loop {
+                            if match_extglob_recursive(pattern, value, end, current_vi) {
                                 return true;
                             }
-                            // Try matching one more occurrence
-                            let mut found = false;
-                            for subpat in &patterns {
-                                if match_extglob_pattern(subpat, &v, current_vi) {
-                                    current_vi += subpat.len();
-                                    found = true;
+                            if current_vi == vi {
+                                break;
+                            }
+                            // Backtrack: try with one fewer match
+                            // Find the last successful match position
+                            let mut prev_vi = vi;
+                            let mut test_vi = vi;
+                            while test_vi < current_vi {
+                                if let Some(matched_len) = matches_any_pattern(&patterns, &v, test_vi) {
+                                    prev_vi = test_vi + matched_len;
+                                    test_vi = prev_vi;
+                                } else {
                                     break;
                                 }
                             }
-                            if !found {
-                                break;
-                            }
+                            current_vi = prev_vi;
                         }
                         return false;
                     } else {
@@ -290,33 +406,43 @@ fn match_extglob_recursive(pattern: &str, value: &str, pi: usize, vi: usize) -> 
                 '+' => {
                     // +(pat): match 1 or more occurrences of pat
                     if let Some((patterns, end)) = parse_extglob_group(&p, pi) {
-                        pi = end;
+                        // Must match at least once
                         let mut current_vi = vi;
-                        let mut matched_at_least_once = false;
 
-                        // Try matching 1, 2, 3, ... occurrences
+                        // Match the first occurrence
+                        if matches_any_pattern(&patterns, &v, current_vi).is_none() {
+                            return false;
+                        }
+
+                        // Keep matching greedily
                         loop {
-                            let mut found = false;
-                            for subpat in &patterns {
-                                if match_extglob_pattern(subpat, &v, current_vi) {
-                                    current_vi += subpat.len();
-                                    matched_at_least_once = true;
-                                    found = true;
-                                    break;
-                                }
-                            }
-                            if !found {
+                            if let Some(matched_len) = matches_any_pattern(&patterns, &v, current_vi) {
+                                current_vi += matched_len;
+                            } else {
                                 break;
                             }
                         }
 
-                        if !matched_at_least_once {
-                            return false;
-                        }
-
-                        // Continue with remaining pattern
-                        if match_extglob_recursive(pattern, value, pi, current_vi) {
-                            return true;
+                        // Now try from longest to shortest match
+                        loop {
+                            if match_extglob_recursive(pattern, value, end, current_vi) {
+                                return true;
+                            }
+                            // Backtrack
+                            let mut prev_vi = vi;
+                            let mut test_vi = vi;
+                            while test_vi < current_vi {
+                                if let Some(matched_len) = matches_any_pattern(&patterns, &v, test_vi) {
+                                    prev_vi = test_vi + matched_len;
+                                    test_vi = prev_vi;
+                                } else {
+                                    break;
+                                }
+                            }
+                            if prev_vi == current_vi {
+                                break;
+                            }
+                            current_vi = prev_vi;
                         }
                         return false;
                     } else {
@@ -332,11 +458,8 @@ fn match_extglob_recursive(pattern: &str, value: &str, pi: usize, vi: usize) -> 
                 '@' => {
                     // @(pat): match exactly one of the patterns
                     if let Some((patterns, end)) = parse_extglob_group(&p, pi) {
-                        pi = end;
-                        for subpat in &patterns {
-                            if match_extglob_pattern(subpat, &v, vi) {
-                                return match_extglob_recursive(pattern, value, pi, vi + subpat.len());
-                            }
+                        if let Some(matched_len) = matches_any_pattern(&patterns, &v, vi) {
+                            return match_extglob_recursive(pattern, value, end, vi + matched_len);
                         }
                         return false;
                     } else {
