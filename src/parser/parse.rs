@@ -119,7 +119,7 @@ impl<'a> Parser<'a> {
         self.advance();
         let target_str = self.expect_word()?;
         let target = parse_word_parts(&target_str);
-        Ok(Redirect { fd, kind, target })
+        Ok(Redirect { fd, kind, target, here_doc: None })
     }
 
     fn is_command_start(&self) -> bool {

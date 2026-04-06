@@ -32,12 +32,27 @@ pub struct Assignment {
     pub array_value: Option<Vec<Word>>, // For arr=(a b c)
 }
 
+// Here-doc options to store multi-line content and modifiers
+#[derive(Debug, Clone, PartialEq)]
+pub struct HereDocOptions {
+    pub delimiter: String,           // The delimiter (e.g., "EOF")
+    pub content: String,             // The multi-line content
+    pub strip_tabs: bool,            // <<- strips leading tabs
+    pub expand_vars: bool,           // Whether to expand variables ($var, $(cmd), etc)
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum RedirectTarget {
+    File(Word),                      // Regular file redirection target
+    HereDoc(HereDocOptions),         // Here-doc with content and options
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum RedirectKind {
     Output,
     Append,
     Input,
-    HereDoc,
+    HereDoc,                         // << (still used for identification)
     HereString,
     DupOutput,
     DupInput,
@@ -49,7 +64,8 @@ pub enum RedirectKind {
 pub struct Redirect {
     pub fd: Option<i32>,
     pub kind: RedirectKind,
-    pub target: Word,
+    pub target: Word,                // For backward compatibility, kept as Word
+    pub here_doc: Option<HereDocOptions>, // Here-doc specific data
 }
 
 #[derive(Debug, Clone, PartialEq)]
