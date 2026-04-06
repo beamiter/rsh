@@ -279,7 +279,18 @@ fn execute_simple(cmd: &SimpleCommand, state: &mut ShellState) -> i32 {
         state.push_positional_params(args.to_vec());
         let code = execute_compound(&func_body, state);
         state.pop_positional_params();
-        return code;
+
+        // Handle return statement in function
+        let return_code = if state.return_requested {
+            let ret = state.return_value;
+            state.return_requested = false;
+            state.return_value = 0;
+            ret
+        } else {
+            code
+        };
+
+        return return_code;
     }
 
     // Check for builtin

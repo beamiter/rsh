@@ -41,8 +41,14 @@ pub fn run_builtin(name: &str, args: &[String], state: &mut ShellState) -> i32 {
         "set" => builtin_set(args, state),
         "local" => builtin_local(args, state),
         "return" => {
-            // TODO: Implement return properly
-            0
+            let code = if args.len() > 0 {
+                args[0].parse::<i32>().unwrap_or(0)
+            } else {
+                0
+            };
+            state.return_requested = true;
+            state.return_value = code;
+            code
         }
         "break" => {
             state.loop_break = true;

@@ -133,6 +133,9 @@ pub struct ShellState {
     // Loop control flow (break/continue)
     pub loop_break: bool,
     pub loop_continue: bool,
+    // Function return control flow
+    pub return_requested: bool,
+    pub return_value: i32,
 }
 
 impl ShellState {
@@ -176,6 +179,8 @@ impl ShellState {
             terminal_width: Self::detect_terminal_width(),
             loop_break: false,
             loop_continue: false,
+            return_requested: false,
+            return_value: 0,
         }
     }
 
