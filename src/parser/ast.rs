@@ -101,6 +101,12 @@ pub enum CompoundCommand {
         arms: Vec<CaseArm>,
         redirects: Vec<Redirect>,
     },
+    Select {
+        var: String,
+        words: Option<Vec<Word>>,
+        body: Vec<CompleteCommand>,
+        redirects: Vec<Redirect>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

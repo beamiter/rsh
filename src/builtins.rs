@@ -40,7 +40,18 @@ pub fn run_builtin(name: &str, args: &[String], state: &mut ShellState) -> i32 {
         "test" | "[" => builtin_test(args),
         "set" => builtin_set(args, state),
         "local" => builtin_local(args, state),
-        "return" | "break" | "continue" => 0,
+        "return" => {
+            // TODO: Implement return properly
+            0
+        }
+        "break" => {
+            state.loop_break = true;
+            0
+        }
+        "continue" => {
+            state.loop_continue = true;
+            0
+        }
         "shift" => builtin_shift(state),
         "help" => { println!("rsh: a fish-like shell with bash compatibility\nBuiltins: cd, exit, export, unset, echo, printf, pwd, alias, type, source,\n  eval, read, test, set, local, shift, jobs, fg, bg, history, pushd, popd,\n  dirs, trap, command, builtin, declare, z, bookmark, hook, complete, compgen,\n  disown, from-json, to-json, to-table, where, sort-by, select, help"); 0 }
         "history" => builtin_history(state),

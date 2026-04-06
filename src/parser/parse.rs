@@ -184,6 +184,7 @@ impl<'a> Parser<'a> {
                     "while" => self.parse_while(),
                     "until" => self.parse_until(),
                     "case" => self.parse_case(),
+                    "select" => self.parse_select(),
                     _ => self.parse_simple_command(),
                 }
             }
@@ -352,6 +353,40 @@ impl<'a> Parser<'a> {
         self.expect_keyword("esac")?;
         let redirects = self.parse_optional_redirects()?;
         Ok(Command::Compound(CompoundCommand::Case { word, arms, redirects }))
+    }
+
+    fn parse_select(&mut self) -> Result<Command, ParseError> {
+        self.advance(); // consume "select"
+        let var = self.expect_word()?;
+        self.skip_newlines();
+
+        let words = if self.is_keyword("in") {
+            self.advance();
+            let mut ws = Vec::new();
+            while let Token::Word(w) = &self.current.token {
+                let w = w.clone();
+                ws.push(parse_word_parts(&w));
+                self.advance();
+            }
+            // consume separator
+            if self.current.token == Token::Semi || self.current.token == Token::Newline {
+                self.advance();
+            }
+            Some(ws)
+        } else {
+            if self.current.token == Token::Semi || self.current.token == Token::Newline {
+                self.advance();
+            }
+            None
+        };
+
+        self.skip_newlines();
+        self.expect_keyword("do")?;
+        self.skip_newlines();
+        let body = self.parse_command_list()?;
+        self.expect_keyword("done")?;
+        let redirects = self.parse_optional_redirects()?;
+        Ok(Command::Compound(CompoundCommand::Select { var, words, body, redirects }))
     }
 
     fn parse_optional_redirects(&mut self) -> Result<Vec<Redirect>, ParseError> {
@@ -527,7 +562,7 @@ fn is_reserved_word(w: &str) -> bool {
 }
 
 fn is_compound_keyword(w: &str) -> bool {
-    matches!(w, "if" | "for" | "while" | "until" | "case")
+    matches!(w, "if" | "for" | "while" | "until" | "case" | "select")
 }
 
 /// Keywords that terminate a command list (not valid as the start of a new command).

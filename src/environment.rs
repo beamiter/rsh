@@ -122,6 +122,9 @@ pub struct ShellState {
     // Prompt style and terminal width
     pub prompt_style: PromptStyle,
     pub terminal_width: usize,
+    // Loop control flow (break/continue)
+    pub loop_break: bool,
+    pub loop_continue: bool,
 }
 
 impl ShellState {
@@ -163,6 +166,8 @@ impl ShellState {
             editing_mode: EditingMode::Emacs,
             prompt_style: PromptStyle::Auto,
             terminal_width: Self::detect_terminal_width(),
+            loop_break: false,
+            loop_continue: false,
         }
     }
 
