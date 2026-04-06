@@ -13,7 +13,7 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "pushd", "popd", "dirs", "trap", "command", "builtin", "[[",
     "declare", "z", "hook", "complete", "compgen", "disown", "shopt",
     "from-json", "to-json", "to-table", "where", "sort-by", "select",
-    "bookmark", "from-csv", "group-by", "unique", "count", "math",
+    "bookmark", "from-csv", "group-by", "unique", "count", "math", "exec",
 ];
 
 pub fn is_builtin(name: &str) -> bool {
@@ -59,6 +59,7 @@ pub fn run_builtin(name: &str, args: &[String], state: &mut ShellState) -> i32 {
             0
         }
         "shift" => builtin_shift(state),
+        "exec" => builtin_exec(args, state),
         "help" => { println!("rsh: a fish-like shell with bash compatibility\nBuiltins: cd, exit, export, unset, echo, printf, pwd, alias, type, source,\n  eval, read, test, set, local, shift, jobs, fg, bg, history, pushd, popd,\n  dirs, trap, command, builtin, declare, z, bookmark, hook, complete, compgen,\n  disown, from-json, to-json, to-table, where, sort-by, select, help"); 0 }
         "history" => builtin_history(state),
         "pushd" => builtin_pushd(args, state),
@@ -753,6 +754,148 @@ fn builtin_shift(state: &mut ShellState) -> i32 {
     if !state.positional_params.is_empty() {
         state.positional_params.remove(0);
     }
+    0
+}
+
+fn builtin_exec(args: &[String], _state: &mut ShellState) -> i32 {
+    use std::fs::{File, OpenOptions};
+    use std::os::unix::io::{IntoRawFd, RawFd};
+    use nix::unistd::close;
+
+    fn dup2_raw(oldfd: RawFd, newfd: RawFd) -> Result<(), String> {
+        unsafe {
+            match nix::libc::dup2(oldfd, newfd) {
+                -1 => Err(format!("dup2 failed")),
+                _ => Ok(()),
+            }
+        }
+    }
+
+    if args.is_empty() {
+        return 0;
+    }
+
+    // Simple implementation of exec FD redirection
+    // Format: exec FD<file, exec FD>file, exec FD>&FD2, etc.
+
+    for arg in args {
+        // Parse FD redirection: "3<file", "1>file", "2>&1", "{fd}>&-", etc.
+        let (fd_str, redirect_type, target) = if let Some(pos) = arg.find('<') {
+            let fd = &arg[..pos];
+            let target = &arg[pos + 1..];
+            (fd, "<", target)
+        } else if let Some(pos) = arg.find('>') {
+            let fd = &arg[..pos];
+            if pos + 1 < arg.len() && arg.chars().nth(pos + 1) == Some('>') {
+                // >> redirect
+                let target = &arg[pos + 2..];
+                (fd, ">>", target)
+            } else if pos + 1 < arg.len() && arg.chars().nth(pos + 1) == Some('&') {
+                // >& redirect
+                let target = &arg[pos + 2..];
+                (fd, ">&", target)
+            } else {
+                // > redirect
+                let target = &arg[pos + 1..];
+                (fd, ">", target)
+            }
+        } else {
+            continue;
+        };
+
+        // Parse the FD number (handle {fd} format)
+        let fd_clean = fd_str.trim_matches(|c| c == '{' || c == '}');
+        let fd: i32 = match fd_clean.parse() {
+            Ok(n) => n,
+            Err(_) => {
+                eprintln!("rsh: exec: invalid file descriptor: {}", fd_str);
+                return 1;
+            }
+        };
+
+        // Execute the redirection
+        match redirect_type {
+            "<" => {
+                // Input redirection: open for reading
+                match File::open(target) {
+                    Ok(file) => {
+                        let src_fd = file.into_raw_fd();
+                        if let Err(_) = dup2_raw(src_fd, fd) {
+                            eprintln!("rsh: exec: dup2 failed");
+                            return 1;
+                        }
+                        if src_fd != fd {
+                            close(src_fd).ok();
+                        }
+                    }
+                    Err(_) => {
+                        eprintln!("rsh: exec: cannot open {} for reading", target);
+                        return 1;
+                    }
+                }
+            }
+            ">" => {
+                // Output redirection: open for writing
+                match File::create(target) {
+                    Ok(file) => {
+                        let src_fd = file.into_raw_fd();
+                        if let Err(_) = dup2_raw(src_fd, fd) {
+                            eprintln!("rsh: exec: dup2 failed");
+                            return 1;
+                        }
+                        if src_fd != fd {
+                            close(src_fd).ok();
+                        }
+                    }
+                    Err(_) => {
+                        eprintln!("rsh: exec: cannot open {} for writing", target);
+                        return 1;
+                    }
+                }
+            }
+            ">>" => {
+                // Append redirection
+                match OpenOptions::new().create(true).append(true).open(target) {
+                    Ok(file) => {
+                        let src_fd = file.into_raw_fd();
+                        if let Err(_) = dup2_raw(src_fd, fd) {
+                            eprintln!("rsh: exec: dup2 failed");
+                            return 1;
+                        }
+                        if src_fd != fd {
+                            close(src_fd).ok();
+                        }
+                    }
+                    Err(_) => {
+                        eprintln!("rsh: exec: cannot open {} for appending", target);
+                        return 1;
+                    }
+                }
+            }
+            ">&" => {
+                if target == "-" {
+                    // Close FD
+                    close(fd).ok();
+                } else {
+                    // Duplicate FD
+                    match target.parse::<i32>() {
+                        Ok(target_fd) => {
+                            if let Err(_) = dup2_raw(target_fd, fd) {
+                                eprintln!("rsh: exec: dup2 failed");
+                                return 1;
+                            }
+                        }
+                        Err(_) => {
+                            eprintln!("rsh: exec: invalid target FD: {}", target);
+                            return 1;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     0
 }
 
