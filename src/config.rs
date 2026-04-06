@@ -1,15 +1,30 @@
-/// Config file loading: source ~/.bashrc on startup.
+/// Config file loading: source ~/.bashrc or ~/.rshrc on startup.
 
-use crate::environment::ShellState;
+use crate::environment::{ShellState, ConfigSource};
 use crate::executor;
 use crate::parser;
 use std::path::PathBuf;
 
 pub fn load_config(state: &mut ShellState) {
-    // Load ~/.bashrc (bash-compatible startup configuration)
+    match state.shell_opts.config_source {
+        ConfigSource::Bashrc => load_bashrc(state),
+        ConfigSource::Rshrc => load_rshrc(state),
+    }
+}
+
+/// Load ~/.bashrc directly via bash, without attempting rsh parsing
+fn load_bashrc(state: &mut ShellState) {
     let bashrc = state.home_dir.join(".bashrc");
     if bashrc.exists() {
-        source_file_lenient(&bashrc, state);
+        source_via_bash(&bashrc, state);
+    }
+}
+
+/// Load ~/.rshrc via rsh parser with bash fallback for complex scripts
+fn load_rshrc(state: &mut ShellState) {
+    let rshrc = state.home_dir.join(".rshrc");
+    if rshrc.exists() {
+        source_file_lenient(&rshrc, state);
     }
 }
 
@@ -27,7 +42,7 @@ fn source_file_lenient(path: &PathBuf, state: &mut ShellState) {
                 }
                 Err(_) => {
                     // Full parse failed, use bash as fallback for complex scripts
-                    source_via_bash_fallback(path, state);
+                    source_via_bash(path, state);
                 }
             }
         }
@@ -36,7 +51,7 @@ fn source_file_lenient(path: &PathBuf, state: &mut ShellState) {
 }
 
 /// Use bash to source a script file and reload environment variables
-fn source_via_bash_fallback(path: &PathBuf, state: &mut ShellState) {
+fn source_via_bash(path: &PathBuf, state: &mut ShellState) {
     let path_str = path.to_string_lossy().to_string();
     let bash_script = format!(
         r#"
@@ -77,4 +92,5 @@ declare -p | grep 'declare -x' | sed 's/declare -x //' | sed "s/='/'=/g"
         }
     }
 }
+
 

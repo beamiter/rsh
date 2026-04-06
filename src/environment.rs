@@ -11,6 +11,12 @@ pub enum EditingMode {
     Vi,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConfigSource {
+    Bashrc,    // 使用 .bashrc，直接用 bash 执行
+    Rshrc,     // 使用 .rshrc，用 rsh 解析器执行
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptStyle {
     Full,     // user@host ~/path (branch) took duration ❯
@@ -42,6 +48,7 @@ pub struct ShellOpts {
     pub cdspell: bool,        // shopt cdspell: correct cd spelling errors
     pub checkwinsize: bool,   // shopt checkwinsize: update LINES/COLUMNS
     pub inherit_errexit: bool,// shopt inherit_errexit: subshells inherit errexit
+    pub config_source: ConfigSource, // which config file to use: .bashrc or .rshrc
 }
 
 impl Default for ShellOpts {
@@ -62,6 +69,7 @@ impl Default for ShellOpts {
             cdspell: false,
             checkwinsize: false,
             inherit_errexit: false,
+            config_source: ConfigSource::Bashrc,
         }
     }
 }
