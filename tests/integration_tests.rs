@@ -307,3 +307,19 @@ fn test_here_doc_with_redirect() {
     let cmds = parse(cmd_str).unwrap();
     assert_eq!(cmds.len(), 1);
 }
+
+#[test]
+fn test_array_assignment() {
+    // Test array literal assignment: arr=(a b c)
+    let cmd_str = "arr=(apple banana cherry); echo ${arr[@]}";
+    let cmds = parse(cmd_str).unwrap();
+    assert_eq!(cmds.len(), 2);  // array assignment + echo
+}
+
+#[test]
+fn test_array_indexing() {
+    // Test array element access
+    let cmd_str = "arr=(x y z); echo ${arr[1]}";
+    let cmds = parse(cmd_str).unwrap();
+    assert_eq!(cmds.len(), 2);
+}
