@@ -614,12 +614,68 @@ pub fn execute_compound(cmd: &CompoundCommand, state: &mut ShellState) -> i32 {
                 }
             })
         }
-        CompoundCommand::Coproc { name: _, command: _, redirects } => {
-            // Coproc support: TODO - implement bidirectional pipes
-            // For now, just execute the command without pipes
-            eprintln!("warning: coproc is not fully implemented");
+        CompoundCommand::Coproc { name, command, redirects } => {
             with_redirects(redirects, state, |state| {
-                0
+                // Create two pipes for bidirectional communication
+                // Pipe 1: parent writes to child's stdin
+                // Pipe 2: parent reads from child's stdout
+                let (read_from_parent, write_to_child) = pipe().expect("pipe 1 failed");
+                let (read_from_child, write_to_parent) = pipe().expect("pipe 2 failed");
+
+                match unsafe { fork() } {
+                    Ok(ForkResult::Child) => {
+                        signal::reset_child_signals();
+                        let pid = nix::unistd::getpid();
+                        setpgid(pid, pid).ok();
+
+                        // Child: set up pipes
+                        let read_fd = read_from_parent.into_raw_fd();
+                        let write_fd = write_to_parent.into_raw_fd();
+
+                        // Close parent's ends
+                        close(write_to_child.into_raw_fd()).ok();
+                        close(read_from_child.into_raw_fd()).ok();
+
+                        // Redirect stdin from parent's write
+                        dup2_raw(read_fd, 0).ok();
+                        close(read_fd).ok();
+
+                        // Redirect stdout to parent's read
+                        dup2_raw(write_fd, 1).ok();
+                        close(write_fd).ok();
+
+                        // Execute the command
+                        let code = execute_simple(command, state);
+                        std::process::exit(code);
+                    }
+                    Ok(ForkResult::Parent { child }) => {
+                        // Parent: save pipe fds in array variable
+                        let coproc_var = name.clone().unwrap_or_else(|| "COPROC".to_string());
+
+                        // Close child's ends
+                        close(read_from_parent.into_raw_fd()).ok();
+                        close(write_to_parent.into_raw_fd()).ok();
+
+                        // Get raw fds for the pipes (still open)
+                        let write_fd = write_to_child.into_raw_fd();
+                        let read_fd = read_from_child.into_raw_fd();
+
+                        // Set array: COPROC[0]=read_fd COPROC[1]=write_fd
+                        let coproc_array = vec![
+                            read_fd.to_string(),
+                            write_fd.to_string(),
+                        ];
+                        state.arrays.insert(coproc_var, coproc_array);
+
+                        // Don't wait for coproc - it runs in background
+                        state.last_bg_pid = Some(child.as_raw() as u32);
+                        0
+                    }
+                    Err(_) => {
+                        eprintln!("rsh: coproc: fork failed");
+                        1
+                    }
+                }
             })
         }
     }

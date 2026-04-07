@@ -662,6 +662,49 @@ impl<'a> Parser<'a> {
         match &self.current.token {
             Token::LParen | Token::LBrace => self.parse_compound_command(),
             Token::Word(w) if is_compound_keyword(w) => self.parse_compound_command(),
+            Token::Word(w) if w == "coproc" => {
+                // Parse coproc command
+                let w = w.clone();
+                if w == "coproc" {
+                    self.advance(); // consume "coproc"
+
+                    // Check if next token is a name (word without redirects/pipes)
+                    let mut coproc_name = None;
+
+                    // Peek at the next token
+                    let next_is_simple = if let Token::Word(potential_name) = &self.current.token {
+                        let potential = potential_name.clone();
+                        let peek_token = self.peek().clone();
+                        if matches!(peek_token, Token::Word(_) | Token::LParen | Token::LBrace) {
+                            coproc_name = Some(potential);
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+
+                    if next_is_simple {
+                        self.advance();
+                    }
+
+                    // Parse the actual command as simple command
+                    let cmd = self.parse_simple_command()?;
+                    if let Command::Simple(simple) = cmd {
+                        let redirects = self.parse_optional_redirects()?;
+                        return Ok(Command::Compound(CompoundCommand::Coproc {
+                            name: coproc_name,
+                            command: Box::new(simple),
+                            redirects,
+                        }));
+                    } else {
+                        return Err(ParseError::Unexpected("coproc requires a simple command".into()));
+                    }
+                } else {
+                    unreachable!()
+                }
+            }
             Token::Word(w) if w == "function" => {
                 self.advance(); // consume "function"
                 let name = self.expect_word()?;

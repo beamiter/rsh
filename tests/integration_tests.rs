@@ -323,3 +323,19 @@ fn test_array_indexing() {
     let cmds = parse(cmd_str).unwrap();
     assert_eq!(cmds.len(), 2);
 }
+
+#[test]
+fn test_coproc_parsing() {
+    // Test coproc command parsing
+    let cmd_str = "coproc cat";
+    let cmds = parse(cmd_str).unwrap();
+    assert_eq!(cmds.len(), 1);
+}
+
+#[test]
+fn test_coproc_named() {
+    // Test named coproc
+    let cmd_str = "coproc myprocess cat";
+    let cmds = parse(cmd_str).unwrap();
+    assert_eq!(cmds.len(), 1);
+}
