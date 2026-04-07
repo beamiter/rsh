@@ -129,7 +129,33 @@ impl<'a> Lexer<'a> {
             match self.peek_char() {
                 None => break,
                 Some(c) => match c {
-                    ' ' | '\t' | '\n' | '|' | '&' | ';' | '(' | ')' => break,
+                    ' ' | '\t' | '\n' | '|' | '&' | ';' => break,
+                    '(' | ')' => {
+                        // Check for array assignment: name=(...)
+                        // If word contains '=' and we see '(', continue reading the array
+                        if c == '(' && word.contains('=') {
+                            // This is array assignment, read until matching )
+                            self.next_char();
+                            word.push('(');
+                            let mut paren_depth = 1;
+                            while let Some(c2) = self.peek_char() {
+                                if c2 == '(' {
+                                    paren_depth += 1;
+                                } else if c2 == ')' {
+                                    paren_depth -= 1;
+                                    if paren_depth == 0 {
+                                        self.next_char();
+                                        word.push(')');
+                                        break;
+                                    }
+                                }
+                                self.next_char();
+                                word.push(c2);
+                            }
+                        } else {
+                            break;
+                        }
+                    }
                     '<' | '>' => {
                         // Check for process substitution <(...) or >(...)
                         if self.peek_char_at(1) == Some('(') {
