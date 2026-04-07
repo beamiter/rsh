@@ -876,29 +876,94 @@ impl Editor {
         if let Some(ref menu) = self.completion_menu {
             out.queue(Print("\r\n"))?;
             rendered_lines += 1;
+
+            // Group completions by type for better organization
+            let mut builtins = Vec::new();
+            let mut aliases = Vec::new();
+            let mut functions = Vec::new();
+            let mut dirs = Vec::new();
+            let mut files = Vec::new();
+            let mut others = Vec::new();
+
+            for comp in &menu.completions {
+                match comp.description.as_deref() {
+                    Some("builtin") => builtins.push(comp),
+                    Some("alias") => aliases.push(comp),
+                    Some("function") => functions.push(comp),
+                    _ if comp.is_dir => dirs.push(comp),
+                    _ if comp.display.contains('.') => files.push(comp),
+                    _ => others.push(comp),
+                }
+            }
+
+            // Render grouped completions
+            let mut count = 0;
             let cols = (self.terminal_width as usize) / 20;
             let cols = cols.max(1);
-            for (i, comp) in menu.completions.iter().enumerate().take(20) {
-                if i == menu.selected {
-                    out.queue(SetForegroundColor(Color::Black))?;
-                    out.queue(SetAttribute(Attribute::Reverse))?;
+
+            let groups = vec![
+                ("Builtins:", builtins),
+                ("Aliases:", aliases),
+                ("Functions:", functions),
+                ("Directories:", dirs),
+                ("Files:", files),
+                ("Others:", others),
+            ];
+
+            for (header, items) in groups {
+                if items.is_empty() || count >= 20 {
+                    continue;
                 }
-                let display = if let Some(ref desc) = comp.description {
-                    format!("{:<16} {}", comp.display, desc)
-                } else {
-                    format!("{:<18}", comp.display)
-                };
-                out.queue(Print(&display))?;
-                if i == menu.selected {
-                    out.queue(ResetColor)?;
-                    out.queue(SetAttribute(Attribute::Reset))?;
-                }
-                out.queue(Print("  "))?;
-                if (i + 1) % cols == 0 && i + 1 < menu.completions.len() {
+
+                // Print group header
+                if count > 0 {
                     out.queue(Print("\r\n"))?;
                     rendered_lines += 1;
                 }
+                out.queue(SetForegroundColor(Color::Cyan))?;
+                out.queue(SetAttribute(Attribute::Dim))?;
+                out.queue(Print(header))?;
+                out.queue(ResetColor)?;
+                out.queue(Print("\r\n"))?;
+                rendered_lines += 1;
+
+                for comp in items {
+                    if count >= 20 {
+                        break;
+                    }
+
+                    // Highlight selected item
+                    if count == menu.selected {
+                        out.queue(SetForegroundColor(Color::Black))?;
+                        out.queue(SetAttribute(Attribute::Reverse))?;
+                    } else if comp.is_dir {
+                        out.queue(SetForegroundColor(Color::Blue))?;
+                    }
+
+                    let display = if let Some(ref desc) = comp.description {
+                        format!("{:<16} {}", comp.display, desc)
+                    } else {
+                        format!("{:<18}", comp.display)
+                    };
+                    out.queue(Print(&display))?;
+
+                    if count == menu.selected {
+                        out.queue(ResetColor)?;
+                        out.queue(SetAttribute(Attribute::Reset))?;
+                    } else if comp.is_dir {
+                        out.queue(ResetColor)?;
+                    }
+
+                    out.queue(Print("  "))?;
+                    count += 1;
+
+                    if count % cols == 0 && count < menu.completions.len().min(20) {
+                        out.queue(Print("\r\n"))?;
+                        rendered_lines += 1;
+                    }
+                }
             }
+
             if menu.completions.len() > 20 {
                 out.queue(Print(format!("\r\n... and {} more", menu.completions.len() - 20)))?;
                 rendered_lines += 1;

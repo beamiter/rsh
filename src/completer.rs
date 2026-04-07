@@ -3,6 +3,7 @@
 
 use crate::environment::ShellState;
 use std::fs;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 pub struct Completion {
@@ -12,6 +13,68 @@ pub struct Completion {
     pub is_dir: bool,
 }
 
+/// Completion cache entry with frequency tracking
+#[derive(Debug, Clone)]
+struct CacheEntry {
+    completions: Vec<Completion>,
+    hit_count: u32,
+}
+
+/// LRU completion cache
+#[derive(Debug)]
+struct CompletionCache {
+    cache: HashMap<String, CacheEntry>,
+    max_size: usize,
+}
+
+impl CompletionCache {
+    fn new(max_size: usize) -> Self {
+        CompletionCache {
+            cache: HashMap::new(),
+            max_size,
+        }
+    }
+
+    fn get(&mut self, key: &str) -> Option<Vec<Completion>> {
+        if let Some(entry) = self.cache.get_mut(key) {
+            entry.hit_count += 1;
+            return Some(entry.completions.clone());
+        }
+        None
+    }
+
+    fn insert(&mut self, key: String, completions: Vec<Completion>) {
+        if self.cache.len() >= self.max_size && !self.cache.contains_key(&key) {
+            // Remove the least frequently used entry
+            if let Some(lfu_key) = self.cache
+                .iter()
+                .min_by_key(|(_, entry)| entry.hit_count)
+                .map(|(k, _)| k.clone())
+            {
+                self.cache.remove(&lfu_key);
+            }
+        }
+
+        self.cache.insert(
+            key,
+            CacheEntry {
+                completions,
+                hit_count: 0,
+            },
+        );
+    }
+
+    fn clear(&mut self) {
+        self.cache.clear();
+    }
+}
+
+// Thread-local cache for completion results
+thread_local! {
+    static COMPLETION_CACHE: std::cell::RefCell<CompletionCache> =
+        std::cell::RefCell::new(CompletionCache::new(256));
+}
+
 pub fn complete(buffer: &str, cursor: usize, state: &mut ShellState) -> (usize, Vec<Completion>) {
     let buf = &buffer[..cursor];
     let (word, word_start) = extract_word_at(buf);
@@ -19,11 +82,32 @@ pub fn complete(buffer: &str, cursor: usize, state: &mut ShellState) -> (usize, 
 
     let cmd = first_command(buf);
 
+    // Create cache key based on context
+    let cache_key = if is_cmd_pos {
+        format!("cmd:{}", word)
+    } else if word.starts_with('$') {
+        format!("var:{}", &word[1..])
+    } else {
+        format!("path:{}", word)
+    };
+
+    // Try to get from cache
+    let cached = COMPLETION_CACHE.with(|cache| {
+        cache.borrow_mut().get(&cache_key)
+    });
+
+    if let Some(completions) = cached {
+        return (word_start, completions);
+    }
+
     // Check user-defined completion specs first
     if !is_cmd_pos {
         if let Some(spec) = state.completion_specs.get(&cmd).cloned() {
             let completions = apply_completion_spec(&spec, &word, state);
             if !completions.is_empty() {
+                COMPLETION_CACHE.with(|cache| {
+                    cache.borrow_mut().insert(cache_key, completions.clone());
+                });
                 return (word_start, completions);
             }
         }
@@ -40,6 +124,11 @@ pub fn complete(buffer: &str, cursor: usize, state: &mut ShellState) -> (usize, 
     } else {
         complete_path(&word, state)
     };
+
+    // Store in cache
+    COMPLETION_CACHE.with(|cache| {
+        cache.borrow_mut().insert(cache_key, completions.clone());
+    });
 
     (word_start, completions)
 }
@@ -255,6 +344,95 @@ fn subcommand_completions(cmd: &str, prefix: &str, buf: &str, word_start: usize)
         }
     }
 
+    // Option completions for common commands
+    if prefix.starts_with('-') {
+        let options: &[(&str, &str)] = match cmd {
+            "ls" => &[
+                ("-l", "long format"),
+                ("-a", "include hidden"),
+                ("-h", "human readable"),
+                ("-r", "reverse order"),
+                ("-t", "sort by time"),
+                ("-S", "sort by size"),
+                ("-R", "recursive"),
+                ("-d", "list directories"),
+            ],
+            "grep" => &[
+                ("-i", "case insensitive"),
+                ("-v", "invert match"),
+                ("-n", "show line numbers"),
+                ("-r", "recursive"),
+                ("-R", "recursive dereference"),
+                ("-l", "list filenames"),
+                ("-c", "count matches"),
+                ("-o", "only matching parts"),
+                ("-E", "extended regex"),
+                ("-F", "fixed strings"),
+            ],
+            "find" => &[
+                ("-type", "file type"),
+                ("-name", "filename pattern"),
+                ("-iname", "case insensitive name"),
+                ("-path", "path pattern"),
+                ("-regex", "regex pattern"),
+                ("-size", "file size"),
+                ("-mtime", "modification time"),
+                ("-atime", "access time"),
+                ("-user", "file owner"),
+                ("-exec", "execute command"),
+            ],
+            "tar" => &[
+                ("-c", "create archive"),
+                ("-x", "extract archive"),
+                ("-t", "list contents"),
+                ("-v", "verbose"),
+                ("-z", "gzip compression"),
+                ("-j", "bzip2 compression"),
+                ("-f", "archive file"),
+                ("-C", "change directory"),
+            ],
+            "rm" => &[
+                ("-r", "recursive"),
+                ("-f", "force"),
+                ("-i", "interactive"),
+                ("-v", "verbose"),
+            ],
+            "cp" => &[
+                ("-r", "recursive"),
+                ("-i", "interactive"),
+                ("-v", "verbose"),
+                ("-a", "preserve all"),
+                ("-p", "preserve properties"),
+            ],
+            "mkdir" => &[
+                ("-p", "parents"),
+                ("-m", "mode"),
+                ("-v", "verbose"),
+            ],
+            "chmod" => &[
+                ("-r", "recursive"),
+                ("-v", "verbose"),
+                ("-c", "changes only"),
+                ("-R", "recursive"),
+            ],
+            _ => return None,
+        };
+
+        let completions = options.iter()
+            .filter(|(opt, _)| opt.starts_with(prefix))
+            .map(|(opt, desc)| Completion {
+                text: opt.to_string(),
+                display: opt.to_string(),
+                description: Some(desc.to_string()),
+                is_dir: false,
+            })
+            .collect::<Vec<_>>();
+
+        if !completions.is_empty() {
+            return Some(completions);
+        }
+    }
+
     None
 }
 
@@ -364,57 +542,59 @@ fn is_command_position(buf: &str, word_start: usize) -> bool {
 fn complete_command(prefix: &str, state: &mut ShellState) -> Vec<Completion> {
     let mut completions = Vec::new();
 
+    // Collect all builtin commands
     for cmd in crate::builtins::BUILTIN_NAMES {
-        if cmd.starts_with(prefix) {
-            completions.push(Completion {
-                text: cmd.to_string(),
-                display: cmd.to_string(),
-                description: Some("builtin".to_string()),
-                is_dir: false,
-            });
-        }
+        completions.push(Completion {
+            text: cmd.to_string(),
+            display: cmd.to_string(),
+            description: Some("builtin".to_string()),
+            is_dir: false,
+        });
     }
 
+    // Collect aliases
     for name in state.aliases.keys() {
-        if name.starts_with(prefix) {
-            completions.push(Completion {
-                text: name.clone(),
-                display: name.clone(),
-                description: Some("alias".to_string()),
-                is_dir: false,
-            });
-        }
+        completions.push(Completion {
+            text: name.clone(),
+            display: name.clone(),
+            description: Some("alias".to_string()),
+            is_dir: false,
+        });
     }
 
+    // Collect functions
     for name in state.functions.keys() {
-        if name.starts_with(prefix) {
-            completions.push(Completion {
-                text: name.clone(),
-                display: name.clone(),
-                description: Some("function".to_string()),
-                is_dir: false,
-            });
-        }
+        completions.push(Completion {
+            text: name.clone(),
+            display: name.clone(),
+            description: Some("function".to_string()),
+            is_dir: false,
+        });
     }
 
+    // Collect commands in PATH
     for cmd in state.path_cache().iter() {
-        if cmd.starts_with(prefix) {
-            completions.push(Completion {
-                text: cmd.clone(),
-                display: cmd.clone(),
-                description: None,
-                is_dir: false,
-            });
-        }
+        completions.push(Completion {
+            text: cmd.clone(),
+            display: cmd.clone(),
+            description: None,
+            is_dir: false,
+        });
     }
 
+    // Add path completions if prefix contains /
     if prefix.contains('/') {
         completions.extend(complete_path(prefix, state));
     }
 
-    completions.sort_by(|a, b| a.text.cmp(&b.text));
+    // Remove duplicates
     completions.dedup_by(|a, b| a.text == b.text);
-    completions
+
+    // Apply fuzzy filtering and sorting
+    let filtered = filter_completions(completions, prefix);
+
+    // Limit to top 50 completions to avoid overwhelming the user
+    filtered.into_iter().take(50).collect()
 }
 
 fn complete_path(prefix: &str, state: &ShellState) -> Vec<Completion> {
@@ -487,63 +667,103 @@ fn complete_path(prefix: &str, state: &ShellState) -> Vec<Completion> {
 fn complete_variable(prefix: &str, state: &ShellState) -> Vec<Completion> {
     let mut completions = Vec::new();
 
-    for name in state.env_vars.keys() {
-        if name.starts_with(prefix) {
+    // Add special shell variables first
+    let special_vars = vec![
+        ("?", "Last exit code"),
+        ("!", "Last background PID"),
+        ("*", "All positional parameters"),
+        ("@", "All positional parameters (quoted)"),
+        ("#", "Number of positional parameters"),
+        ("0", "Script/shell name"),
+        ("-", "Shell options"),
+        ("$", "Shell process ID"),
+        ("_", "Last command argument"),
+    ];
+
+    for (var_name, description) in special_vars {
+        if var_name.starts_with(prefix) || prefix.is_empty() {
             completions.push(Completion {
-                text: format!("${}", name),
-                display: name.clone(),
-                description: None,
-                is_dir: false,
-            });
-        }
-    }
-    for name in state.env_vars.keys() {
-        if name.starts_with(prefix) {
-            completions.push(Completion {
-                text: format!("${}", name),
-                display: name.clone(),
-                description: None,
-                is_dir: false,
-            });
-        }
-    }
-    // Also complete local variables from all scopes
-    for scope in &state.local_vars_stack {
-        for name in scope.keys() {
-            if name.starts_with(prefix) {
-                completions.push(Completion {
-                    text: format!("${}", name),
-                    display: name.clone(),
-                    description: None,
-                    is_dir: false,
-                });
-            }
-        }
-    }
-    // Also complete array names
-    for name in state.arrays.keys() {
-        if name.starts_with(prefix) {
-            completions.push(Completion {
-                text: format!("${}", name),
-                display: format!("{} (array)", name),
-                description: Some("array".to_string()),
-                is_dir: false,
-            });
-        }
-    }
-    for name in state.assoc_arrays.keys() {
-        if name.starts_with(prefix) {
-            completions.push(Completion {
-                text: format!("${}", name),
-                display: format!("{} (assoc)", name),
-                description: Some("assoc array".to_string()),
+                text: format!("${}", var_name),
+                display: var_name.to_string(),
+                description: Some(description.to_string()),
                 is_dir: false,
             });
         }
     }
 
-    completions.sort_by(|a, b| a.text.cmp(&b.text));
-    completions
+    // Add environment variables with values shown as descriptions
+    let mut env_vars: Vec<_> = state.env_vars.keys().collect();
+    env_vars.sort();
+    for name in env_vars {
+        if name.starts_with(prefix) || prefix.is_empty() {
+            let value = state.env_vars.get(name).cloned().unwrap_or_default();
+            // Show first 50 chars of value as description
+            let desc = if value.len() > 50 {
+                format!("{}...", &value[..50])
+            } else {
+                value
+            };
+            completions.push(Completion {
+                text: format!("${}", name),
+                display: name.clone(),
+                description: Some(desc),
+                is_dir: false,
+            });
+        }
+    }
+
+    // Add local variables from all scopes
+    for scope in &state.local_vars_stack {
+        let mut local_names: Vec<_> = scope.keys().collect();
+        local_names.sort();
+        for name in local_names {
+            if name.starts_with(prefix) || prefix.is_empty() {
+                completions.push(Completion {
+                    text: format!("${}", name),
+                    display: name.clone(),
+                    description: Some("local".to_string()),
+                    is_dir: false,
+                });
+            }
+        }
+    }
+
+    // Add array names
+    let mut array_names: Vec<_> = state.arrays.keys().collect();
+    array_names.sort();
+    for name in array_names {
+        if name.starts_with(prefix) || prefix.is_empty() {
+            let len = state.array_length(name);
+            completions.push(Completion {
+                text: format!("${{{}[@]}}", name),
+                display: format!("{} [{}]", name, len),
+                description: Some(format!("array ({} items)", len)),
+                is_dir: false,
+            });
+        }
+    }
+
+    // Add associative array names
+    let mut assoc_names: Vec<_> = state.assoc_arrays.keys().collect();
+    assoc_names.sort();
+    for name in assoc_names {
+        if name.starts_with(prefix) || prefix.is_empty() {
+            let len = state.array_length(name);
+            completions.push(Completion {
+                text: format!("${{{}[@]}}", name),
+                display: format!("{} [{}]", name, len),
+                description: Some(format!("assoc array ({} items)", len)),
+                is_dir: false,
+            });
+        }
+    }
+
+    // Remove duplicates
+    completions.dedup_by(|a, b| a.text == b.text);
+
+    // Apply fuzzy filtering
+    let filtered = filter_completions(completions, prefix);
+    filtered.into_iter().take(50).collect()
 }
 
 pub fn common_prefix(completions: &[Completion]) -> String {
@@ -560,4 +780,131 @@ pub fn common_prefix(completions: &[Completion]) -> String {
         }
     }
     first[..len].to_string()
+}
+
+/// Fuzzy match score: higher is better
+/// 精确前缀匹配最高分，然后是首字母匹配，最后是子字符串匹配
+pub fn fuzzy_match_score(text: &str, pattern: &str) -> i32 {
+    if pattern.is_empty() {
+        return 1000; // Empty pattern matches everything with high score
+    }
+
+    let text_lower = text.to_lowercase();
+    let pattern_lower = pattern.to_lowercase();
+
+    // Exact prefix match: highest score
+    if text_lower.starts_with(&pattern_lower) {
+        return 1000 - (text_lower.len() as i32 - pattern_lower.len() as i32).abs();
+    }
+
+    // Check if all characters of pattern exist in text in order
+    let mut pattern_chars = pattern_lower.chars().peekable();
+    let mut text_chars = text_lower.chars();
+    let mut last_match_pos = 0;
+    let mut match_count = 0;
+    let mut gap_penalty = 0;
+
+    for (pos, text_char) in text_chars.by_ref().enumerate() {
+        if let Some(&pattern_char) = pattern_chars.peek() {
+            if text_char == pattern_char {
+                pattern_chars.next();
+                match_count += 1;
+
+                // Penalty for gaps between matches
+                gap_penalty += pos.saturating_sub(last_match_pos).saturating_sub(1) as i32;
+                last_match_pos = pos;
+
+                // Bonus for consecutive matches
+                if pos > 0 && text_lower.chars().nth(pos - 1)
+                    .map(|c| c == pattern_lower.chars().next().unwrap())
+                    .unwrap_or(false)
+                {
+                    gap_penalty = gap_penalty.saturating_sub(5);
+                }
+            }
+        }
+    }
+
+    if match_count == pattern_lower.len() {
+        // All characters matched, score based on gaps and position
+        500 + (match_count as i32 * 10) - gap_penalty
+    } else {
+        0 // No match
+    }
+}
+
+/// Filter completions using fuzzy matching
+pub fn filter_completions(completions: Vec<Completion>, pattern: &str) -> Vec<Completion> {
+    let mut scored: Vec<(Completion, i32)> = completions
+        .into_iter()
+        .map(|c| {
+            let score = fuzzy_match_score(&c.text, pattern);
+            (c, score)
+        })
+        .filter(|(_, score)| *score > 0)
+        .collect();
+
+    // Sort by score descending, then by text length (shorter is better)
+    scored.sort_by(|a, b| {
+        let score_cmp = b.1.cmp(&a.1);
+        if score_cmp == std::cmp::Ordering::Equal {
+            a.0.text.len().cmp(&b.0.text.len())
+        } else {
+            score_cmp
+        }
+    });
+
+    scored.into_iter().map(|(c, _)| c).collect()
+}
+
+/// Clear the completion cache (useful for tests and cache invalidation)
+pub fn clear_cache() {
+    COMPLETION_CACHE.with(|cache| {
+        cache.borrow_mut().clear();
+    });
+}
+
+/// Complete history commands based on prefix
+/// Returns a list of historical commands sorted by relevance
+pub fn complete_from_history(prefix: &str) -> Vec<Completion> {
+    let mut completions = Vec::new();
+
+    // Try to load history file
+    if let Ok(file) = std::fs::File::open(
+        dirs::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+            .join(".rsh_history")
+    ) {
+        use std::io::BufRead;
+        let reader = std::io::BufReader::new(file);
+        let mut seen = std::collections::HashSet::new();
+
+        for line in reader.lines() {
+            if let Ok(cmd_line) = line {
+                let cmd = cmd_line.split_whitespace().next().unwrap_or("");
+
+                // Avoid duplicates
+                if seen.contains(cmd) {
+                    continue;
+                }
+                seen.insert(cmd.to_string());
+
+                if !cmd.is_empty() {
+                    completions.push(Completion {
+                        text: cmd.to_string(),
+                        display: cmd.to_string(),
+                        description: Some("history".to_string()),
+                        is_dir: false,
+                    });
+                }
+            }
+        }
+    }
+
+    // Reverse to show most recent first, then filter
+    completions.reverse();
+    filter_completions(completions, prefix)
+        .into_iter()
+        .take(20)
+        .collect()
 }
