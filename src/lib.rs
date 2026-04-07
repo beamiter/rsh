@@ -4,6 +4,8 @@ pub mod bookmarks;
 pub mod builtins;
 pub mod completer;
 pub mod config;
+pub mod data;
+pub mod debug;
 pub mod editor;
 pub mod environment;
 pub mod executor;

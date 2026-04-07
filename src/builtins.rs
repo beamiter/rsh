@@ -17,6 +17,10 @@ pub const BUILTIN_NAMES: &[&str] = &[
     // Stream processing commands
     "sum", "avg", "min", "max", "lines", "stats", "trim", "reverse",
     "upper", "lower",
+    // Debug commands
+    "debug-trace", "debug-timing", "debug-profile",
+    // Data processing commands
+    "filter", "map", "head", "tail", "dedupe", "shuffle", "uniq",
 ];
 
 pub fn is_builtin(name: &str) -> bool {
@@ -149,6 +153,20 @@ pub fn run_builtin(name: &str, args: &[String], state: &mut ShellState) -> i32 {
         "reverse" => crate::stream::builtin_reverse(args),
         "upper" => crate::stream::builtin_upper(args),
         "lower" => crate::stream::builtin_lower(args),
+        // Debug commands
+        "debug-trace" => crate::debug::builtin_debug_trace(args),
+        "debug-timing" => crate::debug::builtin_debug_timing(args),
+        "debug-profile" => crate::debug::builtin_debug_profile(args),
+        // Data processing commands
+        "filter" => crate::data::builtin_filter(args),
+        "map" => crate::data::builtin_map(args),
+        "group-by" => crate::data::builtin_group_by(args, state),
+        "select" => crate::data::builtin_select(args),
+        "uniq" => crate::data::builtin_uniq(args),
+        "head" => crate::data::builtin_head(args),
+        "tail" => crate::data::builtin_tail(args),
+        "shuffle" => crate::data::builtin_shuffle(args),
+        "dedupe" => crate::data::builtin_dedupe(args),
         _ => { eprintln!("rsh: {}: builtin not yet implemented", name); 1 }
     }
 }

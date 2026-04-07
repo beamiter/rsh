@@ -4,6 +4,8 @@ mod bookmarks;
 mod builtins;
 mod completer;
 mod config;
+mod data;
+mod debug;
 mod editor;
 mod environment;
 mod executor;
