@@ -30,13 +30,14 @@ pub struct Parser<'a> {
     lexer: Lexer<'a>,
     current: SpannedToken,
     peeked: Option<SpannedToken>,
+    input: &'a str,
 }
 
 impl<'a> Parser<'a> {
     pub fn new(input: &'a str) -> Self {
         let mut lexer = Lexer::new(input);
         let current = lexer.next_token();
-        Parser { lexer, current, peeked: None }
+        Parser { lexer, current, peeked: None, input }
     }
 
     fn advance(&mut self) {
@@ -64,6 +65,46 @@ impl<'a> Parser<'a> {
             Token::Eof => Err(ParseError::Incomplete),
             other => Err(ParseError::Unexpected(format!("expected word, got {:?}", other))),
         }
+    }
+
+    fn collect_here_doc_content(&mut self, delimiter: &str, strip_tabs: bool) -> String {
+        let input = self.input;
+        let start_pos = self.lexer.pos();
+
+        // Read lines from the input until we find the delimiter
+        let remaining = &input[start_pos..];
+        let mut content = String::new();
+        let mut line_start = 0;
+
+        for line in remaining.lines() {
+            let line_len = line.len();
+            let trimmed = if strip_tabs {
+                line.trim_start_matches('\t')
+            } else {
+                line
+            };
+
+            // Check if this line is exactly the delimiter
+            if trimmed == delimiter {
+                // Found the delimiter, advance position and break
+                let current_pos = start_pos + line_start + line_len + 1; // +1 for newline
+                self.lexer.set_pos(current_pos.min(input.len()));
+                break;
+            }
+
+            // Add this line to content
+            if !content.is_empty() {
+                content.push('\n');
+            }
+            content.push_str(line);
+
+            line_start += line_len + 1; // +1 for newline
+        }
+
+        // Re-sync the current token after updating position
+        self.current = self.lexer.next_token();
+
+        content
     }
 
     fn skip_newlines(&mut self) {
@@ -96,15 +137,15 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_redirect(&mut self) -> Result<Redirect, ParseError> {
-        let (fd, kind) = match &self.current.token {
-            Token::RedirectOut => (None, RedirectKind::Output),
-            Token::RedirectAppend => (None, RedirectKind::Append),
-            Token::RedirectIn => (None, RedirectKind::Input),
-            Token::HereString => (None, RedirectKind::HereString),
-            Token::HereDoc => (None, RedirectKind::HereDoc),
-            Token::DupFd => (None, RedirectKind::DupOutput),
-            Token::RedirectAllOut => (None, RedirectKind::OutputAll),
-            Token::RedirectAllAppend => (None, RedirectKind::AppendAll),
+        let (fd, kind, is_here_doc) = match &self.current.token {
+            Token::RedirectOut => (None, RedirectKind::Output, false),
+            Token::RedirectAppend => (None, RedirectKind::Append, false),
+            Token::RedirectIn => (None, RedirectKind::Input, false),
+            Token::HereString => (None, RedirectKind::HereString, true),
+            Token::HereDoc => (None, RedirectKind::HereDoc, true),
+            Token::DupFd => (None, RedirectKind::DupOutput, false),
+            Token::RedirectAllOut => (None, RedirectKind::OutputAll, false),
+            Token::RedirectAllAppend => (None, RedirectKind::AppendAll, false),
             Token::RedirectFd(n, op) => {
                 let fd = Some(*n);
                 let kind = match op {
@@ -112,14 +153,38 @@ impl<'a> Parser<'a> {
                     RedirectOp::Append => RedirectKind::Append,
                     RedirectOp::Input => RedirectKind::Input,
                 };
-                (fd, kind)
+                (fd, kind, false)
             }
             _ => return Err(ParseError::Unexpected("expected redirect".into())),
         };
         self.advance();
         let target_str = self.expect_word()?;
+
+        // For here-doc and here-string, collect the content
+        let here_doc_opt = if is_here_doc {
+            let delimiter = target_str.clone();
+            // Check if delimiter is escaped (starts with backslash) for no expansion
+            let expand_vars = !delimiter.starts_with('\\');
+
+            let content = if kind == RedirectKind::HereDoc {
+                self.collect_here_doc_content(&delimiter, false)
+            } else {
+                // HereString: content is the target string itself
+                format!("{}\n", delimiter)
+            };
+
+            Some(HereDocOptions {
+                delimiter,
+                content,
+                strip_tabs: false,  // TODO: detect <<- syntax
+                expand_vars,
+            })
+        } else {
+            None
+        };
+
         let target = parse_word_parts(&target_str);
-        Ok(Redirect { fd, kind, target, here_doc: None })
+        Ok(Redirect { fd, kind, target, here_doc: here_doc_opt })
     }
 
     fn is_command_start(&self) -> bool {

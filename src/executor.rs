@@ -646,24 +646,24 @@ fn dup2_raw(oldfd: RawFd, newfd: RawFd) -> nix::Result<()> {
     }
 }
 
-fn apply_one_redirect(kind: &RedirectKind, fd: RawFd, target_str: &str) {
+fn apply_one_redirect(kind: &RedirectKind, fd: RawFd, data: &str, _here_doc_opts: &Option<HereDocOptions>) {
     match kind {
         RedirectKind::Output => {
-            if let Ok(file) = File::create(target_str) {
+            if let Ok(file) = File::create(data) {
                 let src = file.into_raw_fd();
                 dup2_raw(src, fd).ok();
                 if src != fd { close(src).ok(); }
             }
         }
         RedirectKind::Append => {
-            if let Ok(file) = OpenOptions::new().create(true).append(true).open(target_str) {
+            if let Ok(file) = OpenOptions::new().create(true).append(true).open(data) {
                 let src = file.into_raw_fd();
                 dup2_raw(src, fd).ok();
                 if src != fd { close(src).ok(); }
             }
         }
         RedirectKind::Input => {
-            if let Ok(file) = File::open(target_str) {
+            if let Ok(file) = File::open(data) {
                 let src = file.into_raw_fd();
                 dup2_raw(src, fd).ok();
                 if src != fd { close(src).ok(); }
@@ -673,20 +673,20 @@ fn apply_one_redirect(kind: &RedirectKind, fd: RawFd, target_str: &str) {
             let (r, w) = pipe().expect("pipe");
             let r_fd = r.into_raw_fd();
             let w_fd = w.into_raw_fd();
-            let data = format!("{}\n", target_str);
+            // data already contains the here-doc content
             unsafe { nix::libc::write(w_fd, data.as_ptr() as *const _, data.len()); }
             close(w_fd).ok();
             dup2_raw(r_fd, fd).ok();
             close(r_fd).ok();
         }
         RedirectKind::DupOutput => {
-            if let Ok(target_fd) = target_str.parse::<RawFd>() {
+            if let Ok(target_fd) = data.parse::<RawFd>() {
                 dup2_raw(target_fd, fd).ok();
             }
         }
         RedirectKind::OutputAll => {
             // &> redirects both stdout (1) and stderr (2) to the file
-            if let Ok(file) = File::create(target_str) {
+            if let Ok(file) = File::create(data) {
                 let src = file.into_raw_fd();
                 dup2_raw(src, 1).ok(); // stdout
                 dup2_raw(src, 2).ok(); // stderr
@@ -695,7 +695,7 @@ fn apply_one_redirect(kind: &RedirectKind, fd: RawFd, target_str: &str) {
         }
         RedirectKind::AppendAll => {
             // &>> appends both stdout (1) and stderr (2) to the file
-            if let Ok(file) = OpenOptions::new().create(true).append(true).open(target_str) {
+            if let Ok(file) = OpenOptions::new().create(true).append(true).open(data) {
                 let src = file.into_raw_fd();
                 dup2_raw(src, 1).ok(); // stdout
                 dup2_raw(src, 2).ok(); // stderr
@@ -718,7 +718,12 @@ fn redirect_fd(redir: &Redirect) -> RawFd {
 fn setup_redirects(redirects: &[Redirect], state: &mut ShellState) -> Vec<SavedFd> {
     let mut saved = Vec::new();
     for redir in redirects {
-        let target_str = expand_word_to_string(&redir.target, state);
+        let data = if let Some(here_doc_opts) = &redir.here_doc {
+            // For here-doc in setup phase, use content directly
+            here_doc_opts.content.clone()
+        } else {
+            expand_word_to_string(&redir.target, state)
+        };
 
         // For OutputAll and AppendAll, we need to save both stdout and stderr
         match redir.kind {
@@ -732,7 +737,7 @@ fn setup_redirects(redirects: &[Redirect], state: &mut ShellState) -> Vec<SavedF
                         saved.push(SavedFd { original_fd: 2, saved_fd: sfd2 });
                     }
                 }
-                apply_one_redirect(&redir.kind, 1, &target_str);
+                apply_one_redirect(&redir.kind, 1, &data, &redir.here_doc);
             }
             _ => {
                 let fd = redirect_fd(redir);
@@ -742,7 +747,7 @@ fn setup_redirects(redirects: &[Redirect], state: &mut ShellState) -> Vec<SavedF
                         saved.push(SavedFd { original_fd: fd, saved_fd: sfd });
                     }
                 }
-                apply_one_redirect(&redir.kind, fd, &target_str);
+                apply_one_redirect(&redir.kind, fd, &data, &redir.here_doc);
             }
         }
     }
@@ -758,8 +763,20 @@ fn restore_fds(saved: Vec<SavedFd>) {
 
 fn apply_redirects_in_child(redirects: &[Redirect], state: &mut ShellState) {
     for redir in redirects {
-        let target_str = expand_word_to_string(&redir.target, state);
         let fd = redirect_fd(redir);
-        apply_one_redirect(&redir.kind, fd, &target_str);
+
+        // Use here-doc content if available, otherwise expand target
+        let data = if let Some(here_doc_opts) = &redir.here_doc {
+            // Optionally expand variables if requested
+            if here_doc_opts.expand_vars {
+                expand_word_to_string(&crate::parser::parse_word_parts(&here_doc_opts.content), state)
+            } else {
+                here_doc_opts.content.clone()
+            }
+        } else {
+            expand_word_to_string(&redir.target, state)
+        };
+
+        apply_one_redirect(&redir.kind, fd, &data, &redir.here_doc);
     }
 }

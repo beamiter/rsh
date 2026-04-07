@@ -283,3 +283,27 @@ fn test_function_return_value_with_local() {
     let cmds = parse(cmd_str).unwrap();
     assert_eq!(cmds.len(), 3);  // func def, func call, echo
 }
+
+#[test]
+fn test_here_doc_basic() {
+    // Test basic here-doc parsing
+    let cmd_str = "cat << EOF\nHello\nWorld\nEOF";
+    let cmds = parse(cmd_str).unwrap();
+    assert_eq!(cmds.len(), 1);
+}
+
+#[test]
+fn test_here_string() {
+    // Test here-string parsing <<<
+    let cmd_str = "cat <<< hello";
+    let cmds = parse(cmd_str).unwrap();
+    assert_eq!(cmds.len(), 1);
+}
+
+#[test]
+fn test_here_doc_with_redirect() {
+    // Test here-doc in a pipe
+    let cmd_str = "cat << EOF | sort\nZebra\nApple\nEOF";
+    let cmds = parse(cmd_str).unwrap();
+    assert_eq!(cmds.len(), 1);
+}

@@ -325,6 +325,21 @@ impl<'a> Lexer<'a> {
         }
         tokens
     }
+
+    /// Get the current position in the input stream
+    pub fn pos(&self) -> usize {
+        self.pos
+    }
+
+    /// Get the remaining input from current position
+    pub fn remaining_input(&self) -> &'a str {
+        &self.input[self.pos..]
+    }
+
+    /// Set position (used for advancing past here-doc content)
+    pub fn set_pos(&mut self, pos: usize) {
+        self.pos = pos;
+    }
 }
 
 pub fn tokenize(input: &str) -> Vec<SpannedToken> {
