@@ -14,6 +14,9 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "declare", "z", "hook", "complete", "compgen", "disown", "shopt",
     "from-json", "to-json", "to-table", "where", "sort-by", "select",
     "bookmark", "from-csv", "group-by", "unique", "count", "math", "exec",
+    // Stream processing commands
+    "sum", "avg", "min", "max", "lines", "stats", "trim", "reverse",
+    "upper", "lower",
 ];
 
 pub fn is_builtin(name: &str) -> bool {
@@ -135,6 +138,17 @@ pub fn run_builtin(name: &str, args: &[String], state: &mut ShellState) -> i32 {
         "unique" => builtin_unique(args),
         "count" => builtin_count(),
         "math" => builtin_math(args),
+        // Stream processing commands
+        "sum" => crate::stream::builtin_sum(args),
+        "avg" => crate::stream::builtin_avg(args),
+        "min" => crate::stream::builtin_min(args),
+        "max" => crate::stream::builtin_max(args),
+        "lines" => crate::stream::builtin_lines(args),
+        "stats" => crate::stream::builtin_stats(args),
+        "trim" => crate::stream::builtin_trim(args),
+        "reverse" => crate::stream::builtin_reverse(args),
+        "upper" => crate::stream::builtin_upper(args),
+        "lower" => crate::stream::builtin_lower(args),
         _ => { eprintln!("rsh: {}: builtin not yet implemented", name); 1 }
     }
 }

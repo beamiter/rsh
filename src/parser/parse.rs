@@ -829,7 +829,20 @@ pub fn is_incomplete(input: &str) -> bool {
 }
 
 pub fn parse(input: &str) -> Result<Vec<CompleteCommand>, ParseError> {
-    Parser::new(input).parse_program()
+    // Try to get from cache
+    if let Some(cached) = super::cache::cache_get(input) {
+        return Ok(cached);
+    }
+
+    // Parse if not cached
+    let result = Parser::new(input).parse_program();
+
+    // Store in cache on success
+    if let Ok(ref ast) = result {
+        super::cache::cache_insert(input.to_string(), ast.clone());
+    }
+
+    result
 }
 
 // --- Helper functions ---

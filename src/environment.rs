@@ -107,6 +107,7 @@ pub struct ShellState {
     pub home_dir: PathBuf,
     pub hostname: String,
     path_cache: Option<HashSet<String>>,
+    path_hash: u64, // Hash of current PATH for quick comparison
     pub positional_params: Vec<String>,
     pub positional_stack: Vec<Vec<String>>,
     pub dir_stack: Vec<PathBuf>,
@@ -150,6 +151,8 @@ impl ShellState {
             .map(|s| s.trim().to_string())
             .unwrap_or_else(|_| String::from("localhost"));
 
+        let path_hash = Self::hash_path(env_vars.get("PATH").map(|s| s.as_str()).unwrap_or(""));
+
         ShellState {
             env_vars,
             local_vars_stack: Vec::new(),
@@ -161,6 +164,7 @@ impl ShellState {
             home_dir,
             hostname,
             path_cache: None,
+            path_hash,
             positional_params: Vec::new(),
             positional_stack: Vec::new(),
             dir_stack: Vec::new(),
@@ -182,6 +186,15 @@ impl ShellState {
             return_requested: false,
             return_value: 0,
         }
+    }
+
+    fn hash_path(path: &str) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+        path.hash(&mut hasher);
+        hasher.finish()
     }
 
     pub fn get_var(&self, name: &str) -> Option<&str> {
@@ -279,9 +292,24 @@ impl ShellState {
 
     fn invalidate_path_cache(&mut self) {
         self.path_cache = None;
+        // Update the hash for the next check
+        self.path_hash = Self::hash_path(
+            self.env_vars.get("PATH").map(|s| s.as_str()).unwrap_or("")
+        );
     }
 
     pub fn path_cache(&mut self) -> &HashSet<String> {
+        // Check if PATH has changed (using hash for quick comparison)
+        let current_path_hash = Self::hash_path(
+            self.env_vars.get("PATH").map(|s| s.as_str()).unwrap_or("")
+        );
+
+        if self.path_hash != current_path_hash {
+            self.path_cache = None;
+            self.path_hash = current_path_hash;
+        }
+
+        // Rebuild cache only if it's None
         if self.path_cache.is_none() {
             let mut cache = HashSet::new();
             if let Some(path) = self.env_vars.get("PATH") {
