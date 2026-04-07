@@ -276,9 +276,11 @@ fn execute_simple(cmd: &SimpleCommand, state: &mut ShellState) -> i32 {
 
     // Check for function
     if let Some(func_body) = state.functions.get(cmd_name).cloned() {
+        state.push_local_scope();
         state.push_positional_params(args.to_vec());
         let code = execute_compound(&func_body, state);
         state.pop_positional_params();
+        state.pop_local_scope();
 
         // Handle return statement in function
         let return_code = if state.return_requested {

@@ -98,7 +98,7 @@ pub struct CompletionSpec {
 
 pub struct ShellState {
     pub env_vars: HashMap<String, String>,
-    pub local_vars: HashMap<String, String>,
+    pub local_vars_stack: Vec<HashMap<String, String>>,
     pub aliases: HashMap<String, String>,
     pub functions: HashMap<String, CompoundCommand>,
     pub last_exit_code: i32,
@@ -152,7 +152,7 @@ impl ShellState {
 
         ShellState {
             env_vars,
-            local_vars: HashMap::new(),
+            local_vars_stack: Vec::new(),
             aliases: HashMap::new(),
             functions: HashMap::new(),
             last_exit_code: 0,
@@ -189,8 +189,14 @@ impl ShellState {
             "?" => return None, // handled by expand
             _ => {}
         }
-        self.local_vars.get(name)
-            .or_else(|| self.env_vars.get(name))
+        // Check local_vars_stack from top to bottom
+        for scope in self.local_vars_stack.iter().rev() {
+            if let Some(val) = scope.get(name) {
+                return Some(val.as_str());
+            }
+        }
+        // Fall back to env_vars
+        self.env_vars.get(name)
             .map(|s| s.as_str())
     }
 
@@ -232,15 +238,26 @@ impl ShellState {
             if name == "PATH" {
                 self.invalidate_path_cache();
             }
+        } else if let Some(scope) = self.local_vars_stack.last_mut() {
+            // In function scope: set in current local scope
+            scope.insert(name.to_string(), value.to_string());
         } else {
-            self.local_vars.insert(name.to_string(), value.to_string());
+            // At global scope: set in env_vars
+            self.env_vars.insert(name.to_string(), value.to_string());
+            env::set_var(name, value);
+            if name == "PATH" {
+                self.invalidate_path_cache();
+            }
         }
     }
 
     pub fn export_var(&mut self, name: &str, value: &str) {
         self.env_vars.insert(name.to_string(), value.to_string());
         env::set_var(name, value);
-        self.local_vars.remove(name);
+        // Remove from all local scopes
+        for scope in &mut self.local_vars_stack {
+            scope.remove(name);
+        }
         if name == "PATH" {
             self.invalidate_path_cache();
         }
@@ -248,7 +265,10 @@ impl ShellState {
 
     pub fn unset_var(&mut self, name: &str) {
         self.env_vars.remove(name);
-        self.local_vars.remove(name);
+        // Remove from all local scopes
+        for scope in &mut self.local_vars_stack {
+            scope.remove(name);
+        }
         self.arrays.remove(name);
         self.assoc_arrays.remove(name);
         env::remove_var(name);
@@ -357,5 +377,15 @@ impl ShellState {
 
     pub fn is_array(&self, name: &str) -> bool {
         self.arrays.contains_key(name) || self.assoc_arrays.contains_key(name)
+    }
+
+    /// Push a new local variable scope (for function entry)
+    pub fn push_local_scope(&mut self) {
+        self.local_vars_stack.push(HashMap::new());
+    }
+
+    /// Pop the current local variable scope (for function exit)
+    pub fn pop_local_scope(&mut self) {
+        self.local_vars_stack.pop();
     }
 }

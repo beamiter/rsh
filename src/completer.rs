@@ -64,13 +64,16 @@ fn apply_completion_spec(spec: &crate::environment::CompletionSpec, prefix: &str
     // -F function
     if let Some(ref func_name) = spec.function {
         if let Some(func_body) = state.functions.get(func_name).cloned() {
-            // Set completion variables
+            // Set completion variables - push a local scope for these variables
+            state.push_local_scope();
             let line = prefix; // simplified
             let words: Vec<String> = line.split_whitespace().map(|s| s.to_string()).collect();
             state.arrays.insert("COMP_WORDS".to_string(), words.clone());
-            state.local_vars.insert("COMP_CWORD".to_string(), (words.len().saturating_sub(1)).to_string());
-            state.local_vars.insert("COMP_LINE".to_string(), line.to_string());
-            state.local_vars.insert("COMP_POINT".to_string(), line.len().to_string());
+            if let Some(scope) = state.local_vars_stack.last_mut() {
+                scope.insert("COMP_CWORD".to_string(), (words.len().saturating_sub(1)).to_string());
+                scope.insert("COMP_LINE".to_string(), line.to_string());
+                scope.insert("COMP_POINT".to_string(), line.len().to_string());
+            }
             state.arrays.insert("COMPREPLY".to_string(), Vec::new());
 
             // Execute the function
@@ -90,11 +93,9 @@ fn apply_completion_spec(spec: &crate::environment::CompletionSpec, prefix: &str
                 }
             }
 
-            // Clean up
+            // Clean up - pop the local scope
+            state.pop_local_scope();
             state.arrays.remove("COMP_WORDS");
-            state.local_vars.remove("COMP_CWORD");
-            state.local_vars.remove("COMP_LINE");
-            state.local_vars.remove("COMP_POINT");
             state.arrays.remove("COMPREPLY");
         }
     }
@@ -496,7 +497,7 @@ fn complete_variable(prefix: &str, state: &ShellState) -> Vec<Completion> {
             });
         }
     }
-    for name in state.local_vars.keys() {
+    for name in state.env_vars.keys() {
         if name.starts_with(prefix) {
             completions.push(Completion {
                 text: format!("${}", name),
@@ -504,6 +505,19 @@ fn complete_variable(prefix: &str, state: &ShellState) -> Vec<Completion> {
                 description: None,
                 is_dir: false,
             });
+        }
+    }
+    // Also complete local variables from all scopes
+    for scope in &state.local_vars_stack {
+        for name in scope.keys() {
+            if name.starts_with(prefix) {
+                completions.push(Completion {
+                    text: format!("${}", name),
+                    display: name.clone(),
+                    description: None,
+                    is_dir: false,
+                });
+            }
         }
     }
     // Also complete array names

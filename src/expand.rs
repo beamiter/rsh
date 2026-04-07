@@ -203,9 +203,12 @@ fn expand_parameter(name: &str, state: &mut ShellState) -> String {
                     names.push(k.clone());
                 }
             }
-            for (k, _) in state.local_vars.iter() {
-                if k.starts_with(prefix) && !names.contains(k) {
-                    names.push(k.clone());
+            // Also collect from all local scopes
+            for scope in &state.local_vars_stack {
+                for (k, _) in scope.iter() {
+                    if k.starts_with(prefix) && !names.contains(k) {
+                        names.push(k.clone());
+                    }
                 }
             }
 

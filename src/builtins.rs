@@ -208,7 +208,10 @@ fn builtin_export(args: &[String], state: &mut ShellState) -> i32 {
         for arg in &args[1..] {
             if let Some(val) = state.env_vars.remove(arg) {
                 env::remove_var(arg);
-                state.local_vars.insert(arg.clone(), val);
+                // If in function scope, set to local_vars; otherwise just unset
+                if let Some(scope) = state.local_vars_stack.last_mut() {
+                    scope.insert(arg.clone(), val);
+                }
             }
         }
         return 0;
@@ -220,7 +223,8 @@ fn builtin_export(args: &[String], state: &mut ShellState) -> i32 {
             let value = &arg[eq_pos + 1..];
             state.export_var(name, value);
         } else {
-            if let Some(val) = state.local_vars.get(arg).cloned() {
+            // Get value from any scope
+            if let Some(val) = state.get_var(arg).map(|s| s.to_string()) {
                 state.export_var(arg, &val);
             } else if !state.env_vars.contains_key(arg) {
                 state.export_var(arg, "");
@@ -630,7 +634,11 @@ fn cmp_int(a: &str, b: &str, f: fn(i64, i64) -> bool) -> i32 {
 
 fn builtin_set(args: &[String], state: &mut ShellState) -> i32 {
     if args.is_empty() {
-        let mut all: Vec<_> = state.env_vars.iter().chain(state.local_vars.iter()).collect();
+        let mut all: Vec<_> = state.env_vars.iter().collect();
+        // Also include variables from all local scopes
+        for scope in &state.local_vars_stack {
+            all.extend(scope.iter());
+        }
         all.sort_by_key(|(k, _)| (*k).clone());
         for (k, v) in all { println!("{}={}", k, v); }
         return 0;
@@ -689,9 +697,13 @@ fn builtin_local(args: &[String], state: &mut ShellState) -> i32 {
         if let Some(eq_pos) = arg.find('=') {
             let name = &arg[..eq_pos];
             let value = &arg[eq_pos + 1..];
-            state.local_vars.insert(name.to_string(), value.to_string());
+            if let Some(scope) = state.local_vars_stack.last_mut() {
+                scope.insert(name.to_string(), value.to_string());
+            }
         } else {
-            state.local_vars.insert(arg.clone(), String::new());
+            if let Some(scope) = state.local_vars_stack.last_mut() {
+                scope.insert(arg.clone(), String::new());
+            }
         }
     }
     0

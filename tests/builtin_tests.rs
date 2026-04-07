@@ -49,8 +49,11 @@ fn test_unset() {
 #[test]
 fn test_local() {
     let mut state = make_state();
+    // local only works within a function scope
+    state.push_local_scope();
     run_builtin("local", &["X=hello".into()], &mut state);
-    assert_eq!(state.local_vars.get("X"), Some(&"hello".to_string()));
+    assert_eq!(state.local_vars_stack.last().and_then(|s| s.get("X")), Some(&"hello".to_string()));
+    state.pop_local_scope();
 }
 
 #[test]

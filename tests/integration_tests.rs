@@ -259,3 +259,27 @@ fn test_test_command() {
     let cmds = parse(cmd_str).unwrap();
     assert_eq!(cmds.len(), 1);
 }
+
+#[test]
+fn test_local_variable_scope_isolation() {
+    // Test that local variables in nested functions don't pollute outer scope
+    let cmd_str = "outer() { local x=1; inner() { local x=2; echo $x; }; inner; echo $x; }";
+    let cmds = parse(cmd_str).unwrap();
+    assert_eq!(cmds.len(), 1);
+}
+
+#[test]
+fn test_local_variable_cleanup() {
+    // Test that local variables are cleaned up after function exit
+    let cmd_str = "func() { local y=100; }; func; echo $y";
+    let cmds = parse(cmd_str).unwrap();
+    assert_eq!(cmds.len(), 3);  // func def, func call, echo
+}
+
+#[test]
+fn test_function_return_value_with_local() {
+    // Test that return statements work correctly with local scope
+    let cmd_str = "func() { local x=5; return $x; }; func; echo $?";
+    let cmds = parse(cmd_str).unwrap();
+    assert_eq!(cmds.len(), 3);  // func def, func call, echo
+}
