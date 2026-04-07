@@ -614,6 +614,14 @@ pub fn execute_compound(cmd: &CompoundCommand, state: &mut ShellState) -> i32 {
                 }
             })
         }
+        CompoundCommand::Coproc { name: _, command: _, redirects } => {
+            // Coproc support: TODO - implement bidirectional pipes
+            // For now, just execute the command without pipes
+            eprintln!("warning: coproc is not fully implemented");
+            with_redirects(redirects, state, |state| {
+                0
+            })
+        }
     }
 }
 

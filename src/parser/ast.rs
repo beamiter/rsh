@@ -134,6 +134,11 @@ pub enum CompoundCommand {
         expr: String,
         redirects: Vec<Redirect>,
     },
+    Coproc {
+        name: Option<String>,
+        command: Box<SimpleCommand>,
+        redirects: Vec<Redirect>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
