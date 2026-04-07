@@ -154,37 +154,93 @@ fn builtin_cd(args: &[String], state: &mut ShellState) -> i32 {
             }
             None => { eprintln!("rsh: cd: OLDPWD not set"); return 1; }
         }
+    } else if args[0].starts_with('+') || args[0].starts_with('-') {
+        // Handle directory stack navigation: cd +N or cd -N
+        if let Ok(idx) = args[0][1..].parse::<usize>() {
+            if args[0].starts_with('+') {
+                if idx < state.dir_stack.len() {
+                    state.dir_stack[idx].to_string_lossy().to_string()
+                } else {
+                    eprintln!("rsh: cd: invalid stack index: +{}", idx);
+                    return 1;
+                }
+            } else {
+                // -N means from the end
+                if idx <= state.dir_stack.len() {
+                    state.dir_stack[state.dir_stack.len() - idx].to_string_lossy().to_string()
+                } else {
+                    eprintln!("rsh: cd: invalid stack index: -{}", idx);
+                    return 1;
+                }
+            }
+        } else {
+            args[0].clone()
+        }
     } else {
         args[0].clone()
     };
 
-    let old = env::current_dir().ok().map(|p| p.to_string_lossy().to_string());
+    // Try to change to target directory
+    // First try as absolute/relative path
+    if let Ok(new_dir) = change_to_directory(&target, state) {
+        update_directory_vars(&new_dir, state);
+        return 0;
+    }
 
-    match env::set_current_dir(&target) {
-        Ok(()) => {
-            if let Ok(new_dir) = env::current_dir() {
-                let new_str = new_dir.to_string_lossy().to_string();
-                state.export_var("PWD", &new_str);
-            }
-            if let Some(old) = old {
-                state.export_var("OLDPWD", &old);
-            }
-            // z-jump: record directory visit
-            if let Ok(cwd) = env::current_dir() {
-                if let Ok(mut z_db) = crate::zjump::get_z_db().lock() {
-                    z_db.add(&cwd.to_string_lossy());
+    // Try CDPATH if target doesn't contain /
+    if !target.contains('/') {
+        if let Some(cdpath_ref) = state.get_var("CDPATH") {
+            let cdpath = cdpath_ref.to_string();
+            for dir in cdpath.split(':') {
+                if dir.is_empty() { continue; }
+                let candidate = format!("{}/{}", dir, target);
+                if let Ok(new_dir) = change_to_directory(&candidate, state) {
+                    println!("{}", new_dir.display());
+                    update_directory_vars(&new_dir, state);
+                    return 0;
                 }
             }
-            // chpwd hooks
-            let hooks = state.hooks.chpwd.clone();
-            crate::hooks::run_hooks(&hooks, state);
-            0
-        }
-        Err(e) => {
-            eprintln!("rsh: cd: {}: {}", target, e);
-            1
         }
     }
+
+    eprintln!("rsh: cd: {}: No such file or directory", target);
+    1
+}
+
+fn change_to_directory(path: &str, state: &mut ShellState) -> Result<std::path::PathBuf, std::io::Error> {
+    let old = env::current_dir().ok();
+    env::set_current_dir(path)?;
+
+    match env::current_dir() {
+        Ok(new_dir) => {
+            Ok(new_dir)
+        }
+        Err(e) => {
+            if let Some(old_dir) = old {
+                let _ = env::set_current_dir(&old_dir);
+            }
+            Err(e)
+        }
+    }
+}
+
+fn update_directory_vars(new_dir: &std::path::Path, state: &mut ShellState) {
+    let old = env::current_dir().ok().map(|p| p.to_string_lossy().to_string());
+
+    let new_str = new_dir.to_string_lossy().to_string();
+    state.export_var("PWD", &new_str);
+    if let Some(old) = old {
+        state.export_var("OLDPWD", &old);
+    }
+
+    // z-jump: record directory visit
+    if let Ok(mut z_db) = crate::zjump::get_z_db().lock() {
+        z_db.add(&new_dir.to_string_lossy());
+    }
+
+    // chpwd hooks
+    let hooks = state.hooks.chpwd.clone();
+    crate::hooks::run_hooks(&hooks, state);
 }
 
 fn builtin_exit(args: &[String]) -> i32 {
@@ -449,40 +505,61 @@ fn builtin_source(args: &[String], state: &mut ShellState) -> i32 {
         eprintln!("rsh: source: filename argument required");
         return 1;
     }
-    let path = &args[0];
+
+    let filename = &args[0];
+    let additional_args = &args[1..];
 
     // Try to find the file
-    let resolved_path = if Path::new(path).is_file() {
+    let resolved_path = if Path::new(filename).is_file() {
         // File exists at given path
-        path.to_string()
-    } else if !path.contains('/') {
-        // No slashes in path, try $PATH search
-        match find_in_path(path) {
-            Some(found) => found,
-            None => {
-                eprintln!("rsh: source: {}: No such file or directory", path);
-                return 1;
-            }
+        filename.to_string()
+    } else if !filename.contains('/') {
+        // No slashes in path, try multiple sources
+        // 1. Try current directory
+        if Path::new(filename).is_file() {
+            filename.to_string()
+        } else if let Some(found) = find_in_path(filename) {
+            // 2. Try $PATH
+            found
+        } else {
+            eprintln!("rsh: source: {}: No such file or directory", filename);
+            return 1;
         }
     } else {
         // Absolute or relative path doesn't exist
-        eprintln!("rsh: source: {}: No such file or directory", path);
+        eprintln!("rsh: source: {}: No such file or directory", filename);
         return 1;
     };
 
-    match std::fs::read_to_string(&resolved_path) {
+    // Set $0 to script name for this invocation
+    let old_0 = state.get_var("0").map(|s| s.to_string());
+    state.export_var("0", filename);
+
+    // Manage positional parameters for arguments
+    let old_params = state.positional_params.clone();
+    let mut new_params = vec![filename.clone()];
+    new_params.extend(additional_args.iter().cloned());
+    state.positional_params = new_params;
+
+    let result = match std::fs::read_to_string(&resolved_path) {
         Ok(content) => {
             match parser::parse(&content) {
                 Ok(commands) => {
-                    // Full parse succeeded, execute all commands
+                    // Parse succeeded, execute all commands in current shell context
                     let mut last = 0;
                     for cmd in &commands {
                         last = crate::executor::execute_complete_command(cmd, state);
+                        // Stop on early return
+                        if state.return_requested {
+                            state.return_requested = false;
+                            break;
+                        }
                     }
                     last
                 }
-                Err(_) => {
-                    // Full parse failed, try using bash as fallback for complex scripts
+                Err(e) => {
+                    eprintln!("rsh: source: {}: parse error: {}", resolved_path, e);
+                    // Try bash as fallback only for complex scripts
                     source_via_bash(&resolved_path, state)
                 }
             }
@@ -491,22 +568,41 @@ fn builtin_source(args: &[String], state: &mut ShellState) -> i32 {
             eprintln!("rsh: source: {}: {}", resolved_path, e);
             1
         }
+    };
+
+    // Restore state
+    state.positional_params = old_params;
+    if let Some(val) = old_0 {
+        state.export_var("0", &val);
     }
+
+    result
 }
 
 fn builtin_eval(args: &[String], state: &mut ShellState) -> i32 {
+    if args.is_empty() {
+        return 0;
+    }
+
+    // Join all arguments with space, just like bash does
     let input = args.join(" ");
+
+    // Parse and execute the input
     match parser::parse(&input) {
         Ok(commands) => {
             let mut last = 0;
             for cmd in &commands {
                 last = crate::executor::execute_complete_command(cmd, state);
+                // Early return doesn't stop eval loop (unlike source)
+                if state.loop_break || state.loop_continue {
+                    break;
+                }
             }
             last
         }
         Err(e) => {
-            eprintln!("rsh: eval: {}", e);
-            1
+            eprintln!("rsh: eval: parse error: {}", e);
+            2
         }
     }
 }
@@ -515,6 +611,11 @@ fn builtin_read(args: &[String], state: &mut ShellState) -> i32 {
     let mut prompt_str = None;
     let mut silent = false;
     let mut raw = false;
+    let mut timeout_secs: Option<f64> = None;
+    let mut count_chars: Option<usize> = None;
+    let mut delim = '\n';
+    let mut exact_count: Option<usize> = None;
+    let mut read_array = false;
     let mut var_names: Vec<&str> = Vec::new();
     let mut i = 0;
 
@@ -526,12 +627,43 @@ fn builtin_read(args: &[String], state: &mut ShellState) -> i32 {
             }
             "-s" => silent = true,
             "-r" => raw = true,
+            "-t" => {
+                i += 1;
+                if i < args.len() {
+                    timeout_secs = args[i].parse::<f64>().ok();
+                }
+            }
+            "-n" => {
+                i += 1;
+                if i < args.len() {
+                    count_chars = args[i].parse::<usize>().ok();
+                }
+            }
+            "-N" => {
+                i += 1;
+                if i < args.len() {
+                    exact_count = args[i].parse::<usize>().ok();
+                }
+            }
+            "-d" => {
+                i += 1;
+                if i < args.len() {
+                    let d = &args[i];
+                    if !d.is_empty() {
+                        delim = d.chars().next().unwrap();
+                    }
+                }
+            }
+            "-a" => {
+                read_array = true;
+            }
             s if s.starts_with('-') => {}
             _ => { var_names.push(&args[i]); }
         }
         i += 1;
     }
-    if var_names.is_empty() {
+
+    if var_names.is_empty() && !read_array {
         var_names.push("REPLY");
     }
 
@@ -545,8 +677,80 @@ fn builtin_read(args: &[String], state: &mut ShellState) -> i32 {
         std::process::Command::new("stty").arg("-echo").status().ok();
     }
 
+    let result = if let Some(count) = exact_count {
+        // Read exactly N characters
+        read_exact_chars(count, &var_names, read_array, state)
+    } else if let Some(count) = count_chars {
+        // Read up to N characters
+        read_limited_chars(count, delim, &var_names, read_array, state)
+    } else {
+        // Read line with delimiter
+        read_line_with_delimiter(delim, raw, &var_names, read_array, state)
+    };
+
+    if silent {
+        std::process::Command::new("stty").arg("echo").status().ok();
+        eprintln!();
+    }
+
+    result
+}
+
+fn read_exact_chars(count: usize, var_names: &[&str], read_array: bool, state: &mut ShellState) -> i32 {
+    use std::io::Read;
+
+    let mut buffer = vec![0u8; count];
+    match std::io::stdin().read_exact(&mut buffer) {
+        Ok(()) => {
+            let line = String::from_utf8_lossy(&buffer).into_owned();
+            if read_array {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if let Some(arr_name) = var_names.first() {
+                    state.arrays.insert(arr_name.to_string(), parts.into_iter().map(|s| s.to_string()).collect());
+                }
+            } else if var_names.len() == 1 {
+                state.set_var(var_names[0], &line);
+            }
+            0
+        }
+        Err(_) => 1,
+    }
+}
+
+fn read_limited_chars(max_count: usize, delim: char, var_names: &[&str], read_array: bool, state: &mut ShellState) -> i32 {
+    use std::io::Read;
+
+    let mut buffer = vec![0u8; max_count];
+    match std::io::stdin().read(&mut buffer) {
+        Ok(n) if n > 0 => {
+            buffer.truncate(n);
+            let line = String::from_utf8_lossy(&buffer).into_owned();
+            if read_array {
+                let parts: Vec<&str> = line.split(delim).collect();
+                if let Some(arr_name) = var_names.first() {
+                    state.arrays.insert(arr_name.to_string(), parts.into_iter().map(|s| s.to_string()).collect());
+                }
+            } else if var_names.len() == 1 {
+                state.set_var(var_names[0], &line);
+            } else {
+                let parts: Vec<&str> = line.split(delim).collect();
+                for (vi, var) in var_names.iter().enumerate() {
+                    state.set_var(var, parts.get(vi).unwrap_or(&""));
+                }
+            }
+            0
+        }
+        _ => 1,
+    }
+}
+
+fn read_line_with_delimiter(delim: char, raw: bool, var_names: &[&str], read_array: bool, state: &mut ShellState) -> i32 {
+    use std::io::BufRead;
+
+    let stdin = std::io::stdin();
     let mut line = String::new();
-    let result = match std::io::stdin().read_line(&mut line) {
+
+    let result = match stdin.read_line(&mut line) {
         Ok(0) => 1,
         Ok(_) => {
             let line = line.trim_end_matches('\n').trim_end_matches('\r');
@@ -556,10 +760,19 @@ fn builtin_read(args: &[String], state: &mut ShellState) -> i32 {
                 line.to_string()
             };
 
-            if var_names.len() == 1 {
+            if read_array {
+                // Get IFS for splitting
+                let ifs = state.get_var("IFS").unwrap_or(" \t\n");
+                let parts: Vec<&str> = line.split(|c: char| ifs.contains(c)).filter(|s| !s.is_empty()).collect();
+                if let Some(arr_name) = var_names.first() {
+                    state.arrays.insert(arr_name.to_string(), parts.into_iter().map(|s| s.to_string()).collect());
+                }
+            } else if var_names.len() == 1 {
                 state.set_var(var_names[0], &line);
             } else {
-                let parts: Vec<&str> = line.splitn(var_names.len(), char::is_whitespace).collect();
+                // Get IFS for splitting
+                let ifs = state.get_var("IFS").unwrap_or(" \t\n");
+                let parts: Vec<&str> = line.split(|c: char| ifs.contains(c)).filter(|s| !s.is_empty()).collect();
                 for (vi, var) in var_names.iter().enumerate() {
                     state.set_var(var, parts.get(vi).unwrap_or(&""));
                 }
@@ -568,11 +781,6 @@ fn builtin_read(args: &[String], state: &mut ShellState) -> i32 {
         }
         Err(_) => 1,
     };
-
-    if silent {
-        std::process::Command::new("stty").arg("echo").status().ok();
-        eprintln!();
-    }
 
     result
 }
@@ -585,44 +793,232 @@ fn builtin_test(args: &[String]) -> i32 {
 
     if args.is_empty() { return 1; }
 
-    match args.len() {
-        1 => {
-            if args[0].is_empty() { 1 } else { 0 }
-        }
-        2 => {
-            match args[0] {
-                "-n" => if !args[1].is_empty() { 0 } else { 1 },
-                "-z" => if args[1].is_empty() { 0 } else { 1 },
-                "-f" => if Path::new(args[1]).is_file() { 0 } else { 1 },
-                "-d" => if Path::new(args[1]).is_dir() { 0 } else { 1 },
-                "-e" => if Path::new(args[1]).exists() { 0 } else { 1 },
-                "-r" => if Path::new(args[1]).exists() { 0 } else { 1 },
-                "-w" => if Path::new(args[1]).exists() { 0 } else { 1 },
-                "-x" => if Path::new(args[1]).exists() { 0 } else { 1 },
-                "-s" => {
-                    if let Ok(m) = std::fs::metadata(args[1]) {
-                        if m.len() > 0 { 0 } else { 1 }
-                    } else { 1 }
-                }
-                "!" => builtin_test(&[args[1].to_string()]) ^ 1,
-                _ => 1,
-            }
-        }
-        3 => {
-            match args[1] {
-                "=" | "==" => if args[0] == args[2] { 0 } else { 1 },
-                "!=" => if args[0] != args[2] { 0 } else { 1 },
-                "-eq" => cmp_int(args[0], args[2], |a, b| a == b),
-                "-ne" => cmp_int(args[0], args[2], |a, b| a != b),
-                "-lt" => cmp_int(args[0], args[2], |a, b| a < b),
-                "-le" => cmp_int(args[0], args[2], |a, b| a <= b),
-                "-gt" => cmp_int(args[0], args[2], |a, b| a > b),
-                "-ge" => cmp_int(args[0], args[2], |a, b| a >= b),
-                _ => 1,
-            }
-        }
-        _ => 1,
+    match parse_test_expr(&args, 0).0 {
+        TestResult::True => 0,
+        TestResult::False => 1,
+        TestResult::Error => 2,
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TestResult {
+    True,
+    False,
+    Error,
+}
+
+fn parse_test_expr(args: &[&str], mut idx: usize) -> (TestResult, usize) {
+    let (mut result, new_idx) = parse_or_expr(args, idx);
+    (result, new_idx)
+}
+
+fn parse_or_expr(args: &[&str], mut idx: usize) -> (TestResult, usize) {
+    let (mut left, mut new_idx) = parse_and_expr(args, idx);
+
+    while new_idx < args.len() && args[new_idx] == "-o" {
+        new_idx += 1;
+        let (right, next_idx) = parse_and_expr(args, new_idx);
+
+        left = match (left, right) {
+            (TestResult::True, _) => TestResult::True,
+            (_, TestResult::True) => TestResult::True,
+            (TestResult::False, TestResult::False) => TestResult::False,
+            _ => TestResult::Error,
+        };
+        new_idx = next_idx;
+    }
+
+    (left, new_idx)
+}
+
+fn parse_and_expr(args: &[&str], mut idx: usize) -> (TestResult, usize) {
+    let (mut left, mut new_idx) = parse_primary(args, idx);
+
+    while new_idx < args.len() && args[new_idx] == "-a" {
+        new_idx += 1;
+        let (right, next_idx) = parse_primary(args, new_idx);
+
+        left = match (left, right) {
+            (TestResult::False, _) => TestResult::False,
+            (_, TestResult::False) => TestResult::False,
+            (TestResult::True, TestResult::True) => TestResult::True,
+            _ => TestResult::Error,
+        };
+        new_idx = next_idx;
+    }
+
+    (left, new_idx)
+}
+
+fn parse_primary(args: &[&str], idx: usize) -> (TestResult, usize) {
+    if idx >= args.len() {
+        return (TestResult::Error, idx);
+    }
+
+    // Handle negation
+    if args[idx] == "!" {
+        let (result, new_idx) = parse_primary(args, idx + 1);
+        let negated = match result {
+            TestResult::True => TestResult::False,
+            TestResult::False => TestResult::True,
+            TestResult::Error => TestResult::Error,
+        };
+        return (negated, new_idx);
+    }
+
+    // Handle parentheses
+    if args[idx] == "(" {
+        let (result, new_idx) = parse_or_expr(args, idx + 1);
+        if new_idx < args.len() && args[new_idx] == ")" {
+            return (result, new_idx + 1);
+        }
+        return (TestResult::Error, new_idx);
+    }
+
+    // Handle unary operators
+    if idx + 1 < args.len() {
+        match args[idx] {
+            "-n" => return (if !args[idx + 1].is_empty() { TestResult::True } else { TestResult::False }, idx + 2),
+            "-z" => return (if args[idx + 1].is_empty() { TestResult::True } else { TestResult::False }, idx + 2),
+            "-f" => return (if Path::new(args[idx + 1]).is_file() { TestResult::True } else { TestResult::False }, idx + 2),
+            "-d" => return (if Path::new(args[idx + 1]).is_dir() { TestResult::True } else { TestResult::False }, idx + 2),
+            "-e" => return (if Path::new(args[idx + 1]).exists() { TestResult::True } else { TestResult::False }, idx + 2),
+            "-L" => return (if is_symlink(args[idx + 1]) { TestResult::True } else { TestResult::False }, idx + 2),
+            "-p" => return (if is_fifo(args[idx + 1]) { TestResult::True } else { TestResult::False }, idx + 2),
+            "-S" => return (if is_socket(args[idx + 1]) { TestResult::True } else { TestResult::False }, idx + 2),
+            "-b" => return (if is_block_device(args[idx + 1]) { TestResult::True } else { TestResult::False }, idx + 2),
+            "-c" => return (if is_char_device(args[idx + 1]) { TestResult::True } else { TestResult::False }, idx + 2),
+            "-s" => {
+                let result = if let Ok(m) = std::fs::metadata(args[idx + 1]) {
+                    if m.len() > 0 { TestResult::True } else { TestResult::False }
+                } else {
+                    TestResult::False
+                };
+                return (result, idx + 2);
+            }
+            "-r" => return (if is_readable(args[idx + 1]) { TestResult::True } else { TestResult::False }, idx + 2),
+            "-w" => return (if is_writable(args[idx + 1]) { TestResult::True } else { TestResult::False }, idx + 2),
+            "-x" => return (if is_executable(args[idx + 1]) { TestResult::True } else { TestResult::False }, idx + 2),
+            _ => {}
+        }
+    }
+
+    // Handle binary operators
+    if idx + 2 < args.len() {
+        match args[idx + 1] {
+            "=" | "==" => return (if args[idx] == args[idx + 2] { TestResult::True } else { TestResult::False }, idx + 3),
+            "!=" => return (if args[idx] != args[idx + 2] { TestResult::True } else { TestResult::False }, idx + 3),
+            "<" => return (if args[idx] < args[idx + 2] { TestResult::True } else { TestResult::False }, idx + 3),
+            ">" => return (if args[idx] > args[idx + 2] { TestResult::True } else { TestResult::False }, idx + 3),
+            "-eq" => {
+                let result = match (args[idx].parse::<i64>(), args[idx + 2].parse::<i64>()) {
+                    (Ok(a), Ok(b)) => if a == b { TestResult::True } else { TestResult::False },
+                    _ => TestResult::Error,
+                };
+                return (result, idx + 3);
+            }
+            "-ne" => {
+                let result = match (args[idx].parse::<i64>(), args[idx + 2].parse::<i64>()) {
+                    (Ok(a), Ok(b)) => if a != b { TestResult::True } else { TestResult::False },
+                    _ => TestResult::Error,
+                };
+                return (result, idx + 3);
+            }
+            "-lt" => {
+                let result = match (args[idx].parse::<i64>(), args[idx + 2].parse::<i64>()) {
+                    (Ok(a), Ok(b)) => if a < b { TestResult::True } else { TestResult::False },
+                    _ => TestResult::Error,
+                };
+                return (result, idx + 3);
+            }
+            "-le" => {
+                let result = match (args[idx].parse::<i64>(), args[idx + 2].parse::<i64>()) {
+                    (Ok(a), Ok(b)) => if a <= b { TestResult::True } else { TestResult::False },
+                    _ => TestResult::Error,
+                };
+                return (result, idx + 3);
+            }
+            "-gt" => {
+                let result = match (args[idx].parse::<i64>(), args[idx + 2].parse::<i64>()) {
+                    (Ok(a), Ok(b)) => if a > b { TestResult::True } else { TestResult::False },
+                    _ => TestResult::Error,
+                };
+                return (result, idx + 3);
+            }
+            "-ge" => {
+                let result = match (args[idx].parse::<i64>(), args[idx + 2].parse::<i64>()) {
+                    (Ok(a), Ok(b)) => if a >= b { TestResult::True } else { TestResult::False },
+                    _ => TestResult::Error,
+                };
+                return (result, idx + 3);
+            }
+            _ => {}
+        }
+    }
+
+    // Single argument - check if non-empty string
+    if idx + 1 == args.len() {
+        return (if !args[idx].is_empty() { TestResult::True } else { TestResult::False }, idx + 1);
+    }
+
+    (TestResult::Error, idx)
+}
+
+fn is_symlink(path: &str) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+}
+
+fn is_fifo(path: &str) -> bool {
+    use nix::sys::stat;
+    if let Ok(stat) = stat::stat(path) {
+        stat.st_mode & 0o170000 == 0o10000
+    } else {
+        false
+    }
+}
+
+fn is_socket(path: &str) -> bool {
+    use nix::sys::stat;
+    if let Ok(stat) = stat::stat(path) {
+        stat.st_mode & 0o170000 == 0o140000
+    } else {
+        false
+    }
+}
+
+fn is_block_device(path: &str) -> bool {
+    use nix::sys::stat;
+    if let Ok(stat) = stat::stat(path) {
+        stat.st_mode & 0o170000 == 0o60000
+    } else {
+        false
+    }
+}
+
+fn is_char_device(path: &str) -> bool {
+    use nix::sys::stat;
+    if let Ok(stat) = stat::stat(path) {
+        stat.st_mode & 0o170000 == 0o20000
+    } else {
+        false
+    }
+}
+
+fn is_readable(path: &str) -> bool {
+    use nix::unistd;
+    unistd::access(std::path::Path::new(path), unistd::AccessFlags::R_OK).is_ok()
+}
+
+fn is_writable(path: &str) -> bool {
+    use nix::unistd;
+    unistd::access(std::path::Path::new(path), unistd::AccessFlags::W_OK).is_ok()
+}
+
+fn is_executable(path: &str) -> bool {
+    use nix::unistd;
+    unistd::access(std::path::Path::new(path), unistd::AccessFlags::X_OK).is_ok()
 }
 
 fn cmp_int(a: &str, b: &str, f: fn(i64, i64) -> bool) -> i32 {
@@ -912,48 +1308,112 @@ fn builtin_exec(args: &[String], _state: &mut ShellState) -> i32 {
 }
 
 fn builtin_pushd(args: &[String], state: &mut ShellState) -> i32 {
+    let mut print_stack = true;
+    let mut args_start = 0;
+
+    // Parse options
+    for (i, arg) in args.iter().enumerate() {
+        if arg == "-n" {
+            print_stack = false;
+            args_start = i + 1;
+        } else {
+            break;
+        }
+    }
+
+    let remaining_args = &args[args_start..];
+
     let cwd = env::current_dir().ok();
-    let target = if args.is_empty() {
+    let target = if remaining_args.is_empty() {
+        // pushd with no args swaps top two directories
+        if state.dir_stack.is_empty() {
+            eprintln!("rsh: pushd: no other directory");
+            return 1;
+        }
         match state.dir_stack.pop() {
             Some(d) => d.to_string_lossy().to_string(),
-            None => { eprintln!("rsh: pushd: no other directory"); return 1; }
+            None => {
+                eprintln!("rsh: pushd: no other directory");
+                return 1;
+            }
+        }
+    } else if remaining_args[0].starts_with('+') || remaining_args[0].starts_with('-') {
+        // Handle stack navigation: pushd +N or pushd -N
+        if let Ok(idx) = remaining_args[0][1..].parse::<usize>() {
+            if remaining_args[0].starts_with('+') {
+                if idx < state.dir_stack.len() {
+                    state.dir_stack[idx].to_string_lossy().to_string()
+                } else {
+                    eprintln!("rsh: pushd: invalid stack index: +{}", idx);
+                    return 1;
+                }
+            } else {
+                if idx <= state.dir_stack.len() {
+                    state.dir_stack[state.dir_stack.len() - idx].to_string_lossy().to_string()
+                } else {
+                    eprintln!("rsh: pushd: invalid stack index: -{}", idx);
+                    return 1;
+                }
+            }
+        } else {
+            remaining_args[0].clone()
         }
     } else {
-        args[0].clone()
+        remaining_args[0].clone()
     };
+
     if let Some(cwd) = cwd {
         state.dir_stack.push(cwd);
     }
+
     match env::set_current_dir(&target) {
         Ok(()) => {
             if let Ok(new_dir) = env::current_dir() {
-                state.export_var("PWD", &new_dir.to_string_lossy());
+                state.export_var("PWD", &new_dir.to_string_lossy().to_string());
             }
-            builtin_dirs(state);
+            if print_stack {
+                builtin_dirs(state);
+            }
             0
         }
-        Err(e) => { eprintln!("rsh: pushd: {}: {}", target, e); 1 }
+        Err(e) => {
+            eprintln!("rsh: pushd: {}: {}", target, e);
+            1
+        }
     }
 }
 
 fn builtin_popd(state: &mut ShellState) -> i32 {
+    if state.dir_stack.is_empty() {
+        eprintln!("rsh: popd: directory stack empty");
+        return 1;
+    }
+
     match state.dir_stack.pop() {
         Some(dir) => {
             match env::set_current_dir(&dir) {
                 Ok(()) => {
-                    state.export_var("PWD", &dir.to_string_lossy());
+                    state.export_var("PWD", &dir.to_string_lossy().to_string());
                     builtin_dirs(state);
                     0
                 }
-                Err(e) => { eprintln!("rsh: popd: {}", e); 1 }
+                Err(e) => {
+                    eprintln!("rsh: popd: {}", e);
+                    1
+                }
             }
         }
-        None => { eprintln!("rsh: popd: directory stack empty"); 1 }
+        None => {
+            eprintln!("rsh: popd: directory stack empty");
+            1
+        }
     }
 }
 
 fn builtin_dirs(state: &ShellState) -> i32 {
-    let cwd = env::current_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+    let cwd = env::current_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
     print!("{}", cwd);
     for d in state.dir_stack.iter().rev() {
         print!(" {}", d.display());
@@ -969,17 +1429,44 @@ fn builtin_trap(args: &[String], state: &mut ShellState) -> i32 {
         }
         return 0;
     }
+
     if args.len() == 1 && args[0] == "-l" {
-        println!("EXIT HUP INT QUIT TERM USR1 USR2 ALRM");
+        println!("EXIT HUP INT QUIT ABRT ALRM TERM USR1 USR2");
         return 0;
     }
+
+    if args.len() == 1 && args[0] == "-p" {
+        for (sig, cmd) in &state.traps {
+            println!("trap -- '{}' {}", cmd, sig);
+        }
+        return 0;
+    }
+
     if args.len() >= 2 {
         let action = &args[0];
         for sig in &args[1..] {
+            // Validate signal name
+            let sig_lower = sig.to_uppercase();
+            let valid_signals = vec![
+                "EXIT", "HUP", "INT", "QUIT", "ABRT", "ALRM", "TERM",
+                "USR1", "USR2", "PIPE", "CHLD", "TSTP", "TTIN", "TTOU",
+                "CONT", "STOP", "KILL", "ILL", "FPE", "SEGV", "BUS",
+                "SYS", "TRAP", "CLD", "PWR", "POLL", "PROF", "VTALRM",
+                "XCPU", "XFSZ", "IOT", "EMT", "STKFLT", "IO", "ERR",
+                "RETURN", "DEBUG"
+            ];
+
+            let is_valid = valid_signals.iter().any(|&s| s == sig_lower) || sig_lower.parse::<i32>().is_ok();
+
+            if !is_valid {
+                eprintln!("rsh: trap: {} is not a valid signal name", sig);
+                return 1;
+            }
+
             if action == "-" || action.is_empty() {
-                state.traps.remove(sig.as_str());
+                state.traps.remove(&sig_lower);
             } else {
-                state.traps.insert(sig.clone(), action.clone());
+                state.traps.insert(sig_lower, action.clone());
             }
         }
     }
@@ -1168,7 +1655,7 @@ fn builtin_declare(args: &[String], state: &mut ShellState) -> i32 {
     }
 
     for name in &names {
-        // Handle name=value
+        // Handle name=value or name=()
         let (var_name, value) = if let Some(eq) = name.find('=') {
             (&name[..eq], Some(&name[eq + 1..]))
         } else {
@@ -1179,19 +1666,106 @@ fn builtin_declare(args: &[String], state: &mut ShellState) -> i32 {
             if !state.assoc_arrays.contains_key(var_name) {
                 state.assoc_arrays.insert(var_name.to_string(), std::collections::HashMap::new());
             }
+
+            // Parse initialization value like: ([key1]=val1 [key2]=val2)
+            if let Some(val) = value {
+                if val.starts_with('(') && val.ends_with(')') {
+                    let inner = &val[1..val.len()-1].trim();
+                    parse_assoc_array_init(var_name, inner, state);
+                } else if !val.is_empty() && !val.starts_with('(') {
+                    // Handle single value assignment (rare for assoc arrays)
+                    state.assoc_arrays.get_mut(var_name).unwrap().insert("0".to_string(), val.to_string());
+                }
+            }
         } else if indexed {
             if !state.arrays.contains_key(var_name) {
                 state.arrays.insert(var_name.to_string(), Vec::new());
             }
-        }
 
-        if let Some(val) = value {
-            if !indexed && !associative {
+            // Parse initialization value like: (val1 val2 val3)
+            if let Some(val) = value {
+                if val.starts_with('(') && val.ends_with(')') {
+                    let inner = &val[1..val.len()-1];
+                    let elements: Vec<&str> = inner.split_whitespace().collect();
+                    *state.arrays.get_mut(var_name).unwrap() = elements.iter().map(|s| s.to_string()).collect();
+                } else if !val.is_empty() && !val.starts_with('(') {
+                    // Single value
+                    state.arrays.get_mut(var_name).unwrap().push(val.to_string());
+                }
+            }
+        } else {
+            // Regular variable
+            if let Some(val) = value {
                 state.set_var(var_name, val);
             }
         }
     }
     0
+}
+
+fn parse_assoc_array_init(var_name: &str, input: &str, state: &mut ShellState) {
+    // Parse input like: [key1]=val1 [key2]=val2
+    let mut current = input;
+    while !current.is_empty() {
+        current = current.trim_start();
+        if !current.starts_with('[') {
+            break;
+        }
+
+        // Find closing bracket
+        if let Some(bracket_end) = current.find(']') {
+            let key = &current[1..bracket_end];
+            let rest = &current[bracket_end + 1..];
+
+            // Skip = sign
+            if rest.starts_with('=') {
+                let value_part = &rest[1..].trim_start();
+
+                // Extract value (quoted or unquoted)
+                let (value, next_pos) = if value_part.starts_with('"') {
+                    // Quoted value
+                    let mut escaped = false;
+                    let mut end_pos = 1;
+                    for (i, ch) in value_part[1..].char_indices() {
+                        if escaped {
+                            escaped = false;
+                        } else if ch == '\\' {
+                            escaped = true;
+                        } else if ch == '"' {
+                            end_pos = i + 2;
+                            break;
+                        }
+                    }
+                    let val = &value_part[1..end_pos-1];
+                    (val.to_string(), end_pos)
+                } else if value_part.starts_with('\'') {
+                    // Single-quoted value
+                    if let Some(end) = value_part[1..].find('\'') {
+                        let val = &value_part[1..end+1];
+                        (val.to_string(), end + 2)
+                    } else {
+                        break;
+                    }
+                } else {
+                    // Unquoted value (until space or next bracket)
+                    let end_pos = value_part.find(|c: char| c == ' ' || c == '[')
+                        .unwrap_or(value_part.len());
+                    (value_part[..end_pos].to_string(), end_pos)
+                };
+
+                // Store in associative array
+                state.assoc_arrays.get_mut(var_name)
+                    .unwrap()
+                    .insert(key.to_string(), value);
+
+                current = &value_part[next_pos..];
+            } else {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
 }
 
 // ============================================================

@@ -339,3 +339,199 @@ fn test_coproc_named() {
     let cmds = parse(cmd_str).unwrap();
     assert_eq!(cmds.len(), 1);
 }
+
+// Test cases for expanded test command
+#[test]
+fn test_test_logical_and() {
+    let cmds = parse("[ -z \"\" -a -n \"x\" ]").unwrap();
+    assert_eq!(cmds.len(), 1);
+}
+
+#[test]
+fn test_test_logical_or() {
+    let cmds = parse("[ -z \"x\" -o -n \"y\" ]").unwrap();
+    assert_eq!(cmds.len(), 1);
+}
+
+#[test]
+fn test_test_negation() {
+    let cmds = parse("[ ! -f /nonexistent ]").unwrap();
+    assert_eq!(cmds.len(), 1);
+}
+
+#[test]
+fn test_test_string_comparison() {
+    let cmds = parse("[ \"abc\" = \"abc\" ]").unwrap();
+    assert_eq!(cmds.len(), 1);
+}
+
+#[test]
+fn test_test_string_lex_comparison() {
+    let cmds = parse("[ \"a\" \\< \"b\" ]").unwrap();
+    assert_eq!(cmds.len(), 1);
+}
+
+#[test]
+fn test_test_symlink() {
+    let cmds = parse("[ -L /dev/stdin ]").unwrap();
+    assert_eq!(cmds.len(), 1);
+}
+
+#[test]
+fn test_test_readable() {
+    let cmds = parse("[ -r /etc/passwd ]").unwrap();
+    assert_eq!(cmds.len(), 1);
+}
+
+#[test]
+fn test_test_writable() {
+    let cmds = parse("[ -w /tmp ]").unwrap();
+    assert_eq!(cmds.len(), 1);
+}
+
+#[test]
+fn test_test_executable() {
+    let cmds = parse("[ -x /bin/sh ]").unwrap();
+    assert_eq!(cmds.len(), 1);
+}
+
+#[test]
+fn test_test_with_grouping() {
+    let cmds = parse("[ \\( -f /etc/passwd -o -f /etc/shadow \\) -a -r /etc/passwd ]").unwrap();
+    assert_eq!(cmds.len(), 1);
+}
+
+// Test cases for cd/pushd/popd/dirs
+#[test]
+fn test_cd_to_home() {
+    let cmds = parse("cd").unwrap();
+    assert_eq!(cmds.len(), 1);
+}
+
+#[test]
+fn test_cd_to_parent() {
+    let cmds = parse("cd ..").unwrap();
+    assert_eq!(cmds.len(), 1);
+}
+
+#[test]
+fn test_cd_hyphen() {
+    let cmds = parse("cd -").unwrap();
+    assert_eq!(cmds.len(), 1);
+}
+
+#[test]
+fn test_pushd_directory() {
+    let cmds = parse("pushd /tmp").unwrap();
+    assert_eq!(cmds.len(), 1);
+}
+
+#[test]
+fn test_pushd_swap() {
+    let cmds = parse("pushd").unwrap();
+    assert_eq!(cmds.len(), 1);
+}
+
+#[test]
+fn test_popd_command() {
+    let cmds = parse("popd").unwrap();
+    assert_eq!(cmds.len(), 1);
+}
+
+#[test]
+fn test_dirs_command() {
+    let cmds = parse("dirs").unwrap();
+    assert_eq!(cmds.len(), 1);
+}
+
+// Test cases for associative arrays
+#[test]
+fn test_declare_assoc_array() {
+    let cmds = parse("declare -A myarr").unwrap();
+    assert_eq!(cmds.len(), 1);
+}
+
+#[test]
+fn test_declare_assoc_with_init() {
+    let cmds = parse("declare -A arr=([k1]=v1 [k2]=v2)").unwrap();
+    assert_eq!(cmds.len(), 1);
+}
+
+#[test]
+fn test_assoc_array_access() {
+    let cmds = parse("echo ${arr[key]}").unwrap();
+    assert_eq!(cmds.len(), 1);
+}
+
+#[test]
+fn test_assoc_array_all_values() {
+    let cmds = parse("echo ${arr[@]}").unwrap();
+    assert_eq!(cmds.len(), 1);
+}
+
+#[test]
+fn test_assoc_array_keys() {
+    let cmds = parse("for key in \"${!arr[@]}\"; do echo $key; done").unwrap();
+    assert_eq!(cmds.len(), 1);
+}
+
+#[test]
+fn test_assoc_array_assignment() {
+    let cmds = parse("arr[mykey]=myvalue").unwrap();
+    assert_eq!(cmds.len(), 1);
+}
+
+#[test]
+fn test_declare_indexed_array() {
+    let cmds = parse("declare -a myarr=(one two three)").unwrap();
+    assert_eq!(cmds.len(), 1);
+}
+
+// Additional array tests for comprehensive coverage
+#[test]
+fn test_array_element_assignment() {
+    let cmds = parse("arr[0]=first").unwrap();
+    assert_eq!(cmds.len(), 1);
+}
+
+#[test]
+fn test_array_element_access() {
+    let cmds = parse("echo ${arr[0]}").unwrap();
+    assert_eq!(cmds.len(), 1);
+}
+
+#[test]
+fn test_array_length() {
+    let cmds = parse("echo ${#arr[@]}").unwrap();
+    assert_eq!(cmds.len(), 1);
+}
+
+#[test]
+fn test_array_slice() {
+    let cmds = parse("echo ${arr[@]:1:2}").unwrap();
+    assert_eq!(cmds.len(), 1);
+}
+
+#[test]
+fn test_array_in_for_loop() {
+    let cmds = parse("for item in \"${arr[@]}\"; do echo $item; done").unwrap();
+    assert_eq!(cmds.len(), 1);
+}
+
+#[test]
+fn test_array_unset_element() {
+    let cmds = parse("unset arr[1]").unwrap();
+    assert_eq!(cmds.len(), 1);
+}
+
+#[test]
+fn test_assoc_array_in_loop() {
+    let cmds = parse("for key in \"${!hash[@]}\"; do echo \"${hash[$key]}\"; done").unwrap();
+    assert_eq!(cmds.len(), 1);
+}
+
+#[test]
+fn test_array_append_operator() {
+    let cmds = parse("arr+=(new element)").unwrap();
+    assert_eq!(cmds.len(), 1);
+}
