@@ -55,6 +55,9 @@ fn source_via_bash(path: &PathBuf, state: &mut ShellState) {
     let path_str = path.to_string_lossy().to_string();
     let bash_script = format!(
         r#"
+# Set PS1 to make bash think it's interactive (some .bashrc check [ -z "$PS1" ] && return)
+export PS1='$ '
+
 set -a
 source "{path}"
 set +a
