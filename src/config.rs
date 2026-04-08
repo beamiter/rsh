@@ -50,7 +50,7 @@ fn source_file_lenient(path: &PathBuf, state: &mut ShellState) {
     }
 }
 
-/// Use bash to source a script file and reload environment variables
+/// Use bash to source a script file and extract environment variables, aliases, functions, and options
 fn source_via_bash(path: &PathBuf, state: &mut ShellState) {
     let path_str = path.to_string_lossy().to_string();
     let bash_script = format!(
@@ -60,22 +60,64 @@ source "{path}"
 set +a
 
 # Output all environment variables in key=value format
-declare -p | grep 'declare -x' | sed 's/declare -x //' | sed "s/='/'=/g"
+echo "=== ENV_VARS ==="
+declare -p | grep 'declare -x' | sed 's/declare -x //'
+
+# Output aliases
+echo "=== ALIASES ==="
+alias -p 2>/dev/null || true
+
+# Output function names
+echo "=== FUNCTIONS ==="
+declare -F 2>/dev/null | awk '{{print $3}}' || true
+
+# Output shell options (shopt)
+echo "=== SHOPTS ==="
+shopt 2>/dev/null || true
 "#,
         path = path_str.replace("'", "\\'")
     );
 
-    // Execute bash script to capture the environment
+    // Execute bash script to capture the environment, aliases, and functions
     if let Ok(output) = std::process::Command::new("bash")
         .arg("-c")
         .arg(&bash_script)
         .output() {
         let stdout = String::from_utf8_lossy(&output.stdout);
+        parse_bash_output(&stdout, state);
+    }
+}
 
-        // Parse exported variables from bash output
-        for line in stdout.lines() {
-            // Skip function names (no = sign)
-            if line.contains('=') {
+/// Parse bash output containing env vars, aliases, functions, and shopt settings
+fn parse_bash_output(output: &str, state: &mut ShellState) {
+    let mut current_section = "";
+
+    for line in output.lines() {
+        match line {
+            "=== ENV_VARS ===" => {
+                current_section = "ENV_VARS";
+                continue;
+            }
+            "=== ALIASES ===" => {
+                current_section = "ALIASES";
+                continue;
+            }
+            "=== FUNCTIONS ===" => {
+                current_section = "FUNCTIONS";
+                continue;
+            }
+            "=== SHOPTS ===" => {
+                current_section = "SHOPTS";
+                continue;
+            }
+            _ => {}
+        }
+
+        match current_section {
+            "ENV_VARS" => {
+                if line.is_empty() {
+                    continue;
+                }
                 if let Some(eq_pos) = line.find('=') {
                     let key = &line[..eq_pos];
                     let value = &line[eq_pos + 1..];
@@ -89,7 +131,132 @@ declare -p | grep 'declare -x' | sed 's/declare -x //' | sed "s/='/'=/g"
                     state.export_var(key, value);
                 }
             }
+            "ALIASES" => {
+                if line.is_empty() || !line.starts_with("alias ") {
+                    continue;
+                }
+                // Parse "alias name='value'" format
+                let alias_def = &line[6..]; // skip "alias "
+                if let Some(eq_pos) = alias_def.find('=') {
+                    let name = &alias_def[..eq_pos];
+                    let value = &alias_def[eq_pos + 1..];
+                    // Remove surrounding quotes
+                    let value = value.trim_matches('\'').trim_matches('"');
+                    state.aliases.insert(name.to_string(), value.to_string());
+                }
+            }
+            "FUNCTIONS" => {
+                if !line.is_empty() {
+                    // For now, just note that functions are defined
+                    // Full function body parsing requires additional bash invocation
+                    // Functions will be stored once we implement full parsing
+                }
+            }
+            "SHOPTS" => {
+                if line.is_empty() {
+                    continue;
+                }
+                // Parse shopt output: "shopt_name     on/off"
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    let opt_name = parts[0];
+                    let opt_value = parts[parts.len() - 1];
+                    let enabled = opt_value == "on";
+
+                    // Map bash shopt names to rsh ShellOpts
+                    match opt_name {
+                        "globstar" => state.shell_opts.globstar = enabled,
+                        "dotglob" => state.shell_opts.dotglob = enabled,
+                        "nullglob" => state.shell_opts.nullglob = enabled,
+                        "failglob" => state.shell_opts.failglob = enabled,
+                        "extglob" => state.shell_opts.extglob = enabled,
+                        "nocaseglob" => state.shell_opts.nocaseglob = enabled,
+                        "noglob" => state.shell_opts.noglob = enabled,
+                        "lastpipe" => state.shell_opts.lastpipe = enabled,
+                        "autocd" => state.shell_opts.autocd = enabled,
+                        "cdspell" => state.shell_opts.cdspell = enabled,
+                        "checkwinsize" => state.shell_opts.checkwinsize = enabled,
+                        "inherit_errexit" => state.shell_opts.inherit_errexit = enabled,
+                        _ => {} // Unknown shopt, ignore
+                    }
+                }
+            }
+            _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::environment::ShellState;
+
+    #[test]
+    fn test_parse_bash_output_env_vars() {
+        let output = r#"=== ENV_VARS ===
+TEST_VAR='hello_world'
+MY_PATH='/custom/path'
+=== ALIASES ===
+=== FUNCTIONS ===
+=== SHOPTS ==="#;
+
+        let mut state = ShellState::new(false);
+        parse_bash_output(output, &mut state);
+
+        assert_eq!(state.get_var("TEST_VAR"), Some("hello_world"));
+        assert_eq!(state.get_var("MY_PATH"), Some("/custom/path"));
+    }
+
+    #[test]
+    fn test_parse_bash_output_aliases() {
+        let output = r#"=== ENV_VARS ===
+=== ALIASES ===
+alias ll='ls -la'
+alias grep='grep --color=auto'
+=== FUNCTIONS ===
+=== SHOPTS ==="#;
+
+        let mut state = ShellState::new(false);
+        parse_bash_output(output, &mut state);
+
+        assert_eq!(state.aliases.get("ll"), Some(&"ls -la".to_string()));
+        assert_eq!(state.aliases.get("grep"), Some(&"grep --color=auto".to_string()));
+    }
+
+    #[test]
+    fn test_parse_bash_output_shopts() {
+        let output = r#"=== ENV_VARS ===
+=== ALIASES ===
+=== FUNCTIONS ===
+=== SHOPTS ===
+extglob         on
+dotglob         off
+globstar        on"#;
+
+        let mut state = ShellState::new(false);
+        parse_bash_output(output, &mut state);
+
+        assert_eq!(state.shell_opts.extglob, true);
+        assert_eq!(state.shell_opts.dotglob, false);
+        assert_eq!(state.shell_opts.globstar, true);
+    }
+
+    #[test]
+    fn test_parse_bash_output_mixed() {
+        let output = r#"=== ENV_VARS ===
+APP_NAME='myapp'
+=== ALIASES ===
+alias ll='ls -lah'
+=== FUNCTIONS ===
+=== SHOPTS ===
+extglob         on"#;
+
+        let mut state = ShellState::new(false);
+        parse_bash_output(output, &mut state);
+
+        assert_eq!(state.get_var("APP_NAME"), Some("myapp"));
+        assert_eq!(state.aliases.get("ll"), Some(&"ls -lah".to_string()));
+        assert_eq!(state.shell_opts.extglob, true);
     }
 }
 

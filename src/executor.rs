@@ -261,7 +261,11 @@ fn execute_simple(cmd: &SimpleCommand, state: &mut ShellState) -> i32 {
 
     // Check for alias expansion
     if let Some(alias_val) = state.aliases.get(cmd_name).cloned() {
-        let full_cmd = format!("{} {}", alias_val, args.join(" "));
+        let full_cmd = if args.is_empty() {
+            alias_val
+        } else {
+            format!("{} {}", alias_val, args.join(" "))
+        };
         match crate::parser::parse(&full_cmd) {
             Ok(cmds) => {
                 let mut last = 0;
