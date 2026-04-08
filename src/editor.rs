@@ -557,6 +557,8 @@ impl Editor {
                     self.cursor = self.buffer.len();
                     return Ok(KeyAction::Continue);
                 }
+                // Clear suggestion before submitting to avoid ghost text on screen
+                self.suggestion = None;
                 return Ok(KeyAction::Submit);
             }
 
