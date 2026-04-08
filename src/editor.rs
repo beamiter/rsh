@@ -127,12 +127,16 @@ impl Editor {
                         match self.handle_key(key, state, history)? {
                             KeyAction::Continue => {}
                             KeyAction::Submit => {
+                                self.update_suggestion(history);
+                                self.repaint(state)?;
                                 print!("\r\n");
                                 let line = self.buffer.clone();
                                 return Ok(Some(line));
                             }
                             KeyAction::Eof => {
                                 if self.buffer.is_empty() {
+                                    self.update_suggestion(history);
+                                    self.repaint(state)?;
                                     print!("\r\n");
                                     return Ok(None);
                                 } else {
