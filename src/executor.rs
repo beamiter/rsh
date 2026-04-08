@@ -268,9 +268,15 @@ fn execute_simple(cmd: &SimpleCommand, state: &mut ShellState) -> i32 {
         };
         match crate::parser::parse(&full_cmd) {
             Ok(cmds) => {
+                // Remove the alias temporarily to prevent infinite recursion
+                let removed_alias = state.aliases.remove(cmd_name);
                 let mut last = 0;
                 for c in &cmds {
                     last = execute_complete_command(c, state);
+                }
+                // Restore the alias
+                if let Some(alias) = removed_alias {
+                    state.aliases.insert(cmd_name.clone(), alias);
                 }
                 return last;
             }

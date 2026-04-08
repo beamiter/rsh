@@ -8,6 +8,7 @@ use crate::history::History;
 use crate::hooks;
 use crate::parser;
 use crate::signal;
+use std::io::{self, BufRead};
 
 pub struct Shell {
     pub state: ShellState,
@@ -176,6 +177,22 @@ impl Shell {
         signal::install_shell_signals();
         config::load_config(&mut self.state);
 
+        // Check if stdin is a TTY for interactive mode
+        let stdin_is_tty = atty::is(atty::Stream::Stdin);
+
+        // Update interactive mode based on stdin
+        self.state.interactive = stdin_is_tty;
+
+        if stdin_is_tty {
+            // Interactive mode with editor
+            self.run_interactive();
+        } else {
+            // Non-interactive mode reading from stdin
+            self.run_from_stdin();
+        }
+    }
+
+    fn run_interactive(&mut self) {
         loop {
             // Check background jobs
             self.state.jobs.check_background();
@@ -234,8 +251,62 @@ impl Shell {
                 }
                 Err(e) => {
                     eprintln!("rsh: editor error: {}", e);
+                    break;
                 }
             }
+        }
+
+        run_exit_trap(&mut self.state);
+        self.history.save();
+    }
+
+    fn run_from_stdin(&mut self) {
+        // Read all lines from stdin first to avoid holding the lock during execution
+        let stdin = io::stdin();
+        let lines: Vec<String> = stdin.lock().lines().collect::<Result<_, _>>().unwrap_or_default();
+
+        for line in lines {
+            let line = line.trim().to_string();
+            if line.is_empty() { continue; }
+
+            // History expansion
+            let line = match expand_history(&line, &self.history) {
+                Some(expanded) => {
+                    if expanded != line {
+                        eprintln!("{}", expanded);
+                    }
+                    expanded
+                }
+                None => {
+                    eprintln!("rsh: !: event not found");
+                    continue;
+                }
+            };
+
+            self.history.add(&line);
+
+            // Run preexec hooks
+            let preexec = self.state.hooks.preexec.clone();
+            hooks::run_hooks(&preexec, &mut self.state);
+
+            // Parse and execute
+            let cmd_start = std::time::Instant::now();
+            match parser::parse(&line) {
+                Ok(commands) => {
+                    for cmd in &commands {
+                        let code = executor::execute_complete_command(cmd, &mut self.state);
+                        self.state.last_exit_code = code;
+                        if self.state.shell_opts.errexit && code != 0 {
+                            eprintln!("rsh: errexit: command exited with status {}", code);
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("rsh: {}", e);
+                    self.state.last_exit_code = 2;
+                }
+            }
+            self.state.last_command_duration = Some(cmd_start.elapsed());
         }
 
         run_exit_trap(&mut self.state);
