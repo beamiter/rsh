@@ -6,7 +6,9 @@ use crate::environment::ShellState;
 use crate::executor;
 use crate::history::History;
 use crate::hooks;
+use crate::osc;
 use crate::parser;
+use crate::prompt;
 use crate::signal;
 use std::io::{self, BufRead};
 
@@ -193,6 +195,10 @@ impl Shell {
     }
 
     fn run_interactive(&mut self) {
+        // Initial OSC emissions so the terminal knows CWD at startup
+        osc::report_cwd(&self.state.hostname);
+        osc::report_cwd_iterm2();
+
         loop {
             // Check background jobs
             self.state.jobs.check_background();
@@ -201,6 +207,12 @@ impl Shell {
             // Run precmd hooks
             let precmd = self.state.hooks.precmd.clone();
             hooks::run_hooks(&precmd, &mut self.state);
+
+            // OSC 2 — set window title to current directory
+            {
+                let title = prompt::get_short_cwd(&self.state);
+                osc::set_title(&format!("rsh: {}", title));
+            }
 
             match self.editor.read_line(&mut self.state, &mut self.history) {
                 Ok(Some(line)) => {
@@ -227,6 +239,12 @@ impl Shell {
                     let preexec = self.state.hooks.preexec.clone();
                     hooks::run_hooks(&preexec, &mut self.state);
 
+                    // OSC 2 — set window title to the running command
+                    osc::set_title(&line);
+
+                    // OSC 133;C — command output start
+                    osc::command_output_start();
+
                     // Parse and execute
                     let cmd_start = std::time::Instant::now();
                     match parser::parse(&line) {
@@ -245,6 +263,9 @@ impl Shell {
                         }
                     }
                     self.state.last_command_duration = Some(cmd_start.elapsed());
+
+                    // OSC 133;D — command finished with exit code
+                    osc::command_finished(self.state.last_exit_code);
                 }
                 Ok(None) => {
                     break;

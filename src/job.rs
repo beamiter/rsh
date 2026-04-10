@@ -177,7 +177,10 @@ fn send_notification(command: &str, exit_code: i32, elapsed: Duration) {
     };
 
     // OSC 777 terminal notification (iTerm2, Kitty, etc.)
-    eprint!("\x1b]777;notify;{};{}\x07", summary, body);
+    crate::osc::notify_osc777(&summary, &body);
+
+    // OSC 9 desktop notification (Windows Terminal, ConEmu)
+    crate::osc::notify_osc9(&format!("{}: {}", summary, body));
 
     // Also try notify-send (Linux desktop)
     std::process::Command::new("notify-send")

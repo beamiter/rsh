@@ -273,6 +273,12 @@ fn update_directory_vars(new_dir: &std::path::Path, state: &mut ShellState) {
     // chpwd hooks
     let hooks = state.hooks.chpwd.clone();
     crate::hooks::run_hooks(&hooks, state);
+
+    // OSC 7 + OSC 1337: report CWD to terminal
+    if state.interactive {
+        crate::osc::report_cwd(&state.hostname);
+        crate::osc::report_cwd_iterm2();
+    }
 }
 
 fn builtin_exit(args: &[String]) -> i32 {
@@ -1401,7 +1407,7 @@ fn builtin_pushd(args: &[String], state: &mut ShellState) -> i32 {
     match env::set_current_dir(&target) {
         Ok(()) => {
             if let Ok(new_dir) = env::current_dir() {
-                state.export_var("PWD", &new_dir.to_string_lossy().to_string());
+                update_directory_vars(&new_dir, state);
             }
             if print_stack {
                 builtin_dirs(state);
@@ -1425,7 +1431,9 @@ fn builtin_popd(state: &mut ShellState) -> i32 {
         Some(dir) => {
             match env::set_current_dir(&dir) {
                 Ok(()) => {
-                    state.export_var("PWD", &dir.to_string_lossy().to_string());
+                    if let Ok(new_dir) = env::current_dir() {
+                        update_directory_vars(&new_dir, state);
+                    }
                     builtin_dirs(state);
                     0
                 }
@@ -1806,43 +1814,47 @@ fn parse_assoc_array_init(var_name: &str, input: &str, state: &mut ShellState) {
 
 fn builtin_z(args: &[String], state: &mut ShellState) -> i32 {
     let z_db = crate::zjump::get_z_db();
-    let mut z_db = z_db.lock().unwrap();
 
-    if args.is_empty() || (args.len() == 1 && args[0] == "-l") {
-        for (path, score) in z_db.list() {
-            println!("{:>10.1}  {}", score, path);
+    // Handle list/remove/clear operations with the lock held
+    {
+        let mut z_db = z_db.lock().unwrap();
+
+        if args.is_empty() || (args.len() == 1 && args[0] == "-l") {
+            for (path, score) in z_db.list() {
+                println!("{:>10.1}  {}", score, path);
+            }
+            return 0;
         }
-        return 0;
-    }
 
-    if args.len() == 2 && args[0] == "-x" {
-        z_db.remove(&args[1]);
-        return 0;
-    }
-
-    if args.len() == 1 && args[0] == "-c" {
-        if let Ok(cwd) = env::current_dir() {
-            z_db.remove(&cwd.to_string_lossy());
+        if args.len() == 2 && args[0] == "-x" {
+            z_db.remove(&args[1]);
+            return 0;
         }
-        return 0;
+
+        if args.len() == 1 && args[0] == "-c" {
+            if let Ok(cwd) = env::current_dir() {
+                z_db.remove(&cwd.to_string_lossy());
+            }
+            return 0;
+        }
     }
 
+    // Query and cd: drop the lock before calling update_directory_vars
+    // (which also acquires z_db lock)
     let keywords: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    match z_db.query(&keywords) {
+    let target = {
+        let z_db = z_db.lock().unwrap();
+        z_db.query(&keywords)
+    };
+
+    match target {
         Some(target) => {
-            // Do cd
-            let old = env::current_dir().ok().map(|p| p.to_string_lossy().to_string());
             match env::set_current_dir(&target) {
                 Ok(()) => {
                     println!("{}", target);
                     if let Ok(new_dir) = env::current_dir() {
-                        state.export_var("PWD", &new_dir.to_string_lossy());
+                        update_directory_vars(&new_dir, state);
                     }
-                    if let Some(old) = old {
-                        state.export_var("OLDPWD", &old);
-                    }
-                    let hooks = state.hooks.chpwd.clone();
-                    crate::hooks::run_hooks(&hooks, state);
                     0
                 }
                 Err(e) => {
@@ -2289,11 +2301,9 @@ fn builtin_bookmark(args: &[String], state: &mut ShellState) -> i32 {
                         eprintln!("rsh: bookmark go: {}: {}", path, e);
                         return 1;
                     }
-                    state.env_vars.insert("OLDPWD".to_string(),
-                        state.env_vars.get("PWD").cloned().unwrap_or_default());
-                    state.env_vars.insert("PWD".to_string(), path);
-                    let chpwd = state.hooks.chpwd.clone();
-                    crate::hooks::run_hooks(&chpwd, state);
+                    if let Ok(new_dir) = std::env::current_dir() {
+                        update_directory_vars(&new_dir, state);
+                    }
                     0
                 }
                 None => {

@@ -85,6 +85,11 @@ impl Editor {
         self.vi_pending = None;
         history.reset_position();
 
+        // OSC 133;A — prompt start marker (semantic shell integration)
+        if state.interactive {
+            crate::osc::prompt_start();
+        }
+
         let prompt_str = prompt::render_prompt(state);
         let prompt_lines = prompt_str.matches('\n').count() as u16;
         self.last_rendered_lines = prompt_lines;
@@ -130,6 +135,10 @@ impl Editor {
                                 self.suggestion = None;
                                 self.repaint(state)?;
                                 print!("\r\n");
+                                // OSC 133;B — command start marker
+                                if state.interactive {
+                                    crate::osc::command_start();
+                                }
                                 let line = self.buffer.clone();
                                 return Ok(Some(line));
                             }

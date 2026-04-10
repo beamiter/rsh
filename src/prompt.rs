@@ -132,7 +132,7 @@ fn render_prompt_minimal(state: &ShellState) -> String {
 }
 
 
-fn get_short_cwd(state: &ShellState) -> String {
+pub fn get_short_cwd(state: &ShellState) -> String {
     let cwd = env::current_dir()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| String::from("?"));

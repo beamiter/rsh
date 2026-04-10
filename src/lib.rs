@@ -16,6 +16,7 @@ pub mod history;
 pub mod hooks;
 pub mod job;
 pub mod keybindings;
+pub mod osc;
 pub mod parser;
 pub mod prompt;
 pub mod shell;

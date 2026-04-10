@@ -16,6 +16,7 @@ mod history;
 mod hooks;
 mod job;
 mod keybindings;
+mod osc;
 mod parser;
 mod prompt;
 mod shell;
