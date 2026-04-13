@@ -1,5 +1,6 @@
 /// Main shell REPL loop.
 
+use crate::builtins;
 use crate::config;
 use crate::editor::Editor;
 use crate::environment::ShellState;
@@ -12,12 +13,15 @@ use crate::prompt;
 use crate::session;
 use crate::signal;
 use std::io::{self, BufRead};
+use std::sync::atomic::Ordering;
 
 pub struct Shell {
     pub state: ShellState,
     pub history: History,
     pub editor: Editor,
     pub session_id: Option<String>,
+    /// True if a session snapshot was successfully restored (skip config loading).
+    session_restored: bool,
 }
 
 /// Run non-interactive modes (-c command, script file) without creating
@@ -37,6 +41,10 @@ pub fn run_noninteractive() -> Option<i32> {
                 for cmd in &commands {
                     let code = executor::execute_complete_command(cmd, &mut state);
                     state.last_exit_code = code;
+                    if builtins::EXIT_REQUESTED.load(Ordering::SeqCst) {
+                        state.last_exit_code = builtins::EXIT_CODE.load(Ordering::SeqCst);
+                        break;
+                    }
                 }
             }
             Err(e) => {
@@ -67,6 +75,10 @@ pub fn run_noninteractive() -> Option<i32> {
                         for cmd in &commands {
                             let code = executor::execute_complete_command(cmd, &mut state);
                             state.last_exit_code = code;
+                            if builtins::EXIT_REQUESTED.load(Ordering::SeqCst) {
+                                state.last_exit_code = builtins::EXIT_CODE.load(Ordering::SeqCst);
+                                break;
+                            }
                             if state.shell_opts.errexit && code != 0 {
                                 break;
                             }
@@ -175,23 +187,33 @@ impl Shell {
             history: History::new(10000),
             editor: Editor::new(),
             session_id: None,
+            session_restored: false,
         }
     }
 
     /// Restore session state from a snapshot file.
+    /// Always sets session_id so that save_session() works on exit,
+    /// even if no prior snapshot exists (first launch).
     pub fn restore_session(&mut self, session_id: &str) {
+        self.session_id = Some(session_id.to_string());
+
         match session::SessionSnapshot::load(session_id) {
             Ok(snapshot) => {
                 let ctx = snapshot.environment_context.clone();
                 snapshot.apply(&mut self.state);
                 session::reactivate_environment(&ctx, &mut self.state);
                 session::SessionSnapshot::delete(session_id);
-                self.session_id = Some(session_id.to_string());
+                self.session_restored = true;
             }
             Err(_) => {
-                // No snapshot found or parse error — normal startup
+                // No snapshot found or parse error — normal startup with config
             }
         }
+    }
+
+    /// Whether a session snapshot was successfully loaded (controls config skip).
+    pub fn was_restored(&self) -> bool {
+        self.session_restored
     }
 
     /// Save session state to disk.
@@ -207,9 +229,9 @@ impl Shell {
     pub fn run(&mut self) {
         signal::install_shell_signals();
 
-        // Only load config if NOT restoring a session
+        // Only load config if NOT restoring from a snapshot
         // (the snapshot already contains the accumulated state from config)
-        if self.session_id.is_none() {
+        if !self.session_restored {
             config::load_config(&mut self.state);
         }
 
@@ -305,6 +327,12 @@ impl Shell {
 
                     // OSC 133;D — command finished with exit code
                     osc::command_finished(self.state.last_exit_code);
+
+                    // Check if `exit` builtin was called
+                    if builtins::EXIT_REQUESTED.load(Ordering::SeqCst) {
+                        self.state.last_exit_code = builtins::EXIT_CODE.load(Ordering::SeqCst);
+                        break;
+                    }
                 }
                 Ok(None) => {
                     break;
@@ -371,9 +399,15 @@ impl Shell {
                 }
             }
             self.state.last_command_duration = Some(cmd_start.elapsed());
+
+            if builtins::EXIT_REQUESTED.load(Ordering::SeqCst) {
+                self.state.last_exit_code = builtins::EXIT_CODE.load(Ordering::SeqCst);
+                break;
+            }
         }
 
         run_exit_trap(&mut self.state);
+        self.save_session();
         self.history.save();
     }
 }

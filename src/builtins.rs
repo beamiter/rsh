@@ -4,6 +4,12 @@ use crate::environment::ShellState;
 use crate::parser;
 use std::env;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+
+/// Set by the `exit` builtin so the main loop can exit gracefully
+/// (allowing session save, history save, EXIT trap to run).
+pub static EXIT_REQUESTED: AtomicBool = AtomicBool::new(false);
+pub static EXIT_CODE: AtomicI32 = AtomicI32::new(0);
 
 pub const BUILTIN_NAMES: &[&str] = &[
     "cd", "exit", "export", "unset", "echo", "printf", "pwd",
@@ -285,7 +291,9 @@ fn builtin_exit(args: &[String]) -> i32 {
     let code = args.first()
         .and_then(|s| s.parse::<i32>().ok())
         .unwrap_or(0);
-    std::process::exit(code);
+    EXIT_CODE.store(code, Ordering::SeqCst);
+    EXIT_REQUESTED.store(true, Ordering::SeqCst);
+    code
 }
 
 fn builtin_export(args: &[String], state: &mut ShellState) -> i32 {
