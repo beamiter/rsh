@@ -2,22 +2,24 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 use std::path::PathBuf;
 
+use serde::{Serialize, Deserialize};
+
 use crate::job::JobTable;
 use crate::parser::ast::CompoundCommand;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum EditingMode {
     Emacs,
     Vi,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ConfigSource {
     Bashrc,    // 使用 .bashrc，直接用 bash 执行
     Rshrc,     // 使用 .rshrc，用 rsh 解析器执行
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PromptStyle {
     Full,     // user@host ~/path (branch) took duration ❯
     Compact,  // user ~/path (branch) ❯
@@ -31,7 +33,7 @@ impl Default for PromptStyle {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShellOpts {
     pub errexit: bool,        // set -e
     pub xtrace: bool,         // set -x
@@ -75,7 +77,7 @@ impl Default for ShellOpts {
 }
 
 /// Hook lists for shell events.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ShellHooks {
     pub precmd: Vec<String>,   // run before each prompt
     pub preexec: Vec<String>,  // run before each command
@@ -83,7 +85,7 @@ pub struct ShellHooks {
 }
 
 /// Completion specification for a command.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompletionSpec {
     pub command: String,
     pub word_list: Option<Vec<String>>,

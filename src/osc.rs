@@ -99,6 +99,17 @@ pub fn command_finished(exit_code: i32) {
     eprint!("\x1b]133;D;{}\x07", exit_code);
 }
 
+// ── OSC 7770: rsh Session ID ─────────────────────────────────
+
+/// Emit OSC 7770 to report the rsh session ID to the terminal emulator.
+/// Format: `\x1b]7770;session_id\x07`
+///
+/// This is a custom rsh-specific OSC used by jterm4 to associate
+/// a terminal pane with a persistent session.
+pub fn report_session_id(session_id: &str) {
+    eprint!("\x1b]7770;{}\x07", session_id);
+}
+
 // ── OSC 9: Desktop Notification ───────────────────────────────
 
 /// Emit OSC 9 desktop notification.

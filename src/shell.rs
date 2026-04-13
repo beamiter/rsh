@@ -9,6 +9,7 @@ use crate::hooks;
 use crate::osc;
 use crate::parser;
 use crate::prompt;
+use crate::session;
 use crate::signal;
 use std::io::{self, BufRead};
 
@@ -16,6 +17,7 @@ pub struct Shell {
     pub state: ShellState,
     pub history: History,
     pub editor: Editor,
+    pub session_id: Option<String>,
 }
 
 /// Run non-interactive modes (-c command, script file) without creating
@@ -172,12 +174,44 @@ impl Shell {
             state: ShellState::new(true),
             history: History::new(10000),
             editor: Editor::new(),
+            session_id: None,
+        }
+    }
+
+    /// Restore session state from a snapshot file.
+    pub fn restore_session(&mut self, session_id: &str) {
+        match session::SessionSnapshot::load(session_id) {
+            Ok(snapshot) => {
+                let ctx = snapshot.environment_context.clone();
+                snapshot.apply(&mut self.state);
+                session::reactivate_environment(&ctx, &mut self.state);
+                session::SessionSnapshot::delete(session_id);
+                self.session_id = Some(session_id.to_string());
+            }
+            Err(_) => {
+                // No snapshot found or parse error — normal startup
+            }
+        }
+    }
+
+    /// Save session state to disk.
+    fn save_session(&self) {
+        if let Some(ref id) = self.session_id {
+            let snapshot = session::SessionSnapshot::capture(&self.state, id);
+            if let Err(e) = snapshot.save() {
+                eprintln!("rsh: failed to save session: {}", e);
+            }
         }
     }
 
     pub fn run(&mut self) {
         signal::install_shell_signals();
-        config::load_config(&mut self.state);
+
+        // Only load config if NOT restoring a session
+        // (the snapshot already contains the accumulated state from config)
+        if self.session_id.is_none() {
+            config::load_config(&mut self.state);
+        }
 
         // Check if stdin is a TTY for interactive mode
         let stdin_is_tty = atty::is(atty::Stream::Stdin);
@@ -195,6 +229,11 @@ impl Shell {
     }
 
     fn run_interactive(&mut self) {
+        // Report session ID to the terminal emulator via OSC 7770
+        if let Some(ref id) = self.session_id {
+            osc::report_session_id(id);
+        }
+
         // Initial OSC emissions so the terminal knows CWD at startup
         osc::report_cwd(&self.state.hostname);
         osc::report_cwd_iterm2();
@@ -278,7 +317,11 @@ impl Shell {
         }
 
         run_exit_trap(&mut self.state);
+        self.save_session();
         self.history.save();
+
+        // Opportunistically clean up stale session files (older than 7 days)
+        session::cleanup_stale_sessions(std::time::Duration::from_secs(7 * 24 * 3600));
     }
 
     fn run_from_stdin(&mut self) {

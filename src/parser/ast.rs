@@ -1,6 +1,8 @@
 /// AST node definitions for bash-compatible shell grammar.
 
-#[derive(Debug, Clone, PartialEq)]
+use serde::{Serialize, Deserialize};
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum WordPart {
     Literal(String),
     SingleQuoted(String),
@@ -15,7 +17,7 @@ pub enum WordPart {
     ProcessSub(String, ProcessSubKind),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ProcessSubKind {
     Input,  // <(cmd) -- provides input
     Output, // >(cmd) -- accepts output
@@ -23,7 +25,7 @@ pub enum ProcessSubKind {
 
 pub type Word = Vec<WordPart>;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Assignment {
     pub name: String,
     pub value: Word,
@@ -33,7 +35,7 @@ pub struct Assignment {
 }
 
 // Here-doc options to store multi-line content and modifiers
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HereDocOptions {
     pub delimiter: String,           // The delimiter (e.g., "EOF")
     pub content: String,             // The multi-line content
@@ -41,13 +43,13 @@ pub struct HereDocOptions {
     pub expand_vars: bool,           // Whether to expand variables ($var, $(cmd), etc)
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum RedirectTarget {
     File(Word),                      // Regular file redirection target
     HereDoc(HereDocOptions),         // Here-doc with content and options
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum RedirectKind {
     Output,
     Append,
@@ -60,7 +62,7 @@ pub enum RedirectKind {
     AppendAll,    // &>> (append stdout and stderr)
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Redirect {
     pub fd: Option<i32>,
     pub kind: RedirectKind,
@@ -68,20 +70,20 @@ pub struct Redirect {
     pub here_doc: Option<HereDocOptions>, // Here-doc specific data
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SimpleCommand {
     pub assignments: Vec<Assignment>,
     pub words: Vec<Word>,
     pub redirects: Vec<Redirect>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CaseArm {
     pub patterns: Vec<Word>,
     pub body: Vec<CompleteCommand>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum CompoundCommand {
     BraceGroup {
         body: Vec<CompleteCommand>,
@@ -141,7 +143,7 @@ pub enum CompoundCommand {
     },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Command {
     Simple(SimpleCommand),
     Compound(CompoundCommand),
@@ -151,25 +153,25 @@ pub enum Command {
     },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Pipeline {
     pub negated: bool,
     pub commands: Vec<Command>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Connector {
     And,
     Or,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AndOrList {
     pub first: Pipeline,
     pub rest: Vec<(Connector, Pipeline)>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CompleteCommand {
     pub list: AndOrList,
     pub background: bool,
