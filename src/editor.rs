@@ -6,7 +6,7 @@ use crate::environment::ShellState;
 use crate::highlighter;
 use crate::history::History;
 use crate::prompt;
-use crate::signal::SIGINT_RECEIVED;
+use crate::signal::{SIGINT_RECEIVED, SIGHUP_RECEIVED};
 use crate::suggest;
 
 use crossterm::{
@@ -108,6 +108,10 @@ impl Editor {
 
     fn edit_loop(&mut self, state: &mut ShellState, history: &mut History) -> io::Result<Option<String>> {
         loop {
+            if SIGHUP_RECEIVED.load(Ordering::SeqCst) {
+                // Terminal closed — trigger graceful shutdown (save session, etc.)
+                return Ok(None);
+            }
             if SIGINT_RECEIVED.swap(false, Ordering::SeqCst) {
                 self.buffer.clear();
                 self.cursor = 0;

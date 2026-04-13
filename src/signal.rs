@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub static SIGCHLD_RECEIVED: AtomicBool = AtomicBool::new(false);
 pub static SIGWINCH_RECEIVED: AtomicBool = AtomicBool::new(false);
 pub static SIGINT_RECEIVED: AtomicBool = AtomicBool::new(false);
+pub static SIGHUP_RECEIVED: AtomicBool = AtomicBool::new(false);
 
 extern "C" fn sigchld_handler(_: libc::c_int) {
     SIGCHLD_RECEIVED.store(true, Ordering::SeqCst);
@@ -20,6 +21,10 @@ extern "C" fn sigint_handler(_: libc::c_int) {
     SIGINT_RECEIVED.store(true, Ordering::SeqCst);
 }
 
+extern "C" fn sighup_handler(_: libc::c_int) {
+    SIGHUP_RECEIVED.store(true, Ordering::SeqCst);
+}
+
 pub fn install_shell_signals() {
     unsafe {
         let sa_ignore = SigAction::new(SigHandler::SigIgn, SaFlags::SA_RESTART, SigSet::empty());
@@ -29,9 +34,13 @@ pub fn install_shell_signals() {
         signal::sigaction(Signal::SIGTTIN, &sa_ignore).ok();
         signal::sigaction(Signal::SIGTTOU, &sa_ignore).ok();
         signal::sigaction(Signal::SIGPIPE, &sa_ignore).ok();
-        // Ignore SIGHUP so the shell can save session state on terminal close.
-        // The PTY EOF will trigger graceful shutdown via the main loop.
-        signal::sigaction(Signal::SIGHUP, &sa_ignore).ok();
+        // Handle SIGHUP to trigger graceful shutdown (save session, then exit).
+        let sa_hup = SigAction::new(
+            SigHandler::Handler(sighup_handler),
+            SaFlags::SA_RESTART,
+            SigSet::empty(),
+        );
+        signal::sigaction(Signal::SIGHUP, &sa_hup).ok();
 
         // Custom handlers
         let sa_chld = SigAction::new(
