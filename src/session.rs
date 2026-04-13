@@ -34,7 +34,11 @@ const SKIP_ENV_VARS: &[&str] = &[
 pub enum EnvironmentContext {
     Plain,
     PythonVenv { virtual_env: String },
-    NixShell { nix_build_top: Option<String> },
+    NixShell {
+        #[serde(default)]
+        flake_dir: Option<String>,
+        nix_build_top: Option<String>,
+    },
     Docker { container_id: Option<String> },
     Ssh { ssh_connection: String },
 }
@@ -193,6 +197,20 @@ impl SessionSnapshot {
     }
 }
 
+/// Search for `flake.nix` starting from CWD and walking up to parent directories.
+/// Returns the directory containing the flake, or None.
+fn find_flake_dir() -> Option<String> {
+    let mut dir = std::env::current_dir().ok()?;
+    loop {
+        if dir.join("flake.nix").exists() {
+            return Some(dir.to_string_lossy().to_string());
+        }
+        if !dir.pop() {
+            return None;
+        }
+    }
+}
+
 /// Detect the current environment context by checking env vars and filesystem markers.
 pub fn detect_environment() -> EnvironmentContext {
     // Python venv
@@ -202,9 +220,13 @@ pub fn detect_environment() -> EnvironmentContext {
         }
     }
 
-    // Nix shell
-    if std::env::var("IN_NIX_SHELL").is_ok() || std::env::var("NIX_BUILD_TOP").is_ok() {
+    // Nix shell — check env var first (rsh is the nix shell itself),
+    // then check for flake.nix (rsh is the parent, nix develop ran as child)
+    let in_nix = std::env::var("IN_NIX_SHELL").is_ok() || std::env::var("NIX_BUILD_TOP").is_ok();
+    let flake_dir = find_flake_dir();
+    if in_nix || flake_dir.is_some() {
         return EnvironmentContext::NixShell {
+            flake_dir,
             nix_build_top: std::env::var("NIX_BUILD_TOP").ok(),
         };
     }
@@ -253,15 +275,92 @@ pub fn reactivate_environment(ctx: &EnvironmentContext, state: &mut ShellState) 
                 eprintln!("rsh: session restore: venv {} no longer exists", virtual_env);
             }
         }
-        EnvironmentContext::NixShell { .. } => {
-            // Nix environment is captured in env_vars; restoring env_vars is sufficient.
-            // The PATH, NIX_BUILD_TOP, etc. are all in the snapshot.
+        EnvironmentContext::NixShell { flake_dir, .. } => {
+            reactivate_nix_develop(flake_dir.as_deref(), state);
         }
         EnvironmentContext::Docker { .. } | EnvironmentContext::Ssh { .. } => {
             // Docker/SSH context is informational at the rsh level.
             // Re-establishing the connection is jterm4's responsibility.
         }
         EnvironmentContext::Plain => {}
+    }
+}
+
+/// Re-activate a nix develop environment by running `nix print-dev-env`
+/// and applying the resulting environment variables to the shell state.
+fn reactivate_nix_develop(flake_dir: Option<&str>, state: &mut ShellState) {
+    let Some(dir) = flake_dir else { return };
+
+    // Check that flake.nix still exists
+    let flake_path = std::path::Path::new(dir).join("flake.nix");
+    if !flake_path.exists() {
+        eprintln!("rsh: session restore: flake.nix no longer exists in {}", dir);
+        return;
+    }
+
+    eprintln!("rsh: restoring nix develop environment from {} ...", dir);
+
+    // Use `nix print-dev-env` to get the dev shell environment, then
+    // eval it in bash and extract the resulting env vars.
+    // This is the same pattern as config.rs::source_via_bash.
+    let bash_script = format!(
+        r#"eval "$(nix print-dev-env '{dir}' 2>/dev/null)" 2>/dev/null
+echo "=== NIX_ENV ==="
+env -0 2>/dev/null || env
+"#,
+        dir = dir.replace('\'', "'\\''")
+    );
+
+    let output = match std::process::Command::new("bash")
+        .arg("-c")
+        .arg(&bash_script)
+        .output()
+    {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("rsh: session restore: failed to run nix print-dev-env: {}", e);
+            return;
+        }
+    };
+
+    if !output.status.success() {
+        eprintln!("rsh: session restore: nix print-dev-env failed (exit {})",
+            output.status.code().unwrap_or(-1));
+        return;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Find the NIX_ENV section
+    let Some(env_section) = stdout.split("=== NIX_ENV ===\n").nth(1) else {
+        eprintln!("rsh: session restore: could not parse nix environment output");
+        return;
+    };
+
+    // Parse env vars — try NUL-separated first (from env -0), fall back to newline
+    let entries: Vec<&str> = if env_section.contains('\0') {
+        env_section.split('\0').collect()
+    } else {
+        env_section.lines().collect()
+    };
+
+    let mut count = 0;
+    for entry in entries {
+        if entry.is_empty() { continue; }
+        if let Some(eq_pos) = entry.find('=') {
+            let key = &entry[..eq_pos];
+            let value = &entry[eq_pos + 1..];
+            // Skip process-specific vars and vars we already filter
+            if SKIP_ENV_VARS.contains(&key) { continue; }
+            // Skip shell internals
+            if key.starts_with("BASH") || key == "SHELLOPTS" || key == "IFS" { continue; }
+            state.export_var(key, value);
+            count += 1;
+        }
+    }
+
+    if count > 0 {
+        eprintln!("rsh: restored nix develop environment ({} vars)", count);
     }
 }
 

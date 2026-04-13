@@ -29,6 +29,9 @@ pub fn install_shell_signals() {
         signal::sigaction(Signal::SIGTTIN, &sa_ignore).ok();
         signal::sigaction(Signal::SIGTTOU, &sa_ignore).ok();
         signal::sigaction(Signal::SIGPIPE, &sa_ignore).ok();
+        // Ignore SIGHUP so the shell can save session state on terminal close.
+        // The PTY EOF will trigger graceful shutdown via the main loop.
+        signal::sigaction(Signal::SIGHUP, &sa_ignore).ok();
 
         // Custom handlers
         let sa_chld = SigAction::new(
@@ -59,6 +62,7 @@ pub fn reset_child_signals() {
     unsafe {
         let sa_default = SigAction::new(SigHandler::SigDfl, SaFlags::empty(), SigSet::empty());
         signal::sigaction(Signal::SIGINT, &sa_default).ok();
+        signal::sigaction(Signal::SIGHUP, &sa_default).ok();
         signal::sigaction(Signal::SIGTSTP, &sa_default).ok();
         signal::sigaction(Signal::SIGTTIN, &sa_default).ok();
         signal::sigaction(Signal::SIGTTOU, &sa_default).ok();
