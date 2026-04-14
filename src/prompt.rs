@@ -145,7 +145,7 @@ pub fn get_short_cwd(state: &ShellState) -> String {
     }
 }
 
-fn get_git_branch() -> Option<String> {
+pub fn get_git_branch() -> Option<String> {
     // Walk up from current directory looking for .git
     let mut dir = env::current_dir().ok()?;
     loop {

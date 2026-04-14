@@ -107,6 +107,13 @@ impl Editor {
     }
 
     fn edit_loop(&mut self, state: &mut ShellState, history: &mut History) -> io::Result<Option<String>> {
+        // Compute initial suggestion for proactive recommendations on empty buffer
+        // (e.g., suggest "git push" right after "git commit")
+        self.update_suggestion(history, state);
+        if self.suggestion.is_some() {
+            self.repaint(state)?;
+        }
+
         loop {
             if SIGHUP_RECEIVED.load(Ordering::SeqCst) {
                 // Terminal closed — trigger graceful shutdown (save session, etc.)
@@ -162,13 +169,13 @@ impl Editor {
                             }
                         }
 
-                        self.update_suggestion(history);
+                        self.update_suggestion(history, state);
                         self.repaint(state)?;
                     }
                     Event::Paste(text) => {
                         self.buffer.insert_str(self.cursor, &text);
                         self.cursor += text.len();
-                        self.update_suggestion(history);
+                        self.update_suggestion(history, state);
                         self.repaint(state)?;
                     }
                     Event::Resize(w, h) => {
@@ -768,12 +775,17 @@ impl Editor {
         }
     }
 
-    fn update_suggestion(&mut self, history: &History) {
+    fn update_suggestion(&mut self, history: &History, state: &ShellState) {
         if self.completion_menu.is_some() || self.search_mode.is_some() {
             self.suggestion = None;
             return;
         }
-        self.suggestion = suggest::suggest(&self.buffer, history);
+        let ctx = suggest::SuggestionContext {
+            git_branch: state.cached_git_branch.as_deref(),
+            last_command: state.last_command.as_deref(),
+            last_exit_code: state.last_exit_code,
+        };
+        self.suggestion = suggest::suggest(&self.buffer, history, &ctx);
     }
 
     fn repaint(&mut self, state: &mut ShellState) -> io::Result<()> {

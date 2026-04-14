@@ -275,6 +275,9 @@ impl Shell {
                 osc::set_title(&format!("rsh: {}", title));
             }
 
+            // Refresh git branch cache for the suggestion engine
+            self.state.cached_git_branch = prompt::get_git_branch();
+
             match self.editor.read_line(&mut self.state, &mut self.history) {
                 Ok(Some(line)) => {
                     let line = line.trim().to_string();
@@ -295,6 +298,7 @@ impl Shell {
                     };
 
                     self.history.add(&line);
+                    self.state.last_command = Some(line.clone());
 
                     // Run preexec hooks
                     let preexec = self.state.hooks.preexec.clone();

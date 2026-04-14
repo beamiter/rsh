@@ -139,6 +139,10 @@ pub struct ShellState {
     // Function return control flow
     pub return_requested: bool,
     pub return_value: i32,
+    /// Last executed command line (for sequential command suggestions)
+    pub last_command: Option<String>,
+    /// Cached git branch for current directory (avoids filesystem I/O per keystroke)
+    pub cached_git_branch: Option<String>,
 }
 
 impl ShellState {
@@ -187,6 +191,8 @@ impl ShellState {
             loop_continue: false,
             return_requested: false,
             return_value: 0,
+            last_command: None,
+            cached_git_branch: None,
         }
     }
 
