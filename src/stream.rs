@@ -72,6 +72,10 @@ pub fn builtin_max(args: &[String]) -> i32 {
 
 /// lines - Read stdin line by line (filter for non-empty lines)
 pub fn builtin_lines(_args: &[String]) -> i32 {
+    if atty::is(atty::Stream::Stdin) {
+        eprintln!("lines: requires piped input, e.g.: cat file | lines");
+        return 1;
+    }
     use std::io::BufRead;
     let stdin = std::io::stdin();
     for line in stdin.lock().lines() {
@@ -115,6 +119,10 @@ pub fn builtin_trim(args: &[String]) -> i32 {
 
 /// count - Count lines, words, characters
 pub fn builtin_count(args: &[String]) -> i32 {
+    if atty::is(atty::Stream::Stdin) {
+        eprintln!("count: requires piped input, e.g.: cat file | count");
+        return 1;
+    }
     use std::io::BufRead;
 
     let mut lines = 0;
@@ -146,6 +154,10 @@ pub fn builtin_count(args: &[String]) -> i32 {
 /// reverse - Reverse order of arguments or lines
 pub fn builtin_reverse(args: &[String]) -> i32 {
     if args.is_empty() {
+        if atty::is(atty::Stream::Stdin) {
+            eprintln!("reverse: requires piped input or arguments, e.g.: cat file | reverse");
+            return 1;
+        }
         // Read from stdin
         use std::io::BufRead;
         let stdin = std::io::stdin();
@@ -170,6 +182,10 @@ pub fn builtin_reverse(args: &[String]) -> i32 {
 /// upper - Convert to uppercase
 pub fn builtin_upper(args: &[String]) -> i32 {
     if args.is_empty() {
+        if atty::is(atty::Stream::Stdin) {
+            eprintln!("upper: requires piped input or arguments, e.g.: upper hello");
+            return 1;
+        }
         use std::io::BufRead;
         let stdin = std::io::stdin();
         for line in stdin.lock().lines() {
@@ -188,6 +204,10 @@ pub fn builtin_upper(args: &[String]) -> i32 {
 /// lower - Convert to lowercase
 pub fn builtin_lower(args: &[String]) -> i32 {
     if args.is_empty() {
+        if atty::is(atty::Stream::Stdin) {
+            eprintln!("lower: requires piped input or arguments, e.g.: lower HELLO");
+            return 1;
+        }
         use std::io::BufRead;
         let stdin = std::io::stdin();
         for line in stdin.lock().lines() {

@@ -5,6 +5,10 @@ use std::io::{self, BufRead, Write};
 
 /// Read JSON from stdin (array or newline-delimited objects).
 pub fn read_json_stdin() -> Vec<Value> {
+    if atty::is(atty::Stream::Stdin) {
+        eprintln!("rsh: this command requires piped JSON input");
+        return Vec::new();
+    }
     let stdin = io::stdin();
     let mut input = String::new();
     for line in stdin.lock().lines() {

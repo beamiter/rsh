@@ -10,6 +10,10 @@ pub fn builtin_filter(args: &[String]) -> i32 {
         eprintln!("Usage: filter <pattern>");
         return 1;
     }
+    if atty::is(atty::Stream::Stdin) {
+        eprintln!("filter: requires piped input, e.g.: cat file | filter <pattern>");
+        return 1;
+    }
 
     let pattern = &args[0];
     use std::io::BufRead;
@@ -29,6 +33,10 @@ pub fn builtin_filter(args: &[String]) -> i32 {
 pub fn builtin_map(args: &[String]) -> i32 {
     if args.is_empty() {
         eprintln!("Usage: map <transform_pattern>");
+        return 1;
+    }
+    if atty::is(atty::Stream::Stdin) {
+        eprintln!("map: requires piped input, e.g.: cat file | map <pattern>");
         return 1;
     }
 
@@ -54,6 +62,10 @@ pub fn builtin_map(args: &[String]) -> i32 {
 pub fn builtin_group_by(args: &[String], _state: &mut ShellState) -> i32 {
     if args.is_empty() {
         eprintln!("Usage: group-by <field_index>");
+        return 1;
+    }
+    if atty::is(atty::Stream::Stdin) {
+        eprintln!("group-by: requires piped input, e.g.: cat file | group-by <field>");
         return 1;
     }
 
@@ -98,6 +110,10 @@ pub fn builtin_select(args: &[String]) -> i32 {
         eprintln!("Usage: select <field1> [field2] ...");
         return 1;
     }
+    if atty::is(atty::Stream::Stdin) {
+        eprintln!("select: requires piped input, e.g.: cat file | select <fields>");
+        return 1;
+    }
 
     let indices: Vec<usize> = args.iter()
         .filter_map(|s| s.parse().ok())
@@ -127,6 +143,10 @@ pub fn builtin_select(args: &[String]) -> i32 {
 
 /// uniq - Remove duplicate consecutive lines
 pub fn builtin_uniq(args: &[String]) -> i32 {
+    if atty::is(atty::Stream::Stdin) {
+        eprintln!("uniq: requires piped input, e.g.: cat file | uniq");
+        return 1;
+    }
     let count = args.iter().any(|a| a == "-c");
 
     use std::io::BufRead;
@@ -164,55 +184,12 @@ pub fn builtin_uniq(args: &[String]) -> i32 {
     0
 }
 
-/// head - Print first N lines
-pub fn builtin_head(args: &[String]) -> i32 {
-    let mut n = 10;
-    if args.len() > 0 && args[0].starts_with('-') {
-        n = args[0][1..].parse().unwrap_or(10);
-    }
-
-    use std::io::BufRead;
-
-    let stdin = std::io::stdin();
-    for (i, line) in stdin.lock().lines().enumerate() {
-        if i >= n {
-            break;
-        }
-        if let Ok(line) = line {
-            println!("{}", line);
-        }
-    }
-    0
-}
-
-/// tail - Print last N lines
-pub fn builtin_tail(args: &[String]) -> i32 {
-    let mut n = 10;
-    if args.len() > 0 && args[0].starts_with('-') {
-        n = args[0][1..].parse().unwrap_or(10);
-    }
-
-    use std::io::BufRead;
-
-    let stdin = std::io::stdin();
-    let mut lines: Vec<String> = Vec::new();
-
-    for line in stdin.lock().lines() {
-        if let Ok(line) = line {
-            lines.push(line);
-        }
-    }
-
-    let start = if lines.len() > n { lines.len() - n } else { 0 };
-    for line in &lines[start..] {
-        println!("{}", line);
-    }
-
-    0
-}
-
 /// shuffle - Randomly shuffle lines
 pub fn builtin_shuffle(_args: &[String]) -> i32 {
+    if atty::is(atty::Stream::Stdin) {
+        eprintln!("shuffle: requires piped input, e.g.: cat file | shuffle");
+        return 1;
+    }
     use std::io::BufRead;
 
     let stdin = std::io::stdin();
@@ -243,6 +220,10 @@ pub fn builtin_shuffle(_args: &[String]) -> i32 {
 
 /// dedupe - Remove all duplicates (unordered)
 pub fn builtin_dedupe(_args: &[String]) -> i32 {
+    if atty::is(atty::Stream::Stdin) {
+        eprintln!("dedupe: requires piped input, e.g.: cat file | dedupe");
+        return 1;
+    }
     use std::io::BufRead;
     use std::collections::HashSet;
 

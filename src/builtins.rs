@@ -26,7 +26,7 @@ pub const BUILTIN_NAMES: &[&str] = &[
     // Debug commands
     "debug-trace", "debug-timing", "debug-profile",
     // Data processing commands
-    "filter", "map", "head", "tail", "dedupe", "shuffle", "uniq",
+    "filter", "map", "dedupe", "shuffle", "uniq",
 ];
 
 pub fn is_builtin(name: &str) -> bool {
@@ -169,8 +169,6 @@ pub fn run_builtin(name: &str, args: &[String], state: &mut ShellState) -> i32 {
         "group-by" => crate::data::builtin_group_by(args, state),
         "select" => crate::data::builtin_select(args),
         "uniq" => crate::data::builtin_uniq(args),
-        "head" => crate::data::builtin_head(args),
-        "tail" => crate::data::builtin_tail(args),
         "shuffle" => crate::data::builtin_shuffle(args),
         "dedupe" => crate::data::builtin_dedupe(args),
         _ => { eprintln!("rsh: {}: builtin not yet implemented", name); 1 }
