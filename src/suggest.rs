@@ -51,22 +51,20 @@ pub fn suggest(buffer: &str, history: &History, ctx: &SuggestionContext) -> Opti
 
     // 3. For "cd " commands, suggest from z-jump database
     if buffer.starts_with("cd ") {
-        let query = buffer[3..].trim();
+        let current_arg = &buffer[3..];
+        let query = current_arg.trim();
         if !query.is_empty() {
             if let Ok(db) = crate::zjump::get_z_db().lock() {
                 if let Some(path) = db.query(&[query]) {
-                    // Return the full path as suggestion, replacing the partial arg
-                    let current_arg = buffer[3..].to_string();
-                    if path.len() > current_arg.len() && path.contains(query) {
+                    // If user's arg is a prefix of the z-jump path, complete it
+                    if path.starts_with(current_arg) && path.len() > current_arg.len() {
                         return Some(path[current_arg.len()..].to_string());
                     }
-                    // Or show full path after "cd "
-                    let suggestion = format!("{}", &path);
-                    if suggestion.starts_with(query) {
-                        return Some(suggestion[query.len()..].to_string());
+                    // If the query is a suffix/substring of the path but not a prefix,
+                    // show the full path as a hint (user typed a relative/partial path)
+                    if path != current_arg {
+                        return Some(format!(" # -> {}", path));
                     }
-                    // Fallback: suggest full replacement
-                    return Some(format!(" # -> {}", path));
                 }
             }
         }
