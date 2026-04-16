@@ -12,6 +12,7 @@ use crate::parser;
 use crate::prompt;
 use crate::session;
 use crate::signal;
+use nix::unistd::{getpgrp, getpid, setpgid, tcsetpgrp};
 use std::io::{self, BufRead};
 use std::sync::atomic::Ordering;
 
@@ -242,6 +243,7 @@ impl Shell {
         self.state.interactive = stdin_is_tty;
 
         if stdin_is_tty {
+            init_interactive_job_control();
             // Interactive mode with editor
             self.run_interactive();
         } else {
@@ -414,4 +416,15 @@ impl Shell {
         self.save_session();
         self.history.save();
     }
+}
+
+fn init_interactive_job_control() {
+    let shell_pid = getpid();
+
+    // Interactive shells need their own process group before handing the
+    // terminal to child jobs and reclaiming it later.
+    setpgid(shell_pid, shell_pid).ok();
+
+    let shell_pgid = getpgrp();
+    tcsetpgrp(std::io::stdin(), shell_pgid).ok();
 }

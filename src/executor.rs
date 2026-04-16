@@ -11,6 +11,7 @@ use nix::unistd::{close, execvp, fork, pipe, setpgid, tcsetpgrp, ForkResult, Pid
 use std::ffi::CString;
 use std::fs::{File, OpenOptions};
 use std::os::unix::io::{IntoRawFd, RawFd, AsRawFd, OwnedFd, BorrowedFd};
+use std::io::Write;
 
 /// Give terminal foreground to `pgrp`, then wait for the process, then reclaim
 /// the terminal for the shell's own process group.
@@ -37,6 +38,12 @@ fn wait_for_fg(pid: Pid, state: &mut ShellState) -> i32 {
     status
 }
 
+fn child_exit(code: i32) -> ! {
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    unsafe { nix::libc::_exit(code) }
+}
+
 pub fn execute_program(commands: &[CompleteCommand], state: &mut ShellState) -> i32 {
     let mut last = 0;
     for cmd in commands {
@@ -54,7 +61,7 @@ pub fn execute_complete_command(cmd: &CompleteCommand, state: &mut ShellState) -
                 let pid = nix::unistd::getpid();
                 setpgid(pid, pid).ok();
                 let code = execute_and_or(&cmd.list, state);
-                std::process::exit(code);
+                child_exit(code);
             }
             Ok(ForkResult::Parent { child }) => {
                 setpgid(child, child).ok();
@@ -125,6 +132,7 @@ fn execute_pipeline(pipeline: &Pipeline, state: &mut ShellState) -> i32 {
         match unsafe { fork() } {
             Ok(ForkResult::Child) => {
                 signal::reset_child_signals();
+                state.interactive = false;
                 let my_pid = nix::unistd::getpid();
                 let target_pgid = if pgid.as_raw() == 0 { my_pid } else { pgid };
                 setpgid(my_pid, target_pgid).ok();
@@ -141,8 +149,8 @@ fn execute_pipeline(pipeline: &Pipeline, state: &mut ShellState) -> i32 {
                     close(fd).ok();
                 }
 
-                let code = execute_command(cmd, state);
-                std::process::exit(code);
+                let code = execute_command_in_pipeline_child(cmd, state);
+                child_exit(code);
             }
             Ok(ForkResult::Parent { child }) => {
                 if pgid.as_raw() == 0 {
@@ -204,6 +212,13 @@ fn execute_command(cmd: &Command, state: &mut ShellState) -> i32 {
     }
 }
 
+fn execute_command_in_pipeline_child(cmd: &Command, state: &mut ShellState) -> i32 {
+    match cmd {
+        Command::Simple(simple) => execute_simple_with_mode(simple, state, false),
+        _ => execute_command(cmd, state),
+    }
+}
+
 fn execute_assignment(assign: &Assignment, state: &mut ShellState) {
     if let Some(ref array_words) = assign.array_value {
         // Array assignment: arr=(a b c)
@@ -237,6 +252,10 @@ fn execute_assignment(assign: &Assignment, state: &mut ShellState) {
 }
 
 fn execute_simple(cmd: &SimpleCommand, state: &mut ShellState) -> i32 {
+    execute_simple_with_mode(cmd, state, true)
+}
+
+fn execute_simple_with_mode(cmd: &SimpleCommand, state: &mut ShellState, fork_external: bool) -> i32 {
     if state.shell_opts.xtrace && !cmd.words.is_empty() {
         let trace: Vec<String> = cmd.words.iter().map(|w| expand_word_to_string(w, state)).collect();
         eprintln!("+ {}", trace.join(" "));
@@ -328,6 +347,24 @@ fn execute_simple(cmd: &SimpleCommand, state: &mut ShellState) -> i32 {
     }
 
     // External command - fork and exec
+    if !fork_external {
+        apply_redirects_in_child(&cmd.redirects, state);
+
+        for assign in &cmd.assignments {
+            let val = expand_word_to_string(&assign.value, state);
+            std::env::set_var(&assign.name, &val);
+        }
+
+        let c_cmd = CString::new(cmd_name.as_str()).unwrap_or_default();
+        let c_args: Vec<CString> = expanded.iter()
+            .map(|s| CString::new(s.as_str()).unwrap_or_default())
+            .collect();
+
+        let _ = execvp(&c_cmd, &c_args);
+        eprintln!("rsh: {}: command not found", cmd_name);
+        return 127;
+    }
+
     match unsafe { fork() } {
         Ok(ForkResult::Child) => {
             signal::reset_child_signals();
@@ -348,7 +385,7 @@ fn execute_simple(cmd: &SimpleCommand, state: &mut ShellState) -> i32 {
 
             let _ = execvp(&c_cmd, &c_args);
             eprintln!("rsh: {}: command not found", cmd_name);
-            std::process::exit(127);
+            child_exit(127);
         }
         Ok(ForkResult::Parent { child }) => {
             setpgid(child, child).ok();
@@ -395,7 +432,7 @@ pub fn execute_compound(cmd: &CompoundCommand, state: &mut ShellState) -> i32 {
                     setpgid(pid, pid).ok();
                     apply_redirects_in_child(redirects, state);
                     let code = execute_command_list(body, state);
-                    std::process::exit(code);
+                    child_exit(code);
                 }
                 Ok(ForkResult::Parent { child }) => {
                     setpgid(child, child).ok();
@@ -656,7 +693,7 @@ pub fn execute_compound(cmd: &CompoundCommand, state: &mut ShellState) -> i32 {
 
                         // Execute the command
                         let code = execute_simple(command, state);
-                        std::process::exit(code);
+                        child_exit(code);
                     }
                     Ok(ForkResult::Parent { child }) => {
                         // Parent: save pipe fds in array variable
