@@ -25,6 +25,10 @@ extern "C" fn sighup_handler(_: libc::c_int) {
     SIGHUP_RECEIVED.store(true, Ordering::SeqCst);
 }
 
+extern "C" fn sigterm_handler(_: libc::c_int) {
+    SIGHUP_RECEIVED.store(true, Ordering::SeqCst);
+}
+
 pub fn install_shell_signals() {
     unsafe {
         let sa_ignore = SigAction::new(SigHandler::SigIgn, SaFlags::SA_RESTART, SigSet::empty());
@@ -41,6 +45,14 @@ pub fn install_shell_signals() {
             SigSet::empty(),
         );
         signal::sigaction(Signal::SIGHUP, &sa_hup).ok();
+
+        // Handle SIGTERM (abnormal PTY termination) same as SIGHUP
+        let sa_term = SigAction::new(
+            SigHandler::Handler(sigterm_handler),
+            SaFlags::SA_RESTART,
+            SigSet::empty(),
+        );
+        signal::sigaction(Signal::SIGTERM, &sa_term).ok();
 
         // Custom handlers
         let sa_chld = SigAction::new(
@@ -72,6 +84,7 @@ pub fn reset_child_signals() {
         let sa_default = SigAction::new(SigHandler::SigDfl, SaFlags::empty(), SigSet::empty());
         signal::sigaction(Signal::SIGINT, &sa_default).ok();
         signal::sigaction(Signal::SIGHUP, &sa_default).ok();
+        signal::sigaction(Signal::SIGTERM, &sa_default).ok();
         signal::sigaction(Signal::SIGTSTP, &sa_default).ok();
         signal::sigaction(Signal::SIGTTIN, &sa_default).ok();
         signal::sigaction(Signal::SIGTTOU, &sa_default).ok();

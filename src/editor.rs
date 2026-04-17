@@ -9,6 +9,8 @@ use crate::prompt;
 use crate::signal::{SIGINT_RECEIVED, SIGHUP_RECEIVED};
 use crate::suggest;
 
+use nix::libc;
+
 use crossterm::{
     cursor::{self, MoveToColumn, MoveUp},
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
@@ -114,9 +116,10 @@ impl Editor {
             self.repaint(state)?;
         }
 
+        let mut consecutive_timeouts: u32 = 0;
+
         loop {
             if SIGHUP_RECEIVED.load(Ordering::SeqCst) {
-                // Terminal closed — trigger graceful shutdown (save session, etc.)
                 return Ok(None);
             }
             if SIGINT_RECEIVED.swap(false, Ordering::SeqCst) {
@@ -126,64 +129,83 @@ impl Editor {
                 return Ok(Some(String::new()));
             }
 
-            if event::poll(Duration::from_millis(100))? {
-                match event::read()? {
-                    Event::Key(key) => {
-                        if key.code != KeyCode::Tab && key.code != KeyCode::BackTab {
-                            if key.code != KeyCode::Enter {
-                                if let Some(menu) = self.completion_menu.take() {
-                                    if key.code == KeyCode::Esc {
-                                        self.buffer.replace_range(menu.word_start..self.cursor, &menu.original_word);
-                                        self.cursor = menu.word_start + menu.original_word.len();
+            // After sustained inactivity, verify the terminal is still alive
+            if consecutive_timeouts > 0 && consecutive_timeouts % 50 == 0 {
+                if Self::is_terminal_dead() {
+                    return Ok(None);
+                }
+            }
+
+            match event::poll(Duration::from_millis(100)) {
+                Ok(true) => {
+                    consecutive_timeouts = 0;
+                    match event::read()? {
+                        Event::Key(key) => {
+                            if key.code != KeyCode::Tab && key.code != KeyCode::BackTab {
+                                if key.code != KeyCode::Enter {
+                                    if let Some(menu) = self.completion_menu.take() {
+                                        if key.code == KeyCode::Esc {
+                                            self.buffer.replace_range(menu.word_start..self.cursor, &menu.original_word);
+                                            self.cursor = menu.word_start + menu.original_word.len();
+                                        }
                                     }
                                 }
                             }
-                        }
 
-                        match self.handle_key(key, state, history)? {
-                            KeyAction::Continue => {}
-                            KeyAction::Submit => {
-                                self.suggestion = None;
-                                self.repaint(state)?;
-                                print!("\r\n");
-                                // OSC 133;B — command start marker
-                                if state.interactive {
-                                    crate::osc::command_start();
-                                }
-                                let line = self.buffer.clone();
-                                return Ok(Some(line));
-                            }
-                            KeyAction::Eof => {
-                                if self.buffer.is_empty() {
+                            match self.handle_key(key, state, history)? {
+                                KeyAction::Continue => {}
+                                KeyAction::Submit => {
                                     self.suggestion = None;
                                     self.repaint(state)?;
                                     print!("\r\n");
-                                    return Ok(None);
-                                } else {
-                                    self.delete_char();
+                                    // OSC 133;B — command start marker
+                                    if state.interactive {
+                                        crate::osc::command_start();
+                                    }
+                                    let line = self.buffer.clone();
+                                    return Ok(Some(line));
+                                }
+                                KeyAction::Eof => {
+                                    if self.buffer.is_empty() {
+                                        self.suggestion = None;
+                                        self.repaint(state)?;
+                                        print!("\r\n");
+                                        return Ok(None);
+                                    } else {
+                                        self.delete_char();
+                                    }
+                                }
+                                KeyAction::Interrupt => {
+                                    print!("^C\r\n");
+                                    return Ok(Some(String::new()));
                                 }
                             }
-                            KeyAction::Interrupt => {
-                                print!("^C\r\n");
-                                return Ok(Some(String::new()));
-                            }
-                        }
 
-                        self.update_suggestion(history, state);
-                        self.repaint(state)?;
+                            self.update_suggestion(history, state);
+                            self.repaint(state)?;
+                        }
+                        Event::Paste(text) => {
+                            self.buffer.insert_str(self.cursor, &text);
+                            self.cursor += text.len();
+                            self.update_suggestion(history, state);
+                            self.repaint(state)?;
+                        }
+                        Event::Resize(w, h) => {
+                            self.terminal_width = w;
+                            self.terminal_height = h;
+                            self.repaint(state)?;
+                        }
+                        _ => {}
                     }
-                    Event::Paste(text) => {
-                        self.buffer.insert_str(self.cursor, &text);
-                        self.cursor += text.len();
-                        self.update_suggestion(history, state);
-                        self.repaint(state)?;
+                }
+                Ok(false) => {
+                    consecutive_timeouts = consecutive_timeouts.saturating_add(1);
+                }
+                Err(_) => {
+                    // poll() error typically means the fd is gone
+                    if Self::is_terminal_dead() {
+                        return Ok(None);
                     }
-                    Event::Resize(w, h) => {
-                        self.terminal_width = w;
-                        self.terminal_height = h;
-                        self.repaint(state)?;
-                    }
-                    _ => {}
                 }
             }
         }
@@ -1176,6 +1198,10 @@ impl Editor {
             p -= 1;
         }
         p
+    }
+
+    fn is_terminal_dead() -> bool {
+        unsafe { libc::isatty(libc::STDIN_FILENO) != 1 }
     }
 }
 
