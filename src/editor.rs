@@ -99,6 +99,11 @@ impl Editor {
         print!("{}", prompt_str);
         io::stdout().flush()?;
 
+        // OSC 133;B — prompt end / command input start marker
+        if state.interactive {
+            crate::osc::command_start();
+        }
+
         terminal::enable_raw_mode()?;
         stdout().execute(event::EnableBracketedPaste).ok();
         let result = self.edit_loop(state, history);
@@ -158,10 +163,6 @@ impl Editor {
                                     self.suggestion = None;
                                     self.repaint(state)?;
                                     print!("\r\n");
-                                    // OSC 133;B — command start marker
-                                    if state.interactive {
-                                        crate::osc::command_start();
-                                    }
                                     let line = self.buffer.clone();
                                     return Ok(Some(line));
                                 }
