@@ -12,6 +12,7 @@ use crate::parser;
 use crate::prompt;
 use crate::session;
 use crate::signal;
+use nix::libc;
 use nix::unistd::{getpgrp, getpid, setpgid, tcsetpgrp};
 use std::io::{self, BufRead};
 use std::sync::atomic::Ordering;
@@ -237,7 +238,8 @@ impl Shell {
         }
 
         // Check if stdin is a TTY for interactive mode
-        let stdin_is_tty = atty::is(atty::Stream::Stdin);
+        // Use libc::isatty directly to catch deleted/invalid ptys that atty might miss
+        let stdin_is_tty = unsafe { libc::isatty(libc::STDIN_FILENO) == 1 };
 
         // Update interactive mode based on stdin
         self.state.interactive = stdin_is_tty;

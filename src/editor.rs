@@ -134,11 +134,9 @@ impl Editor {
                 return Ok(Some(String::new()));
             }
 
-            // After sustained inactivity, verify the terminal is still alive
-            if consecutive_timeouts > 0 && consecutive_timeouts % 50 == 0 {
-                if Self::is_terminal_dead() {
-                    return Ok(None);
-                }
+            // Check if terminal is dead more frequently to avoid CPU spin on deleted ptys
+            if Self::is_terminal_dead() {
+                return Ok(None);
             }
 
             match event::poll(Duration::from_millis(100)) {
