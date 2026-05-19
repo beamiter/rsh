@@ -18,6 +18,7 @@ pub mod job;
 pub mod keybindings;
 pub mod osc;
 pub mod parser;
+pub mod probe;
 pub mod prompt;
 pub mod session;
 pub mod shell;

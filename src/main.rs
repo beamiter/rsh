@@ -18,6 +18,7 @@ mod job;
 mod keybindings;
 mod osc;
 mod parser;
+mod probe;
 mod prompt;
 pub mod session;
 mod shell;

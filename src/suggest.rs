@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use crate::history::History;
+use crate::probe;
 
 /// Context passed to the suggestion engine (zero-allocation, borrows from ShellState).
 pub struct SuggestionContext<'a> {
@@ -29,6 +30,90 @@ const COMMAND_CHAINS: &[(&str, &str)] = &[
     ("make", "make install"),
 ];
 
+/// Subcommand abbreviation suggestions: (command, [(abbreviation, full_subcommand), ...])
+/// Suggests full subcommand names from common abbreviations.
+const SUBCOMMAND_SUGGESTIONS: &[(&str, &[(&str, &str)])] = &[
+    ("git", &[
+        ("a", "add"),
+        ("b", "branch"),
+        ("bi", "bisect"),
+        ("bl", "blame"),
+        ("c", "commit"),
+        ("ch", "checkout"),
+        ("che", "cherry-pick"),
+        ("cl", "clone"),
+        ("d", "diff"),
+        ("f", "fetch"),
+        ("l", "log"),
+        ("m", "merge"),
+        ("mv", "mv"),
+        ("p", "push"),
+        ("pl", "pull"),
+        ("r", "reflog"),
+        ("re", "rebase"),
+        ("rem", "remote"),
+        ("res", "reset"),
+        ("rev", "revert"),
+        ("rm", "rm"),
+        ("s", "status"),
+        ("sh", "show"),
+        ("st", "stash"),
+        ("sw", "switch"),
+        ("t", "tag"),
+    ]),
+    ("cargo", &[
+        ("b", "build"),
+        ("c", "check"),
+        ("cl", "clean"),
+        ("d", "doc"),
+        ("f", "fmt"),
+        ("i", "init"),
+        ("n", "new"),
+        ("r", "run"),
+        ("t", "test"),
+        ("u", "update"),
+    ]),
+    ("docker", &[
+        ("b", "build"),
+        ("c", "container"),
+        ("e", "exec"),
+        ("i", "images"),
+        ("l", "logs"),
+        ("p", "ps"),
+        ("pu", "pull"),
+        ("r", "run"),
+        ("rm", "rm"),
+        ("s", "start"),
+        ("st", "stop"),
+        ("v", "volume"),
+    ]),
+    ("kubectl", &[
+        ("a", "apply"),
+        ("c", "create"),
+        ("d", "delete"),
+        ("des", "describe"),
+        ("e", "exec"),
+        ("g", "get"),
+        ("l", "logs"),
+        ("r", "run"),
+    ]),
+    ("npm", &[
+        ("i", "install"),
+        ("r", "run"),
+        ("s", "start"),
+        ("t", "test"),
+        ("u", "update"),
+    ]),
+    ("systemctl", &[
+        ("e", "enable"),
+        ("d", "disable"),
+        ("r", "restart"),
+        ("s", "status"),
+        ("sta", "start"),
+        ("sto", "stop"),
+    ]),
+];
+
 /// Given the current buffer, find a suggestion from history, git context, or z-jump.
 /// Returns the suffix to display as ghost text (the part after the buffer).
 pub fn suggest(buffer: &str, history: &History, ctx: &SuggestionContext) -> Option<String> {
@@ -49,7 +134,12 @@ pub fn suggest(buffer: &str, history: &History, ctx: &SuggestionContext) -> Opti
         }
     }
 
-    // 3. For "cd " commands, suggest from z-jump database
+    // 3. Subcommand abbreviation expansion (git l → git log, cargo b → cargo build)
+    if let Some(s) = suggest_subcommand(buffer) {
+        return Some(s);
+    }
+
+    // 4. For "cd " commands, suggest from z-jump database
     if buffer.starts_with("cd ") {
         let current_arg = &buffer[3..];
         let query = current_arg.trim();
@@ -70,7 +160,50 @@ pub fn suggest(buffer: &str, history: &History, ctx: &SuggestionContext) -> Opti
         }
     }
 
+    // 5. Filesystem probe: context-aware completion based on command + filesystem state
+    if let Some(suggestion) = probe_filesystem_suggestion(buffer) {
+        return Some(suggestion);
+    }
+
     None
+}
+
+/// Probe the filesystem for context-aware completion based on command type.
+/// This is the integration layer between the buffer parsing and the probe module.
+fn probe_filesystem_suggestion(buffer: &str) -> Option<String> {
+    // Parse buffer to extract command and current partial argument
+    let trimmed = buffer.trim_start();
+    let parts: Vec<&str> = trimmed.splitn(2, char::is_whitespace).collect();
+    if parts.len() < 2 {
+        return None; // No argument started yet
+    }
+
+    let cmd = parts[0];
+    let args_part = parts[1];
+
+    // Get the last argument being typed (handle pipes, semicolons, etc.)
+    let last_arg = args_part
+        .rsplit(|c: char| c == ' ' || c == '\t' || c == '|' || c == ';' || c == '&')
+        .next()
+        .unwrap_or("")
+        .trim();
+
+    if last_arg.is_empty() || last_arg.starts_with('-') {
+        return None; // Don't probe for empty args or flags
+    }
+
+    // Get current working directory
+    let cwd = std::env::current_dir().ok()?;
+
+    // Call the probe module to get the best filesystem completion
+    let full_completion = probe::probe_filesystem(cmd, last_arg, &cwd)?;
+
+    // Return only the suffix (the part after what the user has typed)
+    if full_completion.len() > last_arg.len() && full_completion.starts_with(last_arg) {
+        Some(full_completion[last_arg.len()..].to_string())
+    } else {
+        None
+    }
 }
 
 /// Git-aware suggestions: auto-complete `git push/pull` with `origin <branch>`.
@@ -120,6 +253,50 @@ fn suggest_git_command(buffer: &str, ctx: &SuggestionContext) -> Option<String> 
                 if branch.starts_with(partial) && branch.len() > partial.len() {
                     return Some(branch[partial.len()..].to_string());
                 }
+            }
+        }
+    }
+
+    None
+}
+
+/// Suggest full subcommand from common abbreviations (git l → git log, cargo b → cargo build).
+/// Checks if the buffer matches "<command> <abbreviation>" pattern and suggests the full subcommand.
+fn suggest_subcommand(buffer: &str) -> Option<String> {
+    // Parse buffer to extract command and partial subcommand
+    let parts: Vec<&str> = buffer.splitn(2, char::is_whitespace).collect();
+    if parts.len() != 2 {
+        return None; // Need exactly "command subcommand_prefix"
+    }
+
+    let cmd = parts[0];
+    let partial = parts[1];
+
+    // Don't suggest if there's already a space after the subcommand (user is typing arguments)
+    if partial.contains(' ') {
+        return None;
+    }
+
+    // Don't suggest for flags
+    if partial.starts_with('-') {
+        return None;
+    }
+
+    // Find the command in our subcommand suggestions
+    for (command, subcommands) in SUBCOMMAND_SUGGESTIONS {
+        if *command != cmd {
+            continue;
+        }
+
+        // Look for exact abbreviation match
+        for (abbrev, full) in *subcommands {
+            if *abbrev == partial {
+                // Exact match: suggest the rest of the full subcommand
+                return Some(full[abbrev.len()..].to_string());
+            }
+            // Prefix match: if full subcommand starts with partial, suggest the rest
+            if full.starts_with(partial) && full.len() > partial.len() {
+                return Some(full[partial.len()..].to_string());
             }
         }
     }
@@ -202,5 +379,80 @@ fn command_base(cmd: &str) -> &str {
             }
         }
         _ => first,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_suggest_subcommand_git_exact_match() {
+        // Exact abbreviation match: "git l" → "og" (completing to "log")
+        assert_eq!(suggest_subcommand("git l"), Some("og".to_string()));
+        assert_eq!(suggest_subcommand("git r"), Some("eflog".to_string()));
+        assert_eq!(suggest_subcommand("git c"), Some("ommit".to_string()));
+        assert_eq!(suggest_subcommand("git s"), Some("tatus".to_string()));
+        assert_eq!(suggest_subcommand("git p"), Some("ush".to_string()));
+    }
+
+    #[test]
+    fn test_suggest_subcommand_git_prefix_match() {
+        // Prefix match: "git ch" → "eckout" (completing to "checkout")
+        assert_eq!(suggest_subcommand("git ch"), Some("eckout".to_string()));
+        assert_eq!(suggest_subcommand("git re"), Some("flog".to_string())); // reflog
+        assert_eq!(suggest_subcommand("git st"), Some("atus".to_string())); // status or stash
+    }
+
+    #[test]
+    fn test_suggest_subcommand_cargo() {
+        assert_eq!(suggest_subcommand("cargo b"), Some("uild".to_string()));
+        assert_eq!(suggest_subcommand("cargo r"), Some("un".to_string()));
+        assert_eq!(suggest_subcommand("cargo t"), Some("est".to_string()));
+        assert_eq!(suggest_subcommand("cargo c"), Some("heck".to_string()));
+    }
+
+    #[test]
+    fn test_suggest_subcommand_docker() {
+        assert_eq!(suggest_subcommand("docker b"), Some("uild".to_string()));
+        assert_eq!(suggest_subcommand("docker r"), Some("un".to_string()));
+        assert_eq!(suggest_subcommand("docker e"), Some("xec".to_string()));
+        assert_eq!(suggest_subcommand("docker p"), Some("s".to_string()));
+    }
+
+    #[test]
+    fn test_suggest_subcommand_npm() {
+        assert_eq!(suggest_subcommand("npm i"), Some("nstall".to_string()));
+        assert_eq!(suggest_subcommand("npm r"), Some("un".to_string()));
+        assert_eq!(suggest_subcommand("npm t"), Some("est".to_string()));
+    }
+
+    #[test]
+    fn test_suggest_subcommand_no_match() {
+        // Unknown command
+        assert_eq!(suggest_subcommand("unknown l"), None);
+
+        // Unknown abbreviation
+        assert_eq!(suggest_subcommand("git xyz"), None);
+
+        // No space (just command, no subcommand yet)
+        assert_eq!(suggest_subcommand("git"), None);
+
+        // Already has arguments (space after subcommand)
+        assert_eq!(suggest_subcommand("git log --oneline"), None);
+    }
+
+    #[test]
+    fn test_suggest_subcommand_flags() {
+        // Should not suggest for flags
+        assert_eq!(suggest_subcommand("git --version"), None);
+        assert_eq!(suggest_subcommand("cargo -V"), None);
+    }
+
+    #[test]
+    fn test_suggest_subcommand_full_subcommand() {
+        // If user has already typed the full subcommand, no suggestion
+        assert_eq!(suggest_subcommand("git log"), None);
+        assert_eq!(suggest_subcommand("cargo build"), None);
     }
 }
