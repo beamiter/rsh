@@ -5,12 +5,45 @@ use crate::environment::ShellState;
 use std::fs;
 use std::collections::HashMap;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompletionKind {
+    Command,
+    Builtin,
+    Alias,
+    Function,
+    Directory,
+    File,
+    Variable,
+    Subcommand,
+    Flag,
+    Other,
+}
+
 #[derive(Debug, Clone)]
 pub struct Completion {
     pub text: String,
     pub display: String,
     pub description: Option<String>,
+    pub kind: CompletionKind,
     pub is_dir: bool,
+}
+
+impl Completion {
+    fn new(text: String, kind: CompletionKind) -> Self {
+        let is_dir = kind == CompletionKind::Directory;
+        Completion {
+            display: text.clone(),
+            text,
+            description: None,
+            kind,
+            is_dir,
+        }
+    }
+
+    fn with_desc(mut self, desc: &str) -> Self {
+        self.description = Some(desc.to_string());
+        self
+    }
 }
 
 /// Completion cache entry with frequency tracking
@@ -113,12 +146,37 @@ pub fn complete(buffer: &str, cursor: usize, state: &mut ShellState) -> (usize, 
         }
     }
 
+    // Detect if we're after a pipe for smart recommendations
+    let after_pipe = {
+        let before = buf[..word_start].trim_end();
+        before.ends_with('|')
+    };
+
     let completions = if word.starts_with('$') {
         complete_variable(&word[1..], state)
+    } else if is_cmd_pos && after_pipe {
+        // Smart pipe completion: recommend based on preceding command
+        let mut pipe_completions = complete_pipe_targets(buf, &word);
+        if pipe_completions.is_empty() {
+            complete_command(&word, state)
+        } else {
+            // Also include regular command completions after pipe suggestions
+            let mut regular = complete_command(&word, state);
+            pipe_completions.append(&mut regular);
+            pipe_completions
+        }
     } else if is_cmd_pos {
-        complete_command(&word, state)
+        let mut cmd_completions = complete_command(&word, state);
+        // Append project-aware completions for short prefixes
+        if word.len() <= 3 {
+            let project = complete_project_commands(&word);
+            cmd_completions.extend(project);
+        }
+        cmd_completions
     } else if let Some(subs) = subcommand_completions(&cmd, &word, buf, word_start) {
         subs
+    } else if let Some(spec_completions) = complete_from_spec(&cmd, &word, buf, state) {
+        spec_completions
     } else if cmd == "cd" || cmd == "mkdir" || cmd == "rmdir" || cmd == "z" {
         complete_path(&word, state).into_iter().filter(|c| c.is_dir).collect()
     } else {
@@ -144,6 +202,7 @@ fn apply_completion_spec(spec: &crate::environment::CompletionSpec, prefix: &str
                     text: w.clone(),
                     display: w.clone(),
                     description: None,
+                    kind: CompletionKind::Other,
                     is_dir: false,
                 });
             }
@@ -176,6 +235,7 @@ fn apply_completion_spec(spec: &crate::environment::CompletionSpec, prefix: &str
                             text: reply.clone(),
                             display: reply.clone(),
                             description: None,
+                            kind: CompletionKind::Other,
                             is_dir: false,
                         });
                     }
@@ -229,64 +289,207 @@ fn subcommand_completions(cmd: &str, prefix: &str, buf: &str, word_start: usize)
     let words: Vec<&str> = before.split_whitespace().collect();
     let word_count = words.len();
 
-    // First-level subcommands
+    // First-level subcommands with descriptions
     if word_count == 1 {
-        let subs: &[&str] = match cmd {
+        let subs: &[(&str, &str)] = match cmd {
             "git" => &[
-                "add", "bisect", "blame", "branch", "checkout", "cherry-pick",
-                "clone", "commit", "config", "diff", "fetch", "grep", "init",
-                "log", "merge", "mv", "pull", "push", "rebase", "remote",
-                "reset", "restore", "revert", "rm", "show", "stash", "status",
-                "switch", "tag", "worktree",
+                ("add", "Stage changes"),
+                ("bisect", "Binary search for bugs"),
+                ("blame", "Show line annotations"),
+                ("branch", "List/create branches"),
+                ("checkout", "Switch branches/restore files"),
+                ("cherry-pick", "Apply commit changes"),
+                ("clone", "Clone a repository"),
+                ("commit", "Record changes"),
+                ("config", "Get/set configuration"),
+                ("diff", "Show changes"),
+                ("fetch", "Download objects/refs"),
+                ("grep", "Search tracked files"),
+                ("init", "Create empty repository"),
+                ("log", "Show commit log"),
+                ("merge", "Join branches"),
+                ("mv", "Move/rename files"),
+                ("pull", "Fetch and merge"),
+                ("push", "Update remote refs"),
+                ("rebase", "Reapply commits"),
+                ("remote", "Manage remotes"),
+                ("reset", "Reset HEAD"),
+                ("restore", "Restore working tree"),
+                ("revert", "Revert commits"),
+                ("rm", "Remove files"),
+                ("show", "Show objects"),
+                ("stash", "Stash changes"),
+                ("status", "Show working tree status"),
+                ("switch", "Switch branches"),
+                ("tag", "Manage tags"),
+                ("worktree", "Manage worktrees"),
             ],
             "cargo" => &[
-                "add", "bench", "build", "check", "clean", "clippy", "doc",
-                "fetch", "fix", "fmt", "init", "install", "new", "publish",
-                "remove", "run", "search", "test", "tree", "uninstall", "update",
+                ("add", "Add dependency"),
+                ("bench", "Run benchmarks"),
+                ("build", "Compile project"),
+                ("check", "Check for errors"),
+                ("clean", "Remove artifacts"),
+                ("clippy", "Run linter"),
+                ("doc", "Build documentation"),
+                ("fetch", "Fetch dependencies"),
+                ("fix", "Auto-fix warnings"),
+                ("fmt", "Format code"),
+                ("init", "Init in existing dir"),
+                ("install", "Install binary"),
+                ("new", "Create new project"),
+                ("publish", "Publish to crates.io"),
+                ("remove", "Remove dependency"),
+                ("run", "Run binary"),
+                ("search", "Search crates.io"),
+                ("test", "Run tests"),
+                ("tree", "Show dependency tree"),
+                ("uninstall", "Remove binary"),
+                ("update", "Update dependencies"),
             ],
             "docker" => &[
-                "build", "compose", "container", "cp", "create", "exec",
-                "image", "images", "kill", "logs", "network", "ps", "pull",
-                "push", "restart", "rm", "rmi", "run", "start", "stop",
-                "tag", "volume",
+                ("build", "Build image"),
+                ("compose", "Multi-container apps"),
+                ("container", "Manage containers"),
+                ("cp", "Copy files"),
+                ("create", "Create container"),
+                ("exec", "Run in container"),
+                ("image", "Manage images"),
+                ("images", "List images"),
+                ("kill", "Kill container"),
+                ("logs", "View logs"),
+                ("network", "Manage networks"),
+                ("ps", "List containers"),
+                ("pull", "Pull image"),
+                ("push", "Push image"),
+                ("restart", "Restart container"),
+                ("rm", "Remove container"),
+                ("rmi", "Remove image"),
+                ("run", "Create and run"),
+                ("start", "Start container"),
+                ("stop", "Stop container"),
+                ("tag", "Tag image"),
+                ("volume", "Manage volumes"),
             ],
             "systemctl" => &[
-                "daemon-reload", "disable", "edit", "enable", "is-active",
-                "is-enabled", "list-units", "reload", "restart", "start",
-                "status", "stop",
+                ("daemon-reload", "Reload unit files"),
+                ("disable", "Disable unit"),
+                ("edit", "Edit unit file"),
+                ("enable", "Enable unit"),
+                ("is-active", "Check if active"),
+                ("is-enabled", "Check if enabled"),
+                ("list-units", "List loaded units"),
+                ("reload", "Reload unit"),
+                ("restart", "Restart unit"),
+                ("start", "Start unit"),
+                ("status", "Show status"),
+                ("stop", "Stop unit"),
             ],
             "npm" => &[
-                "audit", "build", "cache", "ci", "clean", "config", "create",
-                "exec", "init", "install", "link", "list", "outdated", "pack",
-                "publish", "rebuild", "remove", "run", "search", "start",
-                "test", "uninstall", "update", "version",
+                ("audit", "Security audit"),
+                ("build", "Build package"),
+                ("cache", "Manage cache"),
+                ("ci", "Clean install"),
+                ("clean", "Clean project"),
+                ("config", "Manage config"),
+                ("create", "Create package"),
+                ("exec", "Run package binary"),
+                ("init", "Init package.json"),
+                ("install", "Install packages"),
+                ("link", "Symlink package"),
+                ("list", "List installed"),
+                ("outdated", "Check outdated"),
+                ("pack", "Create tarball"),
+                ("publish", "Publish package"),
+                ("rebuild", "Rebuild native"),
+                ("remove", "Remove package"),
+                ("run", "Run script"),
+                ("search", "Search registry"),
+                ("start", "Start script"),
+                ("test", "Run tests"),
+                ("uninstall", "Uninstall package"),
+                ("update", "Update packages"),
+                ("version", "Bump version"),
             ],
-            "hook" => &["add", "remove", "list"],
-            "bookmark" => &["add", "go", "ls", "rm"],
+            "hook" => &[
+                ("add", "Add hook"),
+                ("remove", "Remove hook"),
+                ("list", "List hooks"),
+            ],
+            "bookmark" => &[
+                ("add", "Add bookmark"),
+                ("go", "Go to bookmark"),
+                ("ls", "List bookmarks"),
+                ("rm", "Remove bookmark"),
+            ],
             "kubectl" => &[
-                "apply", "attach", "auth", "config", "create", "delete",
-                "describe", "diff", "edit", "exec", "expose", "get", "label",
-                "logs", "patch", "port-forward", "proxy", "rollout", "run",
-                "scale", "set", "top", "version",
+                ("apply", "Apply configuration"),
+                ("attach", "Attach to container"),
+                ("auth", "Check authorization"),
+                ("config", "Modify kubeconfig"),
+                ("create", "Create resource"),
+                ("delete", "Delete resources"),
+                ("describe", "Show resource details"),
+                ("diff", "Diff configurations"),
+                ("edit", "Edit resource"),
+                ("exec", "Execute in container"),
+                ("expose", "Expose as service"),
+                ("get", "Display resources"),
+                ("label", "Update labels"),
+                ("logs", "Print container logs"),
+                ("patch", "Patch resource"),
+                ("port-forward", "Forward ports"),
+                ("proxy", "Run API proxy"),
+                ("rollout", "Manage rollouts"),
+                ("run", "Run pod"),
+                ("scale", "Scale replicas"),
+                ("set", "Set resource fields"),
+                ("top", "Resource usage"),
+                ("version", "Print version"),
             ],
             "pip" | "pip3" => &[
-                "install", "uninstall", "download", "freeze", "list", "show",
-                "search", "wheel", "hash", "check", "config", "cache",
+                ("install", "Install packages"),
+                ("uninstall", "Uninstall packages"),
+                ("download", "Download packages"),
+                ("freeze", "Output installed"),
+                ("list", "List installed"),
+                ("show", "Show package info"),
+                ("search", "Search PyPI"),
+                ("wheel", "Build wheels"),
+                ("hash", "Compute hashes"),
+                ("check", "Verify packages"),
+                ("config", "Manage config"),
+                ("cache", "Manage cache"),
             ],
             "go" => &[
-                "build", "clean", "doc", "env", "fix", "fmt", "generate",
-                "get", "install", "list", "mod", "run", "test", "tool",
-                "version", "vet", "work",
+                ("build", "Compile packages"),
+                ("clean", "Remove objects"),
+                ("doc", "Show documentation"),
+                ("env", "Print environment"),
+                ("fix", "Update packages"),
+                ("fmt", "Format source"),
+                ("generate", "Run go generate"),
+                ("get", "Download modules"),
+                ("install", "Compile and install"),
+                ("list", "List packages"),
+                ("mod", "Module maintenance"),
+                ("run", "Compile and run"),
+                ("test", "Run tests"),
+                ("tool", "Run go tool"),
+                ("version", "Print version"),
+                ("vet", "Report issues"),
+                ("work", "Workspace mode"),
             ],
             _ => return None,
         };
 
         let completions = subs.iter()
-            .filter(|s| s.starts_with(prefix))
-            .map(|s| Completion {
-                text: s.to_string(),
-                display: s.to_string(),
-                description: None,
+            .filter(|(name, _)| name.starts_with(prefix))
+            .map(|(name, desc)| Completion {
+                text: name.to_string(),
+                display: name.to_string(),
+                description: Some(desc.to_string()),
+                kind: CompletionKind::Subcommand,
                 is_dir: false,
             })
             .collect::<Vec<_>>();
@@ -294,11 +497,78 @@ fn subcommand_completions(cmd: &str, prefix: &str, buf: &str, word_start: usize)
         return Some(completions);
     }
 
-    // Second-level: git branch/tag completion for specific subcommands
+    // Second-level: git context-aware completions
     if cmd == "git" && word_count >= 2 {
         let subcmd = words.get(1).copied().unwrap_or("");
         match subcmd {
             "checkout" | "switch" | "merge" | "rebase" | "branch" | "diff" | "log" => {
+                return Some(complete_git_refs(prefix));
+            }
+            "add" => {
+                return Some(complete_git_dirty_files(prefix, "add"));
+            }
+            "restore" => {
+                return Some(complete_git_dirty_files(prefix, "restore"));
+            }
+            "reset" => {
+                let mut results = complete_git_refs(prefix);
+                results.extend(complete_git_dirty_files(prefix, "reset"));
+                return Some(results);
+            }
+            "stash" if word_count == 2 => {
+                // stash subcommands
+                let subs = &[
+                    ("push", "Stash changes"), ("pop", "Apply and drop"),
+                    ("apply", "Apply stash"), ("drop", "Drop stash"),
+                    ("list", "List stashes"), ("show", "Show stash"),
+                    ("clear", "Clear all stashes"),
+                ];
+                let completions = subs.iter()
+                    .filter(|(name, _)| name.starts_with(prefix))
+                    .map(|(name, desc)| Completion {
+                        text: name.to_string(),
+                        display: name.to_string(),
+                        description: Some(desc.to_string()),
+                        kind: CompletionKind::Subcommand,
+                        is_dir: false,
+                    })
+                    .collect();
+                return Some(completions);
+            }
+            "stash" if word_count >= 3 => {
+                let stash_sub = words.get(2).copied().unwrap_or("");
+                if stash_sub == "pop" || stash_sub == "apply" || stash_sub == "drop" || stash_sub == "show" {
+                    return Some(complete_git_stashes(prefix));
+                }
+            }
+            "cherry-pick" | "revert" => {
+                return Some(complete_git_recent_commits(prefix));
+            }
+            "remote" if word_count == 2 => {
+                let subs = &[
+                    ("add", "Add remote"), ("remove", "Remove remote"),
+                    ("rename", "Rename remote"), ("show", "Show remote"),
+                    ("prune", "Prune stale refs"), ("update", "Fetch updates"),
+                ];
+                let completions = subs.iter()
+                    .filter(|(name, _)| name.starts_with(prefix))
+                    .map(|(name, desc)| Completion {
+                        text: name.to_string(),
+                        display: name.to_string(),
+                        description: Some(desc.to_string()),
+                        kind: CompletionKind::Subcommand,
+                        is_dir: false,
+                    })
+                    .collect();
+                return Some(completions);
+            }
+            "remote" if word_count >= 3 => {
+                return Some(complete_git_remotes(prefix));
+            }
+            "push" | "pull" | "fetch" if word_count == 2 => {
+                return Some(complete_git_remotes(prefix));
+            }
+            "push" | "pull" | "fetch" if word_count >= 3 => {
                 return Some(complete_git_refs(prefix));
             }
             _ => {}
@@ -318,6 +588,7 @@ fn subcommand_completions(cmd: &str, prefix: &str, buf: &str, word_start: usize)
                     text: s.to_string(),
                     display: s.to_string(),
                     description: None,
+                    kind: CompletionKind::Subcommand,
                     is_dir: false,
                 })
                 .collect::<Vec<_>>();
@@ -336,6 +607,7 @@ fn subcommand_completions(cmd: &str, prefix: &str, buf: &str, word_start: usize)
                         text: n.clone(),
                         display: n,
                         description: Some("bookmark".to_string()),
+                        kind: CompletionKind::Other,
                         is_dir: false,
                     })
                     .collect::<Vec<_>>();
@@ -424,6 +696,7 @@ fn subcommand_completions(cmd: &str, prefix: &str, buf: &str, word_start: usize)
                 text: opt.to_string(),
                 display: opt.to_string(),
                 description: Some(desc.to_string()),
+                kind: CompletionKind::Flag,
                 is_dir: false,
             })
             .collect::<Vec<_>>();
@@ -453,6 +726,7 @@ fn complete_git_refs(prefix: &str) -> Vec<Completion> {
                         text: branch.to_string(),
                         display: branch.to_string(),
                         description: Some("branch".to_string()),
+                        kind: CompletionKind::Other,
                         is_dir: false,
                     });
                 }
@@ -474,6 +748,7 @@ fn complete_git_refs(prefix: &str) -> Vec<Completion> {
                         text: tag.to_string(),
                         display: tag.to_string(),
                         description: Some("tag".to_string()),
+                        kind: CompletionKind::Other,
                         is_dir: false,
                     });
                 }
@@ -499,6 +774,7 @@ fn complete_git_refs(prefix: &str) -> Vec<Completion> {
                             text: short.to_string(),
                             display: short.to_string(),
                             description: Some("remote".to_string()),
+                            kind: CompletionKind::Other,
                             is_dir: false,
                         });
                     }
@@ -508,6 +784,182 @@ fn complete_git_refs(prefix: &str) -> Vec<Completion> {
     }
 
     completions
+}
+
+fn complete_git_dirty_files(prefix: &str, context: &str) -> Vec<Completion> {
+    let mut completions = Vec::new();
+    if let Ok(output) = std::process::Command::new("git")
+        .args(["status", "--porcelain=v1"])
+        .output()
+    {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                if line.len() < 4 { continue; }
+                let status = &line[..2];
+                let file = line[3..].trim_start();
+                // Strip quotes from filenames with special chars
+                let file = file.trim_matches('"');
+
+                if !file.starts_with(prefix) { continue; }
+
+                let (desc, include) = match context {
+                    "add" => match status.trim() {
+                        "M" | "MM" => ("modified", true),
+                        "A" | "AM" => ("new file", true),
+                        "D" => ("deleted", true),
+                        "R" => ("renamed", true),
+                        "??" => ("untracked", true),
+                        _ => ("", true),
+                    },
+                    "restore" => match status.chars().next().unwrap_or(' ') {
+                        'M' | 'A' | 'D' => ("staged", true),
+                        _ => match status.chars().nth(1).unwrap_or(' ') {
+                            'M' | 'D' => ("modified", true),
+                            _ => ("", false),
+                        },
+                    },
+                    "reset" => match status.chars().next().unwrap_or(' ') {
+                        'M' | 'A' | 'D' | 'R' => ("staged", true),
+                        _ => ("", false),
+                    },
+                    _ => ("", true),
+                };
+
+                if include {
+                    completions.push(Completion {
+                        text: file.to_string(),
+                        display: file.to_string(),
+                        description: Some(desc.to_string()),
+                        kind: CompletionKind::File,
+                        is_dir: false,
+                    });
+                }
+            }
+        }
+    }
+    completions
+}
+
+fn complete_git_stashes(prefix: &str) -> Vec<Completion> {
+    let mut completions = Vec::new();
+    if let Ok(output) = std::process::Command::new("git")
+        .args(["stash", "list", "--format=%gd|%gs"])
+        .output()
+    {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                let parts: Vec<&str> = line.splitn(2, '|').collect();
+                let (ref_name, msg) = if parts.len() == 2 {
+                    (parts[0], parts[1])
+                } else {
+                    (line, "")
+                };
+                if ref_name.starts_with(prefix) || prefix.is_empty() {
+                    completions.push(Completion {
+                        text: ref_name.to_string(),
+                        display: ref_name.to_string(),
+                        description: Some(msg.to_string()),
+                        kind: CompletionKind::Other,
+                        is_dir: false,
+                    });
+                }
+            }
+        }
+    }
+    completions
+}
+
+fn complete_git_recent_commits(prefix: &str) -> Vec<Completion> {
+    let mut completions = Vec::new();
+    if let Ok(output) = std::process::Command::new("git")
+        .args(["log", "--oneline", "-20", "--format=%h|%s"])
+        .output()
+    {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                let parts: Vec<&str> = line.splitn(2, '|').collect();
+                let (hash, msg) = if parts.len() == 2 {
+                    (parts[0], parts[1])
+                } else {
+                    (line, "")
+                };
+                if hash.starts_with(prefix) || prefix.is_empty() {
+                    let desc = if msg.len() > 40 {
+                        format!("{}…", &msg[..39])
+                    } else {
+                        msg.to_string()
+                    };
+                    completions.push(Completion {
+                        text: hash.to_string(),
+                        display: hash.to_string(),
+                        description: Some(desc),
+                        kind: CompletionKind::Other,
+                        is_dir: false,
+                    });
+                }
+            }
+        }
+    }
+    completions
+}
+
+fn complete_git_remotes(prefix: &str) -> Vec<Completion> {
+    let mut completions = Vec::new();
+    if let Ok(output) = std::process::Command::new("git")
+        .args(["remote"])
+        .output()
+    {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for remote in stdout.lines() {
+                let remote = remote.trim();
+                if !remote.is_empty() && remote.starts_with(prefix) {
+                    completions.push(Completion {
+                        text: remote.to_string(),
+                        display: remote.to_string(),
+                        description: Some("remote".to_string()),
+                        kind: CompletionKind::Other,
+                        is_dir: false,
+                    });
+                }
+            }
+        }
+    }
+    completions
+}
+
+fn complete_from_spec(cmd: &str, prefix: &str, buf: &str, state: &ShellState) -> Option<Vec<Completion>> {
+    use crate::completion_spec::SpecCompletionKind;
+
+    let words: Vec<&str> = buf.split_whitespace().collect();
+    let ctx = state.spec_registry.resolve_context(cmd, &words)?;
+
+    let results = ctx.complete_prefix(prefix);
+    if results.is_empty() {
+        return None;
+    }
+
+    let completions = results.into_iter()
+        .map(|(text, desc, kind)| {
+            let ck = match kind {
+                SpecCompletionKind::Subcommand => CompletionKind::Subcommand,
+                SpecCompletionKind::Option => CompletionKind::Flag,
+                SpecCompletionKind::Argument => CompletionKind::Other,
+            };
+            Completion {
+                display: text.clone(),
+                text,
+                description: desc,
+                kind: ck,
+                is_dir: false,
+            }
+        })
+        .collect();
+
+    Some(completions)
 }
 
 fn extract_word_at(buf: &str) -> (String, usize) {
@@ -548,6 +1000,7 @@ fn complete_command(prefix: &str, state: &mut ShellState) -> Vec<Completion> {
             text: cmd.to_string(),
             display: cmd.to_string(),
             description: Some("builtin".to_string()),
+            kind: CompletionKind::Builtin,
             is_dir: false,
         });
     }
@@ -558,6 +1011,7 @@ fn complete_command(prefix: &str, state: &mut ShellState) -> Vec<Completion> {
             text: name.clone(),
             display: name.clone(),
             description: Some("alias".to_string()),
+            kind: CompletionKind::Alias,
             is_dir: false,
         });
     }
@@ -568,6 +1022,7 @@ fn complete_command(prefix: &str, state: &mut ShellState) -> Vec<Completion> {
             text: name.clone(),
             display: name.clone(),
             description: Some("function".to_string()),
+            kind: CompletionKind::Function,
             is_dir: false,
         });
     }
@@ -578,6 +1033,7 @@ fn complete_command(prefix: &str, state: &mut ShellState) -> Vec<Completion> {
             text: cmd.clone(),
             display: cmd.clone(),
             description: None,
+            kind: CompletionKind::Command,
             is_dir: false,
         });
     }
@@ -595,6 +1051,31 @@ fn complete_command(prefix: &str, state: &mut ShellState) -> Vec<Completion> {
 
     // Limit to top 50 completions to avoid overwhelming the user
     filtered.into_iter().take(50).collect()
+}
+
+fn path_metadata_desc(entry: &fs::DirEntry) -> Option<String> {
+    let ft = entry.file_type().ok()?;
+    if ft.is_symlink() {
+        let target = fs::read_link(entry.path()).ok()?;
+        return Some(format!("→ {}", target.display()));
+    }
+    if ft.is_dir() {
+        let count = fs::read_dir(entry.path()).ok()?.count();
+        return Some(format!("{} items", count));
+    }
+    if ft.is_file() {
+        let meta = entry.metadata().ok()?;
+        let size = meta.len();
+        return Some(format_file_size(size));
+    }
+    None
+}
+
+fn format_file_size(bytes: u64) -> String {
+    if bytes < 1024 { return format!("{}B", bytes); }
+    if bytes < 1024 * 1024 { return format!("{:.1}K", bytes as f64 / 1024.0); }
+    if bytes < 1024 * 1024 * 1024 { return format!("{:.1}M", bytes as f64 / (1024.0 * 1024.0)); }
+    format!("{:.1}G", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
 }
 
 fn complete_path(prefix: &str, state: &ShellState) -> Vec<Completion> {
@@ -651,10 +1132,13 @@ fn complete_path(prefix: &str, state: &ShellState) -> Vec<Completion> {
                 if is_dir { format!("{}/", path) } else { path }
             };
 
+            let description = path_metadata_desc(&entry);
+
             completions.push(Completion {
                 text: full,
-                display: if is_dir { format!("{}/", name) } else { name },
-                description: None,
+                display: if is_dir { format!("{}/", name) } else { name.clone() },
+                description,
+                kind: if is_dir { CompletionKind::Directory } else { CompletionKind::File },
                 is_dir,
             });
         }
@@ -686,6 +1170,7 @@ fn complete_variable(prefix: &str, state: &ShellState) -> Vec<Completion> {
                 text: format!("${}", var_name),
                 display: var_name.to_string(),
                 description: Some(description.to_string()),
+                kind: CompletionKind::Variable,
                 is_dir: false,
             });
         }
@@ -697,7 +1182,6 @@ fn complete_variable(prefix: &str, state: &ShellState) -> Vec<Completion> {
     for name in env_vars {
         if name.starts_with(prefix) || prefix.is_empty() {
             let value = state.env_vars.get(name).cloned().unwrap_or_default();
-            // Show first 50 chars of value as description
             let desc = if value.len() > 50 {
                 format!("{}...", &value[..50])
             } else {
@@ -707,6 +1191,7 @@ fn complete_variable(prefix: &str, state: &ShellState) -> Vec<Completion> {
                 text: format!("${}", name),
                 display: name.clone(),
                 description: Some(desc),
+                kind: CompletionKind::Variable,
                 is_dir: false,
             });
         }
@@ -722,6 +1207,7 @@ fn complete_variable(prefix: &str, state: &ShellState) -> Vec<Completion> {
                     text: format!("${}", name),
                     display: name.clone(),
                     description: Some("local".to_string()),
+                    kind: CompletionKind::Variable,
                     is_dir: false,
                 });
             }
@@ -738,6 +1224,7 @@ fn complete_variable(prefix: &str, state: &ShellState) -> Vec<Completion> {
                 text: format!("${{{}[@]}}", name),
                 display: format!("{} [{}]", name, len),
                 description: Some(format!("array ({} items)", len)),
+                kind: CompletionKind::Variable,
                 is_dir: false,
             });
         }
@@ -753,6 +1240,7 @@ fn complete_variable(prefix: &str, state: &ShellState) -> Vec<Completion> {
                 text: format!("${{{}[@]}}", name),
                 display: format!("{} [{}]", name, len),
                 description: Some(format!("assoc array ({} items)", len)),
+                kind: CompletionKind::Variable,
                 is_dir: false,
             });
         }
@@ -894,6 +1382,7 @@ pub fn complete_from_history(prefix: &str) -> Vec<Completion> {
                         text: cmd.to_string(),
                         display: cmd.to_string(),
                         description: Some("history".to_string()),
+                        kind: CompletionKind::Command,
                         is_dir: false,
                     });
                 }
@@ -907,4 +1396,231 @@ pub fn complete_from_history(prefix: &str) -> Vec<Completion> {
         .into_iter()
         .take(20)
         .collect()
+}
+
+/// Smart pipe completion: recommend pipe targets based on preceding command
+pub fn complete_pipe_targets(buf: &str, prefix: &str) -> Vec<Completion> {
+    let before_pipe = buf.rsplitn(2, '|').nth(1).unwrap_or("").trim();
+    let prev_cmd = before_pipe.split_whitespace().next().unwrap_or("");
+    let prev_cmd_base = prev_cmd.rsplit('/').next().unwrap_or(prev_cmd);
+
+    let suggestions: &[(&str, &str)] = match prev_cmd_base {
+        "cat" | "less" | "head" | "tail" => &[
+            ("grep", "Filter lines by pattern"),
+            ("wc", "Count lines/words/bytes"),
+            ("sort", "Sort lines"),
+            ("uniq", "Remove duplicates"),
+            ("awk", "Text processing"),
+            ("sed", "Stream editing"),
+            ("cut", "Extract columns"),
+            ("tr", "Translate characters"),
+        ],
+        "curl" | "wget" => &[
+            ("jq", "JSON processor"),
+            ("grep", "Filter output"),
+            ("python3 -m json.tool", "Pretty-print JSON"),
+            ("tee", "Write and pass through"),
+        ],
+        "find" => &[
+            ("xargs", "Execute on results"),
+            ("grep", "Filter results"),
+            ("sort", "Sort results"),
+            ("wc -l", "Count results"),
+            ("head", "First N results"),
+        ],
+        "ps" => &[
+            ("grep", "Filter processes"),
+            ("awk", "Extract columns"),
+            ("sort", "Sort output"),
+            ("head", "Top entries"),
+        ],
+        "ls" | "dir" => &[
+            ("grep", "Filter files"),
+            ("sort", "Sort output"),
+            ("wc -l", "Count entries"),
+            ("head", "First entries"),
+        ],
+        "docker" => &[
+            ("grep", "Filter output"),
+            ("awk", "Extract fields"),
+            ("jq", "JSON processing"),
+            ("xargs", "Execute on results"),
+        ],
+        "echo" | "printf" => &[
+            ("tr", "Translate characters"),
+            ("sed", "Stream editing"),
+            ("base64", "Encode/decode"),
+            ("xclip", "Copy to clipboard"),
+        ],
+        "git" => &[
+            ("grep", "Filter output"),
+            ("head", "First N lines"),
+            ("wc -l", "Count lines"),
+            ("sort", "Sort output"),
+        ],
+        "df" | "du" => &[
+            ("sort -h", "Sort by size"),
+            ("grep", "Filter output"),
+            ("tail", "Last entries"),
+            ("awk", "Extract columns"),
+        ],
+        _ => &[
+            ("grep", "Filter by pattern"),
+            ("sort", "Sort output"),
+            ("head", "First N lines"),
+            ("tail", "Last N lines"),
+            ("wc", "Count lines/words"),
+            ("awk", "Text processing"),
+            ("xargs", "Execute on each line"),
+            ("tee", "Write and pass through"),
+        ],
+    };
+
+    let mut completions = Vec::new();
+    for &(cmd, desc) in suggestions {
+        if prefix.is_empty() || cmd.starts_with(prefix) {
+            completions.push(Completion {
+                text: cmd.to_string(),
+                display: cmd.to_string(),
+                description: Some(desc.to_string()),
+                kind: CompletionKind::Command,
+                is_dir: false,
+            });
+        }
+    }
+    completions
+}
+
+/// Detect project type and provide context-aware completions
+pub fn complete_project_commands(prefix: &str) -> Vec<Completion> {
+    let mut completions = Vec::new();
+    let cwd = match std::env::current_dir() {
+        Ok(p) => p,
+        Err(_) => return completions,
+    };
+
+    // Cargo.toml → Rust project
+    if cwd.join("Cargo.toml").exists() {
+        let rust_cmds: &[(&str, &str)] = &[
+            ("cargo build", "Build the project"),
+            ("cargo test", "Run tests"),
+            ("cargo run", "Run the project"),
+            ("cargo check", "Check for errors"),
+            ("cargo clippy", "Run linter"),
+            ("cargo fmt", "Format code"),
+            ("cargo doc", "Build documentation"),
+            ("cargo bench", "Run benchmarks"),
+        ];
+        for &(cmd, desc) in rust_cmds {
+            if prefix.is_empty() || cmd.starts_with(prefix) {
+                completions.push(Completion {
+                    text: cmd.to_string(),
+                    display: cmd.to_string(),
+                    description: Some(desc.to_string()),
+                    kind: CompletionKind::Command,
+                    is_dir: false,
+                });
+            }
+        }
+    }
+
+    // package.json → Node project
+    if cwd.join("package.json").exists() {
+        if let Ok(content) = fs::read_to_string(cwd.join("package.json")) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(scripts) = json["scripts"].as_object() {
+                    for (name, val) in scripts {
+                        let cmd = format!("npm run {}", name);
+                        if prefix.is_empty() || cmd.starts_with(prefix) {
+                            let desc = val.as_str().unwrap_or("").to_string();
+                            completions.push(Completion {
+                                text: cmd,
+                                display: format!("npm run {}", name),
+                                description: Some(desc),
+                                kind: CompletionKind::Command,
+                                is_dir: false,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Makefile → Make targets
+    let makefile = if cwd.join("Makefile").exists() {
+        Some(cwd.join("Makefile"))
+    } else if cwd.join("makefile").exists() {
+        Some(cwd.join("makefile"))
+    } else if cwd.join("GNUmakefile").exists() {
+        Some(cwd.join("GNUmakefile"))
+    } else {
+        None
+    };
+    if let Some(mf_path) = makefile {
+        if let Ok(content) = fs::read_to_string(mf_path) {
+            for line in content.lines() {
+                if let Some(target) = line.strip_suffix(':') {
+                    let target = target.split_whitespace().next().unwrap_or("");
+                    if !target.is_empty() && !target.starts_with('.') && !target.contains('%') {
+                        let cmd = format!("make {}", target);
+                        if prefix.is_empty() || cmd.starts_with(prefix) {
+                            completions.push(Completion {
+                                text: cmd,
+                                display: format!("make {}", target),
+                                description: Some("Makefile target".to_string()),
+                                kind: CompletionKind::Command,
+                                is_dir: false,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // pyproject.toml or setup.py → Python project
+    if cwd.join("pyproject.toml").exists() || cwd.join("setup.py").exists() {
+        let py_cmds: &[(&str, &str)] = &[
+            ("python -m pytest", "Run tests"),
+            ("pip install -e .", "Install in dev mode"),
+            ("python -m mypy .", "Type check"),
+            ("python -m black .", "Format code"),
+        ];
+        for &(cmd, desc) in py_cmds {
+            if prefix.is_empty() || cmd.starts_with(prefix) {
+                completions.push(Completion {
+                    text: cmd.to_string(),
+                    display: cmd.to_string(),
+                    description: Some(desc.to_string()),
+                    kind: CompletionKind::Command,
+                    is_dir: false,
+                });
+            }
+        }
+    }
+
+    // go.mod → Go project
+    if cwd.join("go.mod").exists() {
+        let go_cmds: &[(&str, &str)] = &[
+            ("go build ./...", "Build all packages"),
+            ("go test ./...", "Run all tests"),
+            ("go run .", "Run the project"),
+            ("go vet ./...", "Check for issues"),
+            ("go mod tidy", "Clean up dependencies"),
+        ];
+        for &(cmd, desc) in go_cmds {
+            if prefix.is_empty() || cmd.starts_with(prefix) {
+                completions.push(Completion {
+                    text: cmd.to_string(),
+                    display: cmd.to_string(),
+                    description: Some(desc.to_string()),
+                    kind: CompletionKind::Command,
+                    is_dir: false,
+                });
+            }
+        }
+    }
+
+    completions
 }

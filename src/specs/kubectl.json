@@ -1,0 +1,79 @@
+{
+  "name": "kubectl",
+  "description": "Kubernetes CLI",
+  "subcommands": [
+    {"name": "get", "description": "Display resources", "args": [{"name": "resource", "suggestions": ["pods", "services", "deployments", "nodes", "namespaces", "configmaps", "secrets", "ingress", "pvc", "jobs", "cronjobs", "statefulsets", "daemonsets"]}], "options": [
+      {"names": ["-o", "--output"], "description": "Output format", "args": [{"name": "format", "suggestions": ["json", "yaml", "wide", "name", "custom-columns"]}]},
+      {"names": ["-n", "--namespace"], "description": "Namespace", "args": [{"name": "ns"}]},
+      {"names": ["-A", "--all-namespaces"], "description": "All namespaces"},
+      {"names": ["-l", "--selector"], "description": "Label selector", "args": [{"name": "selector"}]},
+      {"names": ["-w", "--watch"], "description": "Watch changes"}
+    ]},
+    {"name": "describe", "description": "Show resource details", "args": [{"name": "resource", "suggestions": ["pod", "service", "deployment", "node", "namespace"]}], "options": [
+      {"names": ["-n", "--namespace"], "description": "Namespace", "args": [{"name": "ns"}]}
+    ]},
+    {"name": "apply", "description": "Apply configuration", "options": [
+      {"names": ["-f", "--filename"], "description": "Config file", "args": [{"template": "file_path"}]},
+      {"names": ["-k", "--kustomize"], "description": "Kustomize dir", "args": [{"template": "folder_path"}]},
+      {"names": ["-n", "--namespace"], "description": "Namespace", "args": [{"name": "ns"}]},
+      {"names": ["--dry-run"], "description": "Dry run", "args": [{"name": "mode", "suggestions": ["client", "server", "none"]}]}
+    ]},
+    {"name": "delete", "description": "Delete resources", "args": [{"name": "resource", "suggestions": ["pod", "service", "deployment", "namespace", "configmap", "secret"]}], "options": [
+      {"names": ["-f", "--filename"], "description": "Config file", "args": [{"template": "file_path"}]},
+      {"names": ["-n", "--namespace"], "description": "Namespace", "args": [{"name": "ns"}]},
+      {"names": ["--force"], "description": "Force delete"},
+      {"names": ["--grace-period"], "description": "Grace period", "args": [{"name": "seconds"}]}
+    ]},
+    {"name": "logs", "description": "Print container logs", "options": [
+      {"names": ["-f", "--follow"], "description": "Follow logs"},
+      {"names": ["--tail"], "description": "Lines to show", "args": [{"name": "n"}]},
+      {"names": ["-c", "--container"], "description": "Container name", "args": [{"name": "container"}]},
+      {"names": ["-n", "--namespace"], "description": "Namespace", "args": [{"name": "ns"}]},
+      {"names": ["--previous", "-p"], "description": "Previous container"},
+      {"names": ["--since"], "description": "Since duration", "args": [{"name": "duration"}]}
+    ]},
+    {"name": "exec", "description": "Execute in container", "options": [
+      {"names": ["-it"], "description": "Interactive terminal"},
+      {"names": ["-c", "--container"], "description": "Container", "args": [{"name": "container"}]},
+      {"names": ["-n", "--namespace"], "description": "Namespace", "args": [{"name": "ns"}]}
+    ]},
+    {"name": "port-forward", "description": "Forward ports", "options": [
+      {"names": ["-n", "--namespace"], "description": "Namespace", "args": [{"name": "ns"}]}
+    ]},
+    {"name": "scale", "description": "Scale replicas", "options": [
+      {"names": ["--replicas"], "description": "Replica count", "args": [{"name": "n"}]},
+      {"names": ["-n", "--namespace"], "description": "Namespace", "args": [{"name": "ns"}]}
+    ]},
+    {"name": "rollout", "description": "Manage rollouts", "subcommands": [
+      {"name": "status", "description": "Show rollout status"},
+      {"name": "history", "description": "View rollout history"},
+      {"name": "restart", "description": "Restart rollout"},
+      {"name": "undo", "description": "Undo rollout"},
+      {"name": "pause", "description": "Pause rollout"},
+      {"name": "resume", "description": "Resume rollout"}
+    ]},
+    {"name": "config", "description": "Modify kubeconfig", "subcommands": [
+      {"name": "view", "description": "Show config"},
+      {"name": "use-context", "description": "Switch context"},
+      {"name": "get-contexts", "description": "List contexts"},
+      {"name": "current-context", "description": "Show current context"},
+      {"name": "set-context", "description": "Set context fields"}
+    ]},
+    {"name": "create", "description": "Create resource", "subcommands": [
+      {"name": "namespace", "description": "Create namespace"},
+      {"name": "deployment", "description": "Create deployment"},
+      {"name": "service", "description": "Create service"},
+      {"name": "configmap", "description": "Create configmap"},
+      {"name": "secret", "description": "Create secret"}
+    ]},
+    {"name": "top", "description": "Resource usage", "subcommands": [
+      {"name": "pods", "description": "Pod resource usage"},
+      {"name": "nodes", "description": "Node resource usage"}
+    ]}
+  ],
+  "options": [
+    {"names": ["--kubeconfig"], "description": "Kubeconfig file", "args": [{"template": "file_path"}]},
+    {"names": ["--context"], "description": "Kube context", "args": [{"name": "context"}]},
+    {"names": ["-n", "--namespace"], "description": "Namespace", "args": [{"name": "ns"}]}
+  ]
+}

@@ -301,7 +301,7 @@ impl Shell {
                         }
                     };
 
-                    self.history.add(&line);
+                    self.history.add_with_cwd(&line, std::env::current_dir().ok().as_ref().map(|p| p.to_string_lossy().as_ref().to_string()).as_deref());
                     self.state.last_command = Some(line.clone());
 
                     // Run preexec hooks
@@ -332,6 +332,17 @@ impl Shell {
                         }
                     }
                     self.state.last_command_duration = Some(cmd_start.elapsed());
+
+                    // Capture error info for AI fix suggestions
+                    if self.state.last_exit_code != 0 {
+                        self.editor.last_error_info = Some((
+                            line.clone(),
+                            format!("exit code {}", self.state.last_exit_code),
+                            self.state.last_exit_code,
+                        ));
+                    } else {
+                        self.editor.last_error_info = None;
+                    }
 
                     // OSC 133;D — command finished with exit code
                     osc::command_finished(self.state.last_exit_code);
@@ -383,7 +394,7 @@ impl Shell {
                 }
             };
 
-            self.history.add(&line);
+            self.history.add_with_cwd(&line, std::env::current_dir().ok().as_ref().map(|p| p.to_string_lossy().as_ref().to_string()).as_deref());
 
             // Run preexec hooks
             let preexec = self.state.hooks.preexec.clone();

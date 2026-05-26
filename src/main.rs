@@ -1,9 +1,12 @@
 #![allow(dead_code)]
 
+mod ai;
 mod bookmarks;
 mod builtins;
 mod completer;
+mod completion_spec;
 mod config;
+mod workflows;
 mod data;
 mod debug;
 mod editor;

@@ -1,0 +1,97 @@
+{
+  "name": "docker",
+  "description": "Container runtime",
+  "subcommands": [
+    {"name": "run", "description": "Create and run container", "options": [
+      {"names": ["-d", "--detach"], "description": "Run in background"},
+      {"names": ["-it"], "description": "Interactive terminal"},
+      {"names": ["-p", "--publish"], "description": "Publish port", "args": [{"name": "host:container"}]},
+      {"names": ["-v", "--volume"], "description": "Mount volume", "args": [{"name": "src:dst"}]},
+      {"names": ["-e", "--env"], "description": "Set env var", "args": [{"name": "KEY=VALUE"}]},
+      {"names": ["--name"], "description": "Container name", "args": [{"name": "name"}]},
+      {"names": ["--rm"], "description": "Remove on exit"},
+      {"names": ["--network"], "description": "Connect to network", "args": [{"name": "network"}]},
+      {"names": ["-w", "--workdir"], "description": "Working directory", "args": [{"name": "dir"}]}
+    ]},
+    {"name": "build", "description": "Build image", "options": [
+      {"names": ["-t", "--tag"], "description": "Tag image", "args": [{"name": "name:tag"}]},
+      {"names": ["-f", "--file"], "description": "Dockerfile path", "args": [{"template": "file_path"}]},
+      {"names": ["--no-cache"], "description": "No build cache"},
+      {"names": ["--target"], "description": "Build stage", "args": [{"name": "stage"}]},
+      {"names": ["--build-arg"], "description": "Build argument", "args": [{"name": "KEY=VALUE"}]}
+    ]},
+    {"name": "exec", "description": "Execute in container", "options": [
+      {"names": ["-it"], "description": "Interactive terminal"},
+      {"names": ["-d", "--detach"], "description": "Run in background"},
+      {"names": ["-e", "--env"], "description": "Set env var", "args": [{"name": "KEY=VALUE"}]},
+      {"names": ["-w", "--workdir"], "description": "Working directory", "args": [{"name": "dir"}]}
+    ]},
+    {"name": "ps", "description": "List containers", "options": [
+      {"names": ["-a", "--all"], "description": "Show all containers"},
+      {"names": ["-q", "--quiet"], "description": "Only show IDs"},
+      {"names": ["--format"], "description": "Format output", "args": [{"name": "format"}]}
+    ]},
+    {"name": "images", "description": "List images", "options": [
+      {"names": ["-a", "--all"], "description": "Show all images"},
+      {"names": ["-q", "--quiet"], "description": "Only show IDs"},
+      {"names": ["--format"], "description": "Format output", "args": [{"name": "format"}]}
+    ]},
+    {"name": "pull", "description": "Pull image", "options": [
+      {"names": ["--platform"], "description": "Platform", "args": [{"name": "platform", "suggestions": ["linux/amd64", "linux/arm64"]}]}
+    ]},
+    {"name": "push", "description": "Push image"},
+    {"name": "stop", "description": "Stop container"},
+    {"name": "start", "description": "Start container"},
+    {"name": "restart", "description": "Restart container"},
+    {"name": "rm", "description": "Remove container", "options": [
+      {"names": ["-f", "--force"], "description": "Force remove"},
+      {"names": ["-v", "--volumes"], "description": "Remove volumes"}
+    ]},
+    {"name": "rmi", "description": "Remove image", "options": [
+      {"names": ["-f", "--force"], "description": "Force remove"}
+    ]},
+    {"name": "logs", "description": "View logs", "options": [
+      {"names": ["-f", "--follow"], "description": "Follow log output"},
+      {"names": ["--tail"], "description": "Number of lines", "args": [{"name": "n"}]},
+      {"names": ["-t", "--timestamps"], "description": "Show timestamps"}
+    ]},
+    {"name": "compose", "description": "Multi-container apps", "subcommands": [
+      {"name": "up", "description": "Create and start", "options": [
+        {"names": ["-d", "--detach"], "description": "Run in background"},
+        {"names": ["--build"], "description": "Build before starting"},
+        {"names": ["--force-recreate"], "description": "Recreate containers"}
+      ]},
+      {"name": "down", "description": "Stop and remove", "options": [
+        {"names": ["-v", "--volumes"], "description": "Remove volumes"},
+        {"names": ["--rmi"], "description": "Remove images", "args": [{"name": "type", "suggestions": ["all", "local"]}]}
+      ]},
+      {"name": "build", "description": "Build services"},
+      {"name": "logs", "description": "View service logs", "options": [
+        {"names": ["-f", "--follow"], "description": "Follow output"}
+      ]},
+      {"name": "ps", "description": "List containers"},
+      {"name": "exec", "description": "Execute in service"},
+      {"name": "run", "description": "Run one-off command"},
+      {"name": "restart", "description": "Restart services"},
+      {"name": "stop", "description": "Stop services"},
+      {"name": "pull", "description": "Pull service images"}
+    ]},
+    {"name": "network", "description": "Manage networks", "subcommands": [
+      {"name": "create", "description": "Create network"},
+      {"name": "ls", "description": "List networks"},
+      {"name": "rm", "description": "Remove network"},
+      {"name": "inspect", "description": "Inspect network"}
+    ]},
+    {"name": "volume", "description": "Manage volumes", "subcommands": [
+      {"name": "create", "description": "Create volume"},
+      {"name": "ls", "description": "List volumes"},
+      {"name": "rm", "description": "Remove volume"},
+      {"name": "inspect", "description": "Inspect volume"},
+      {"name": "prune", "description": "Remove unused volumes"}
+    ]}
+  ],
+  "options": [
+    {"names": ["--version"], "description": "Show version"},
+    {"names": ["--help"], "description": "Show help"}
+  ]
+}

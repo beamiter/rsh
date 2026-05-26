@@ -3,6 +3,10 @@ name = "rsh"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = ["ai"]
+ai = ["dep:ureq"]
+
 [dependencies]
 glob = "0.3"
 regex = "1"
@@ -13,6 +17,7 @@ crossterm = "0.29.0"
 dirs = "6.0.0"
 nix = { version = "0.31.2", features = ["process", "fs", "signal", "term"] }
 atty = "0.2"
+ureq = { version = "2", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

@@ -1,0 +1,202 @@
+[
+  {
+    "name": "docker-run",
+    "description": "Run a Docker container with common options",
+    "command": "docker run -it --rm -p {{port}}:{{port}} --name {{name}} {{image}}",
+    "parameters": [
+      {"name": "image", "description": "Docker image name", "suggestions": ["ubuntu:latest", "alpine:latest", "nginx:latest", "node:lts"]},
+      {"name": "port", "description": "Port to expose", "default": "8080"},
+      {"name": "name", "description": "Container name", "default": "myapp"}
+    ],
+    "tags": ["docker", "container", "run"]
+  },
+  {
+    "name": "ssh-tunnel",
+    "description": "Create an SSH tunnel for port forwarding",
+    "command": "ssh -L {{local_port}}:{{remote_host}}:{{remote_port}} {{user}}@{{server}}",
+    "parameters": [
+      {"name": "local_port", "description": "Local port", "default": "8080"},
+      {"name": "remote_host", "description": "Remote host", "default": "localhost"},
+      {"name": "remote_port", "description": "Remote port", "default": "80"},
+      {"name": "user", "description": "SSH user"},
+      {"name": "server", "description": "SSH server"}
+    ],
+    "tags": ["ssh", "tunnel", "port-forward", "network"]
+  },
+  {
+    "name": "git-rebase-interactive",
+    "description": "Interactive rebase on last N commits",
+    "command": "git rebase -i HEAD~{{n}}",
+    "parameters": [
+      {"name": "n", "description": "Number of commits", "default": "3", "suggestions": ["3", "5", "10"]}
+    ],
+    "tags": ["git", "rebase", "interactive"]
+  },
+  {
+    "name": "find-large-files",
+    "description": "Find files larger than a given size",
+    "command": "find {{path}} -type f -size +{{size}} -exec ls -lh {} \\;",
+    "parameters": [
+      {"name": "path", "description": "Search directory", "default": ".", "suggestions": [".", "/", "~"]},
+      {"name": "size", "description": "Minimum size", "default": "100M", "suggestions": ["10M", "50M", "100M", "1G"]}
+    ],
+    "tags": ["find", "disk", "size", "files"]
+  },
+  {
+    "name": "find-replace",
+    "description": "Find and replace text in files recursively",
+    "command": "find {{path}} -type f -name '{{pattern}}' -exec sed -i 's/{{search}}/{{replace}}/g' {} +",
+    "parameters": [
+      {"name": "path", "description": "Search directory", "default": "."},
+      {"name": "pattern", "description": "File pattern", "default": "*.txt", "suggestions": ["*.txt", "*.py", "*.js", "*.rs"]},
+      {"name": "search", "description": "Text to find"},
+      {"name": "replace", "description": "Replacement text"}
+    ],
+    "tags": ["find", "replace", "sed", "refactor"]
+  },
+  {
+    "name": "tar-compress",
+    "description": "Create a compressed tar archive",
+    "command": "tar -czf {{output}}.tar.gz {{input}}",
+    "parameters": [
+      {"name": "output", "description": "Archive name (without .tar.gz)"},
+      {"name": "input", "description": "Files/directories to compress"}
+    ],
+    "tags": ["tar", "compress", "archive", "gzip"]
+  },
+  {
+    "name": "tar-extract",
+    "description": "Extract a tar archive",
+    "command": "tar -xzf {{archive}} -C {{destination}}",
+    "parameters": [
+      {"name": "archive", "description": "Archive file to extract"},
+      {"name": "destination", "description": "Extraction directory", "default": "."}
+    ],
+    "tags": ["tar", "extract", "archive"]
+  },
+  {
+    "name": "git-squash",
+    "description": "Squash last N commits into one",
+    "command": "git reset --soft HEAD~{{n}} && git commit -m '{{message}}'",
+    "parameters": [
+      {"name": "n", "description": "Number of commits to squash", "default": "2"},
+      {"name": "message", "description": "New commit message"}
+    ],
+    "tags": ["git", "squash", "commit"]
+  },
+  {
+    "name": "process-kill-port",
+    "description": "Kill process using a specific port",
+    "command": "kill -9 $(lsof -t -i:{{port}})",
+    "parameters": [
+      {"name": "port", "description": "Port number", "default": "8080", "suggestions": ["3000", "8080", "8443", "5432"]}
+    ],
+    "tags": ["process", "kill", "port", "network"]
+  },
+  {
+    "name": "docker-compose-restart",
+    "description": "Rebuild and restart a docker-compose service",
+    "command": "docker compose up -d --build {{service}}",
+    "parameters": [
+      {"name": "service", "description": "Service name to rebuild"}
+    ],
+    "tags": ["docker", "compose", "restart", "rebuild"]
+  },
+  {
+    "name": "rsync-deploy",
+    "description": "Sync files to remote server",
+    "command": "rsync -avz --progress {{source}} {{user}}@{{host}}:{{dest}}",
+    "parameters": [
+      {"name": "source", "description": "Local source path", "default": "./"},
+      {"name": "user", "description": "Remote user"},
+      {"name": "host", "description": "Remote host"},
+      {"name": "dest", "description": "Remote destination path"}
+    ],
+    "tags": ["rsync", "deploy", "sync", "remote"]
+  },
+  {
+    "name": "python-venv",
+    "description": "Create and activate a Python virtual environment",
+    "command": "python3 -m venv {{name}} && source {{name}}/bin/activate",
+    "parameters": [
+      {"name": "name", "description": "Venv directory name", "default": ".venv", "suggestions": [".venv", "venv", "env"]}
+    ],
+    "tags": ["python", "venv", "virtualenv"]
+  },
+  {
+    "name": "git-undo-commit",
+    "description": "Undo last commit keeping changes staged",
+    "command": "git reset --soft HEAD~1",
+    "parameters": [],
+    "tags": ["git", "undo", "reset"]
+  },
+  {
+    "name": "disk-usage-top",
+    "description": "Show top N largest directories",
+    "command": "du -h --max-depth=1 {{path}} | sort -hr | head -{{n}}",
+    "parameters": [
+      {"name": "path", "description": "Directory to analyze", "default": ".", "suggestions": [".", "/", "~"]},
+      {"name": "n", "description": "Number of results", "default": "20", "suggestions": ["10", "20", "50"]}
+    ],
+    "tags": ["disk", "usage", "du", "space"]
+  },
+  {
+    "name": "watch-command",
+    "description": "Run a command repeatedly and watch output",
+    "command": "watch -n {{interval}} '{{command}}'",
+    "parameters": [
+      {"name": "interval", "description": "Refresh interval (seconds)", "default": "2", "suggestions": ["1", "2", "5", "10"]},
+      {"name": "command", "description": "Command to watch"}
+    ],
+    "tags": ["watch", "monitor", "repeat"]
+  },
+  {
+    "name": "kubectl-exec",
+    "description": "Open a shell in a Kubernetes pod",
+    "command": "kubectl exec -it {{pod}} -n {{namespace}} -- {{shell}}",
+    "parameters": [
+      {"name": "pod", "description": "Pod name"},
+      {"name": "namespace", "description": "Namespace", "default": "default"},
+      {"name": "shell", "description": "Shell command", "default": "/bin/sh", "suggestions": ["/bin/sh", "/bin/bash", "/bin/zsh"]}
+    ],
+    "tags": ["kubernetes", "kubectl", "exec", "pod", "shell"]
+  },
+  {
+    "name": "git-branch-cleanup",
+    "description": "Delete merged local branches",
+    "command": "git branch --merged {{base}} | grep -v '{{base}}\\|\\*' | xargs -r git branch -d",
+    "parameters": [
+      {"name": "base", "description": "Base branch", "default": "main", "suggestions": ["main", "master", "develop"]}
+    ],
+    "tags": ["git", "branch", "cleanup", "delete"]
+  },
+  {
+    "name": "http-serve",
+    "description": "Serve current directory over HTTP",
+    "command": "python3 -m http.server {{port}}",
+    "parameters": [
+      {"name": "port", "description": "Port number", "default": "8000", "suggestions": ["8000", "8080", "3000"]}
+    ],
+    "tags": ["http", "server", "python", "static"]
+  },
+  {
+    "name": "git-log-pretty",
+    "description": "Show git log with graph and colors",
+    "command": "git log --oneline --graph --all --decorate -{{n}}",
+    "parameters": [
+      {"name": "n", "description": "Number of commits", "default": "20", "suggestions": ["10", "20", "50", "100"]}
+    ],
+    "tags": ["git", "log", "graph", "history"]
+  },
+  {
+    "name": "chmod-recursive",
+    "description": "Set permissions recursively for files or directories",
+    "command": "find {{path}} -type {{type}} -exec chmod {{mode}} {} +",
+    "parameters": [
+      {"name": "path", "description": "Target path", "default": "."},
+      {"name": "type", "description": "File type", "default": "f", "suggestions": ["f", "d"]},
+      {"name": "mode", "description": "Permission mode", "default": "644", "suggestions": ["644", "755", "600", "700"]}
+    ],
+    "tags": ["chmod", "permissions", "recursive"]
+  }
+]

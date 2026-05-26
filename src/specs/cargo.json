@@ -1,0 +1,99 @@
+{
+  "name": "cargo",
+  "description": "Rust package manager",
+  "subcommands": [
+    {"name": "build", "description": "Compile project", "options": [
+      {"names": ["--release"], "description": "Release mode"},
+      {"names": ["-p", "--package"], "description": "Build package", "args": [{"name": "package"}]},
+      {"names": ["--all-targets"], "description": "Build all targets"},
+      {"names": ["--target"], "description": "Target triple", "args": [{"name": "triple"}]},
+      {"names": ["-j", "--jobs"], "description": "Parallel jobs", "args": [{"name": "n"}]},
+      {"names": ["--features"], "description": "Enable features", "args": [{"name": "features"}]},
+      {"names": ["--all-features"], "description": "Enable all features"}
+    ]},
+    {"name": "run", "description": "Run binary", "options": [
+      {"names": ["--release"], "description": "Release mode"},
+      {"names": ["--bin"], "description": "Run binary", "args": [{"name": "name"}]},
+      {"names": ["--example"], "description": "Run example", "args": [{"name": "name"}]},
+      {"names": ["--features"], "description": "Enable features", "args": [{"name": "features"}]}
+    ]},
+    {"name": "test", "description": "Run tests", "options": [
+      {"names": ["--release"], "description": "Release mode"},
+      {"names": ["--lib"], "description": "Test library only"},
+      {"names": ["--doc"], "description": "Test documentation"},
+      {"names": ["--no-run"], "description": "Compile only"},
+      {"names": ["--features"], "description": "Enable features", "args": [{"name": "features"}]},
+      {"names": ["-p", "--package"], "description": "Test package", "args": [{"name": "package"}]}
+    ]},
+    {"name": "check", "description": "Check for errors", "options": [
+      {"names": ["--all-targets"], "description": "Check all targets"},
+      {"names": ["--features"], "description": "Enable features", "args": [{"name": "features"}]},
+      {"names": ["--all-features"], "description": "Enable all features"}
+    ]},
+    {"name": "clippy", "description": "Run linter", "options": [
+      {"names": ["--fix"], "description": "Auto-fix warnings"},
+      {"names": ["--all-targets"], "description": "Check all targets"},
+      {"names": ["--features"], "description": "Enable features", "args": [{"name": "features"}]}
+    ]},
+    {"name": "fmt", "description": "Format code", "options": [
+      {"names": ["--check"], "description": "Check formatting only"},
+      {"names": ["--all"], "description": "Format all packages"}
+    ]},
+    {"name": "add", "description": "Add dependency", "options": [
+      {"names": ["--dev", "-D"], "description": "Dev dependency"},
+      {"names": ["--build", "-B"], "description": "Build dependency"},
+      {"names": ["--features", "-F"], "description": "Enable features", "args": [{"name": "features"}]},
+      {"names": ["--optional"], "description": "Optional dependency"},
+      {"names": ["--no-default-features"], "description": "Disable default features"}
+    ]},
+    {"name": "remove", "description": "Remove dependency", "options": [
+      {"names": ["--dev", "-D"], "description": "Dev dependency"},
+      {"names": ["--build", "-B"], "description": "Build dependency"}
+    ]},
+    {"name": "init", "description": "Init in existing dir", "options": [
+      {"names": ["--lib"], "description": "Library package"},
+      {"names": ["--bin"], "description": "Binary package"},
+      {"names": ["--name"], "description": "Package name", "args": [{"name": "name"}]}
+    ]},
+    {"name": "new", "description": "Create new project", "options": [
+      {"names": ["--lib"], "description": "Library package"},
+      {"names": ["--bin"], "description": "Binary package"},
+      {"names": ["--name"], "description": "Package name", "args": [{"name": "name"}]}
+    ]},
+    {"name": "bench", "description": "Run benchmarks", "options": [
+      {"names": ["--features"], "description": "Enable features", "args": [{"name": "features"}]}
+    ]},
+    {"name": "doc", "description": "Build documentation", "options": [
+      {"names": ["--open"], "description": "Open in browser"},
+      {"names": ["--no-deps"], "description": "Skip dependencies"}
+    ]},
+    {"name": "clean", "description": "Remove artifacts", "options": [
+      {"names": ["--release"], "description": "Clean release only"},
+      {"names": ["-p", "--package"], "description": "Clean package", "args": [{"name": "package"}]}
+    ]},
+    {"name": "update", "description": "Update dependencies", "options": [
+      {"names": ["-p", "--package"], "description": "Update package", "args": [{"name": "package"}]},
+      {"names": ["--dry-run"], "description": "Dry run"}
+    ]},
+    {"name": "publish", "description": "Publish to crates.io", "options": [
+      {"names": ["--dry-run"], "description": "Dry run"},
+      {"names": ["--allow-dirty"], "description": "Allow dirty working dir"}
+    ]},
+    {"name": "install", "description": "Install binary", "options": [
+      {"names": ["--path"], "description": "Install from path", "args": [{"template": "folder_path"}]},
+      {"names": ["--git"], "description": "Install from git", "args": [{"name": "url"}]},
+      {"names": ["--force", "-f"], "description": "Force reinstall"}
+    ]},
+    {"name": "tree", "description": "Show dependency tree", "options": [
+      {"names": ["-i", "--invert"], "description": "Invert tree"},
+      {"names": ["-p", "--package"], "description": "Show package", "args": [{"name": "package"}]},
+      {"names": ["-d", "--depth"], "description": "Max depth", "args": [{"name": "depth"}]}
+    ]}
+  ],
+  "options": [
+    {"names": ["--version", "-V"], "description": "Show version"},
+    {"names": ["--help", "-h"], "description": "Show help"},
+    {"names": ["--verbose", "-v"], "description": "Verbose output"},
+    {"names": ["--quiet", "-q"], "description": "Suppress output"}
+  ]
+}

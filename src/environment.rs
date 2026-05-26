@@ -143,6 +143,10 @@ pub struct ShellState {
     pub last_command: Option<String>,
     /// Cached git branch for current directory (avoids filesystem I/O per keystroke)
     pub cached_git_branch: Option<String>,
+    /// Extensible completion spec registry (Phase 3: spec system)
+    pub spec_registry: crate::completion_spec::SpecRegistry,
+    /// Workflow registry (Phase 4: parameterized command templates)
+    pub workflow_registry: crate::workflows::WorkflowRegistry,
 }
 
 impl ShellState {
@@ -193,6 +197,8 @@ impl ShellState {
             return_value: 0,
             last_command: None,
             cached_git_branch: None,
+            spec_registry: crate::completion_spec::SpecRegistry::new(),
+            workflow_registry: crate::workflows::WorkflowRegistry::new(),
         }
     }
 

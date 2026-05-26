@@ -1,9 +1,12 @@
 #![allow(dead_code)]
 
+pub mod ai;
 pub mod bookmarks;
 pub mod builtins;
 pub mod completer;
+pub mod completion_spec;
 pub mod config;
+pub mod workflows;
 pub mod data;
 pub mod debug;
 pub mod editor;

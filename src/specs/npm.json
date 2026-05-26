@@ -1,0 +1,70 @@
+{
+  "name": "npm",
+  "description": "Node.js package manager",
+  "subcommands": [
+    {"name": "install", "description": "Install packages", "options": [
+      {"names": ["-D", "--save-dev"], "description": "Dev dependency"},
+      {"names": ["-g", "--global"], "description": "Install globally"},
+      {"names": ["--save-exact", "-E"], "description": "Exact version"},
+      {"names": ["--legacy-peer-deps"], "description": "Legacy peer deps"},
+      {"names": ["--force", "-f"], "description": "Force install"}
+    ]},
+    {"name": "run", "description": "Run script", "options": [
+      {"names": ["--silent", "-s"], "description": "Suppress output"},
+      {"names": ["--if-present"], "description": "Skip if missing"}
+    ], "args": [{"name": "script", "description": "Script name from package.json"}]},
+    {"name": "test", "description": "Run tests"},
+    {"name": "start", "description": "Start application"},
+    {"name": "build", "description": "Build package"},
+    {"name": "init", "description": "Initialize package.json", "options": [
+      {"names": ["-y", "--yes"], "description": "Use defaults"},
+      {"names": ["--scope"], "description": "Package scope", "args": [{"name": "scope"}]}
+    ]},
+    {"name": "publish", "description": "Publish package", "options": [
+      {"names": ["--access"], "description": "Access level", "args": [{"name": "level", "suggestions": ["public", "restricted"]}]},
+      {"names": ["--tag"], "description": "Dist-tag", "args": [{"name": "tag"}]},
+      {"names": ["--dry-run"], "description": "Dry run"}
+    ]},
+    {"name": "exec", "description": "Run package binary", "options": [
+      {"names": ["-c"], "description": "Shell command", "args": [{"name": "cmd"}]}
+    ]},
+    {"name": "link", "description": "Symlink package"},
+    {"name": "uninstall", "description": "Remove package", "options": [
+      {"names": ["-g", "--global"], "description": "Global uninstall"},
+      {"names": ["-D", "--save-dev"], "description": "From devDependencies"}
+    ]},
+    {"name": "update", "description": "Update packages", "options": [
+      {"names": ["-g", "--global"], "description": "Update global"}
+    ]},
+    {"name": "outdated", "description": "Check outdated", "options": [
+      {"names": ["-g", "--global"], "description": "Check global"},
+      {"names": ["--json"], "description": "JSON output"}
+    ]},
+    {"name": "list", "description": "List installed", "options": [
+      {"names": ["-g", "--global"], "description": "List global"},
+      {"names": ["--depth"], "description": "Max depth", "args": [{"name": "n"}]},
+      {"names": ["--json"], "description": "JSON output"}
+    ]},
+    {"name": "audit", "description": "Security audit", "options": [
+      {"names": ["--fix"], "description": "Auto-fix issues"},
+      {"names": ["--json"], "description": "JSON output"}
+    ]},
+    {"name": "cache", "description": "Manage cache", "subcommands": [
+      {"name": "clean", "description": "Clean cache"},
+      {"name": "ls", "description": "List cache"},
+      {"name": "verify", "description": "Verify cache"}
+    ]},
+    {"name": "config", "description": "Manage config", "subcommands": [
+      {"name": "set", "description": "Set config value"},
+      {"name": "get", "description": "Get config value"},
+      {"name": "list", "description": "List all config"},
+      {"name": "delete", "description": "Delete config key"}
+    ]},
+    {"name": "ci", "description": "Clean install"},
+    {"name": "version", "description": "Bump version", "args": [{"name": "level", "suggestions": ["major", "minor", "patch", "premajor", "preminor", "prepatch"]}]}
+  ],
+  "options": [
+    {"names": ["--version", "-v"], "description": "Show version"},
+    {"names": ["--help", "-h"], "description": "Show help"}
+  ]
+}
