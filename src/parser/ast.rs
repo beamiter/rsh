@@ -78,9 +78,17 @@ pub struct SimpleCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum CaseTerminator {
+    Break,         // ;;   stop after this arm
+    FallThrough,   // ;&   run the next arm's body unconditionally
+    ContinueMatch, // ;;&  keep testing subsequent arms
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CaseArm {
     pub patterns: Vec<Word>,
     pub body: Vec<CompleteCommand>,
+    pub terminator: CaseTerminator,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

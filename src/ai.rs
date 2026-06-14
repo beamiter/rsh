@@ -180,6 +180,15 @@ fn process_request(_config: &AiConfig, _request: &AiRequest) -> AiResponse {
 }
 
 #[cfg(feature = "ai")]
+fn ai_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(5))
+        .timeout_read(std::time::Duration::from_secs(30))
+        .timeout_write(std::time::Duration::from_secs(10))
+        .build()
+}
+
+#[cfg(feature = "ai")]
 fn call_openai(config: &AiConfig, system: &str, user: &str) -> AiResponse {
     let url = format!("{}/chat/completions", config.base_url);
     let body = serde_json::json!({
@@ -192,7 +201,7 @@ fn call_openai(config: &AiConfig, system: &str, user: &str) -> AiResponse {
         "temperature": 0.1
     });
 
-    let mut req = ureq::post(&url)
+    let mut req = ai_agent().post(&url)
         .set("Content-Type", "application/json");
     if let Some(ref key) = config.api_key {
         req = req.set("Authorization", &format!("Bearer {}", key));
@@ -221,7 +230,7 @@ fn call_anthropic(config: &AiConfig, system: &str, user: &str) -> AiResponse {
         ]
     });
 
-    let mut req = ureq::post(&url)
+    let mut req = ai_agent().post(&url)
         .set("Content-Type", "application/json")
         .set("anthropic-version", "2023-06-01");
     if let Some(ref key) = config.api_key {
@@ -253,7 +262,7 @@ fn call_ollama(config: &AiConfig, system: &str, user: &str) -> AiResponse {
         }
     });
 
-    match ureq::post(&url)
+    match ai_agent().post(&url)
         .set("Content-Type", "application/json")
         .send_string(&body.to_string())
     {

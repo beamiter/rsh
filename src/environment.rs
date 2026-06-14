@@ -1,6 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
+use std::sync::mpsc;
 
 use serde::{Serialize, Deserialize};
 
@@ -108,14 +109,17 @@ pub struct ShellState {
     pub interactive: bool,
     pub home_dir: PathBuf,
     pub hostname: String,
-    path_cache: Option<HashSet<String>>,
-    path_hash: u64, // Hash of current PATH for quick comparison
+    path_cache: Option<Vec<String>>,
+    path_hash: u64,
+    path_scan_rx: Option<mpsc::Receiver<Vec<String>>>,
     pub positional_params: Vec<String>,
     pub positional_stack: Vec<Vec<String>>,
     pub dir_stack: Vec<PathBuf>,
     pub shell_opts: ShellOpts,
     pub traps: HashMap<String, String>,
     pub pipestatus: Vec<i32>,
+    // PIDs of process-substitution children awaiting non-blocking reaping.
+    pub procsub_pids: Vec<i32>,
     pub jobs: JobTable,
     // Arrays (Phase 1)
     pub arrays: HashMap<String, Vec<String>>,
@@ -175,12 +179,14 @@ impl ShellState {
             hostname,
             path_cache: None,
             path_hash,
+            path_scan_rx: None,
             positional_params: Vec::new(),
             positional_stack: Vec::new(),
             dir_stack: Vec::new(),
             shell_opts: ShellOpts::default(),
             traps: HashMap::new(),
             pipestatus: Vec::new(),
+            procsub_pids: Vec::new(),
             jobs: JobTable::new(),
             arrays: HashMap::new(),
             assoc_arrays: HashMap::new(),
@@ -312,42 +318,67 @@ impl ShellState {
         );
     }
 
-    pub fn path_cache(&mut self) -> &HashSet<String> {
-        // Check if PATH has changed (using hash for quick comparison)
+    pub fn path_cache(&mut self) -> &Vec<String> {
         let current_path_hash = Self::hash_path(
             self.env_vars.get("PATH").map(|s| s.as_str()).unwrap_or("")
         );
 
         if self.path_hash != current_path_hash {
             self.path_cache = None;
+            self.path_scan_rx = None;
             self.path_hash = current_path_hash;
         }
 
-        // Rebuild cache only if it's None
-        if self.path_cache.is_none() {
-            let mut cache = HashSet::new();
-            if let Some(path) = self.env_vars.get("PATH") {
-                for dir in path.split(':') {
+        // Check for completed background scan
+        if let Some(ref rx) = self.path_scan_rx {
+            if let Ok(result) = rx.try_recv() {
+                self.path_cache = Some(result);
+                self.path_scan_rx = None;
+            }
+        }
+
+        if self.path_cache.is_none() && self.path_scan_rx.is_none() {
+            // Start async scan
+            let path_val = self.env_vars.get("PATH").cloned().unwrap_or_default();
+            let (tx, rx) = mpsc::channel();
+            self.path_scan_rx = Some(rx);
+            std::thread::spawn(move || {
+                let mut cache = Vec::new();
+                for dir in path_val.split(':') {
                     if let Ok(entries) = std::fs::read_dir(dir) {
                         for entry in entries.flatten() {
                             if let Ok(ft) = entry.file_type() {
                                 if ft.is_file() || ft.is_symlink() {
                                     if let Some(name) = entry.file_name().to_str() {
-                                        cache.insert(name.to_string());
+                                        cache.push(name.to_string());
                                     }
                                 }
                             }
                         }
                     }
                 }
+                cache.sort_unstable();
+                cache.dedup();
+                let _ = tx.send(cache);
+            });
+            // Return empty vec on first call (scan is in progress)
+            // For immediate use, do a synchronous scan as fallback
+            if self.path_cache.is_none() {
+                self.path_cache = Some(Vec::new());
+                // Block briefly for the first scan to complete
+                if let Some(ref rx) = self.path_scan_rx {
+                    if let Ok(result) = rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                        self.path_cache = Some(result);
+                        self.path_scan_rx = None;
+                    }
+                }
             }
-            self.path_cache = Some(cache);
         }
         self.path_cache.as_ref().unwrap()
     }
 
     pub fn command_in_path(&mut self, name: &str) -> bool {
-        self.path_cache().contains(name)
+        self.path_cache().binary_search(&name.to_string()).is_ok()
     }
 
     pub fn push_positional_params(&mut self, args: Vec<String>) {
@@ -385,6 +416,28 @@ impl ShellState {
                 arr[idx] = value.to_string();
             }
         }
+    }
+
+    /// Non-blocking reap of finished process-substitution children, so they do
+    /// not linger as zombies. Still-running children are kept for a later sweep.
+    pub fn reap_procsubs(&mut self) {
+        use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
+        use nix::unistd::Pid;
+        if self.procsub_pids.is_empty() {
+            return;
+        }
+        self.procsub_pids.retain(|&pid| {
+            matches!(
+                waitpid(Pid::from_raw(pid), Some(WaitPidFlag::WNOHANG)),
+                Ok(WaitStatus::StillAlive)
+            )
+        });
+    }
+
+    /// Replace an indexed array's contents wholesale.
+    pub fn set_array(&mut self, name: &str, values: Vec<String>) {
+        self.assoc_arrays.remove(name);
+        self.arrays.insert(name.to_string(), values);
     }
 
     pub fn array_values(&self, name: &str) -> Vec<String> {

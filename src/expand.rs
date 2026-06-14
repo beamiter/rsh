@@ -16,6 +16,16 @@ pub fn expand_word(word: &Word, state: &mut ShellState) -> Vec<String> {
         }
     }
 
+    // Check for "$@"/$@/$* which expand to multiple fields (positional params).
+    if word_contains_at_star(word) {
+        let fields = expand_parts_to_fields(word, state, false);
+        // "$@" / "$*" with no positional params and no surrounding text → no words.
+        if fields.len() == 1 && fields[0].is_empty() && state.positional_params.is_empty() {
+            return Vec::new();
+        }
+        return fields;
+    }
+
     // Check for brace expansion/range that produces multiple words
     for (i, part) in word.iter().enumerate() {
         let items = match part {
@@ -40,17 +50,146 @@ pub fn expand_word(word: &Word, state: &mut ShellState) -> Vec<String> {
         }
     }
 
-    let expanded = expand_word_to_string(word, state);
+    // Expand parts while tracking which bytes came from unquoted expansions
+    // (variables, command substitution, arithmetic). Only those bytes are
+    // candidates for IFS word splitting.
+    let (expanded, mask, has_unsplittable) = expand_word_masked(word, state);
 
-    // Check for extglob patterns
-    let has_extglob = state.shell_opts.extglob && crate::glob_match::contains_extglob(&expanded);
+    let mut fields = ifs_split(&expanded, &mask, state);
+    if fields.is_empty() {
+        if has_unsplittable {
+            // e.g. `echo ""` or `echo "$empty"` → one empty field.
+            fields.push(String::new());
+        } else {
+            // e.g. `echo $empty` → no fields at all.
+            return Vec::new();
+        }
+    }
+
+    // Globbing applies per resulting field, after word splitting.
+    let mut out = Vec::new();
+    for field in fields {
+        out.extend(glob_field(&field, state));
+    }
+    out
+}
+
+/// Expand each part of a word, recording per-byte whether it originated from an
+/// unquoted expansion (splittable) plus whether any unsplittable part was seen
+/// (so an empty result can be distinguished: `echo ""` keeps one empty field,
+/// `echo $empty` keeps none).
+fn expand_word_masked(word: &Word, state: &mut ShellState) -> (String, Vec<bool>, bool) {
+    let mut s = String::new();
+    let mut mask: Vec<bool> = Vec::new();
+    let mut has_unsplittable = false;
+    for part in word {
+        let splittable = matches!(
+            part,
+            WordPart::Variable(_) | WordPart::CommandSub(_) | WordPart::Arithmetic(_)
+        );
+        if !splittable {
+            has_unsplittable = true;
+        }
+        let text = expand_part(part, state);
+        for _ in 0..text.len() {
+            mask.push(splittable);
+        }
+        s.push_str(&text);
+    }
+    (s, mask, has_unsplittable)
+}
+
+/// Split a string into fields at splittable IFS characters. `mask[byte]` is true
+/// where the byte came from an unquoted expansion. Honors bash IFS rules:
+/// leading/trailing IFS whitespace is trimmed, runs of IFS whitespace delimit a
+/// single field boundary, and each IFS non-whitespace character (with any
+/// adjacent IFS whitespace) is one delimiter that can produce empty fields.
+fn ifs_split(s: &str, mask: &[bool], state: &ShellState) -> Vec<String> {
+    if s.is_empty() {
+        return Vec::new();
+    }
+    let ifs = state
+        .get_var("IFS")
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| " \t\n".to_string());
+    if ifs.is_empty() {
+        // IFS empty → no word splitting at all.
+        return vec![s.to_string()];
+    }
+    let is_ws = |c: char| (c == ' ' || c == '\t' || c == '\n') && ifs.contains(c);
+    let is_ifs = |c: char| ifs.contains(c);
+
+    let chars: Vec<(usize, char)> = s.char_indices().collect();
+    let n = chars.len();
+    let split_at = |i: usize| -> bool {
+        let bp = chars[i].0;
+        mask.get(bp).copied().unwrap_or(false) && is_ifs(chars[i].1)
+    };
+
+    let mut fields: Vec<String> = Vec::new();
+    let mut field = String::new();
+    let mut field_pending = false;
+    let mut i = 0;
+
+    // Trim leading IFS whitespace.
+    while i < n && split_at(i) && is_ws(chars[i].1) {
+        i += 1;
+    }
+
+    while i < n {
+        if split_at(i) {
+            let c = chars[i].1;
+            if is_ws(c) {
+                // Consume the whitespace run, then optionally one non-ws
+                // delimiter plus its trailing whitespace.
+                let mut j = i;
+                while j < n && split_at(j) && is_ws(chars[j].1) {
+                    j += 1;
+                }
+                let mut took_nonws = false;
+                if j < n && split_at(j) && !is_ws(chars[j].1) {
+                    j += 1;
+                    took_nonws = true;
+                    while j < n && split_at(j) && is_ws(chars[j].1) {
+                        j += 1;
+                    }
+                }
+                if j < n || took_nonws {
+                    fields.push(std::mem::take(&mut field));
+                    field_pending = false;
+                }
+                // else: trailing whitespace — ignore.
+                i = j;
+            } else {
+                // Non-whitespace IFS delimiter.
+                fields.push(std::mem::take(&mut field));
+                field_pending = false;
+                i += 1;
+                while i < n && split_at(i) && is_ws(chars[i].1) {
+                    i += 1;
+                }
+            }
+        } else {
+            field.push(chars[i].1);
+            field_pending = true;
+            i += 1;
+        }
+    }
+
+    if field_pending || !field.is_empty() {
+        fields.push(field);
+    }
+    fields
+}
+
+/// Apply glob/extglob expansion to a single already-split field.
+fn glob_field(expanded: &str, state: &mut ShellState) -> Vec<String> {
+    let has_extglob = state.shell_opts.extglob && crate::glob_match::contains_extglob(expanded);
 
     if has_extglob {
-        // Handle extglob patterns
-        expand_with_extglob(&expanded, state)
-    } else if contains_glob(&expanded) && !state.shell_opts.noglob {
-        // Handle regular glob patterns
-        match glob::glob(&expanded) {
+        expand_with_extglob(expanded, state)
+    } else if contains_glob(expanded) && !state.shell_opts.noglob {
+        match glob::glob(expanded) {
             Ok(paths) => {
                 let mut results: Vec<String> = paths
                     .filter_map(|p| p.ok())
@@ -58,7 +197,7 @@ pub fn expand_word(word: &Word, state: &mut ShellState) -> Vec<String> {
                     .collect();
 
                 // Apply dotglob filtering: remove hidden files if dotglob is off and pattern doesn't explicitly match them
-                if !state.shell_opts.dotglob && !pattern_explicitly_includes_dot(&expanded) {
+                if !state.shell_opts.dotglob && !pattern_explicitly_includes_dot(expanded) {
                     results.retain(|path| {
                         let filename = std::path::Path::new(path)
                             .file_name()
@@ -69,26 +208,22 @@ pub fn expand_word(word: &Word, state: &mut ShellState) -> Vec<String> {
                 }
 
                 if results.is_empty() {
-                    // No matches
                     if state.shell_opts.nullglob {
-                        // nullglob: return empty, don't expand to pattern
                         vec![]
                     } else if state.shell_opts.failglob {
-                        // failglob: would error, but for now just return pattern
-                        vec![expanded]
+                        vec![expanded.to_string()]
                     } else {
-                        // Default: return pattern as-is
-                        vec![expanded]
+                        vec![expanded.to_string()]
                     }
                 } else {
                     results.sort();
                     results
                 }
             }
-            Err(_) => vec![expanded],
+            Err(_) => vec![expanded.to_string()],
         }
     } else {
-        vec![expanded]
+        vec![expanded.to_string()]
     }
 }
 
@@ -109,6 +244,73 @@ fn try_expand_array_split(name: &str, state: &mut ShellState) -> Option<Vec<Stri
         }
     }
     None
+}
+
+/// Does this word reference $@ or $* (top-level or inside double quotes)?
+fn word_contains_at_star(word: &Word) -> bool {
+    word.iter().any(part_refs_at_star)
+}
+
+fn part_refs_at_star(part: &WordPart) -> bool {
+    match part {
+        WordPart::Variable(name) => name == "@" || name == "*",
+        WordPart::DoubleQuoted(parts) => parts.iter().any(part_refs_at_star),
+        _ => false,
+    }
+}
+
+/// First character of IFS (used to join "$*"). Default is a space; an empty IFS
+/// joins with no separator.
+fn ifs_first(state: &ShellState) -> String {
+    match state.get_var("IFS") {
+        Some(s) => s.chars().next().map(|c| c.to_string()).unwrap_or_default(),
+        None => " ".to_string(),
+    }
+}
+
+/// Expand a list of parts into separate fields, honoring $@/$* splitting rules.
+/// `quoted` indicates the parts are inside double quotes (affects $* joining).
+fn expand_parts_to_fields(parts: &[WordPart], state: &mut ShellState, quoted: bool) -> Vec<String> {
+    let mut fields: Vec<String> = vec![String::new()];
+    for part in parts {
+        match part {
+            WordPart::Variable(name) if name == "@" => {
+                let params = state.positional_params.clone();
+                append_fields(&mut fields, params);
+            }
+            WordPart::Variable(name) if name == "*" => {
+                if quoted {
+                    let sep = ifs_first(state);
+                    let joined = state.positional_params.join(&sep);
+                    fields.last_mut().unwrap().push_str(&joined);
+                } else {
+                    let params = state.positional_params.clone();
+                    append_fields(&mut fields, params);
+                }
+            }
+            WordPart::DoubleQuoted(inner) => {
+                let sub = expand_parts_to_fields(inner, state, true);
+                append_fields(&mut fields, sub);
+            }
+            other => {
+                let s = expand_part(other, state);
+                fields.last_mut().unwrap().push_str(&s);
+            }
+        }
+    }
+    fields
+}
+
+/// Merge additional fields: the first attaches to the current trailing field,
+/// the rest become new fields. Empty input leaves `fields` untouched.
+fn append_fields(fields: &mut Vec<String>, more: Vec<String>) {
+    let mut iter = more.into_iter();
+    if let Some(first) = iter.next() {
+        fields.last_mut().unwrap().push_str(&first);
+        for f in iter {
+            fields.push(f);
+        }
+    }
 }
 
 /// Expand a Word into a single string (no word splitting/globbing).
@@ -153,7 +355,9 @@ fn expand_variable(name: &str, state: &mut ShellState) -> String {
         "!" => state.last_bg_pid.map_or(String::new(), |p| p.to_string()),
         "#" => state.positional_params.len().to_string(),
         "@" | "*" => state.positional_params.join(" "),
-        "0" => std::env::current_exe().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|_| "rsh".into()),
+        "0" => std::env::current_exe().ok()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+            .unwrap_or_else(|| "rsh".into()),
         _ if name.len() <= 3 && name.chars().all(|c| c.is_ascii_digit()) => {
             let idx: usize = name.parse().unwrap_or(0);
             if idx > 0 && idx <= state.positional_params.len() {
@@ -338,65 +542,137 @@ fn expand_parameter(name: &str, state: &mut ShellState) -> String {
             return val.len().to_string();
         }
     }
-    // ${var##pattern} (greedy prefix strip)
-    if let Some(pos) = name.find("##") {
-        let var = &name[..pos];
-        let pat = &name[pos + 2..];
-        let val = state.get_var(var).unwrap_or("");
-        for i in (0..=val.len()).rev() {
-            if match_glob(pat, &val[..i]) { return val[i..].to_string(); }
-        }
-        return val.to_string();
-    }
-    // ${var#pattern} (shortest prefix strip)
-    if let Some(pos) = name.find('#') {
-        let var = &name[..pos];
-        let pat = &name[pos + 1..];
-        if !var.is_empty() {
-            let val = state.get_var(var).unwrap_or("");
-            for i in 0..=val.len() {
-                if match_glob(pat, &val[..i]) { return val[i..].to_string(); }
+    // Pattern operators: #/## (prefix strip), %/%% (suffix strip), / (replace).
+    // Dispatch on the FIRST of #, %, / after the variable name so that a # or %
+    // appearing inside a /replacement (e.g. ${v/#a/X}, ${v/%c/Y}) is not
+    // mistaken for a strip operator. Array subscripts in [...] are skipped.
+    if let Some(op) = find_pattern_op(name) {
+        let var = &name[..op];
+        let val = state.get_var(var).unwrap_or("").to_string();
+        let spec = &name[op..];
+        match spec.as_bytes()[0] {
+            b'#' => {
+                if let Some(pat) = spec.strip_prefix("##") {
+                    // greedy (longest) prefix strip
+                    for i in (0..=val.len()).rev() {
+                        if val.is_char_boundary(i) && match_glob(pat, &val[..i]) { return val[i..].to_string(); }
+                    }
+                } else {
+                    let pat = &spec[1..];
+                    for i in 0..=val.len() {
+                        if val.is_char_boundary(i) && match_glob(pat, &val[..i]) { return val[i..].to_string(); }
+                    }
+                }
+                return val;
             }
-            return val.to_string();
+            b'%' => {
+                if let Some(pat) = spec.strip_prefix("%%") {
+                    // greedy (longest) suffix strip
+                    for i in 0..=val.len() {
+                        if val.is_char_boundary(i) && match_glob(pat, &val[i..]) { return val[..i].to_string(); }
+                    }
+                } else {
+                    let pat = &spec[1..];
+                    for i in (0..=val.len()).rev() {
+                        if val.is_char_boundary(i) && match_glob(pat, &val[i..]) { return val[..i].to_string(); }
+                    }
+                }
+                return val;
+            }
+            b'/' => return pattern_replace(&val, spec),
+            _ => {}
         }
-    }
-    // ${var%%pattern} (greedy suffix strip)
-    if let Some(pos) = name.find("%%") {
-        let var = &name[..pos];
-        let pat = &name[pos + 2..];
-        let val = state.get_var(var).unwrap_or("");
-        for i in 0..=val.len() {
-            if match_glob(pat, &val[i..]) { return val[..i].to_string(); }
-        }
-        return val.to_string();
-    }
-    // ${var%pattern} (shortest suffix strip)
-    if let Some(pos) = name.find('%') {
-        let var = &name[..pos];
-        let pat = &name[pos + 1..];
-        let val = state.get_var(var).unwrap_or("");
-        for i in (0..=val.len()).rev() {
-            if match_glob(pat, &val[i..]) { return val[..i].to_string(); }
-        }
-        return val.to_string();
-    }
-    // ${var//pattern/replacement} (global replace)
-    if let Some(pos) = name.find("//") {
-        let var = &name[..pos];
-        let rest = &name[pos + 2..];
-        let (pat, rep) = rest.split_once('/').unwrap_or((rest, ""));
-        let val = state.get_var(var).unwrap_or("");
-        return val.replace(pat, rep);
-    }
-    // ${var/pattern/replacement} (first replace)
-    if let Some(pos) = name.find('/') {
-        let var = &name[..pos];
-        let rest = &name[pos + 1..];
-        let (pat, rep) = rest.split_once('/').unwrap_or((rest, ""));
-        let val = state.get_var(var).unwrap_or("");
-        return val.replacen(pat, rep, 1);
     }
     state.get_var(name).unwrap_or("").to_string()
+}
+
+/// Index of the first #, %, or / that acts as a parameter-expansion operator
+/// (after a non-empty variable name, ignoring chars inside [...] subscripts).
+fn find_pattern_op(name: &str) -> Option<usize> {
+    let bytes = name.as_bytes();
+    let mut depth = 0i32;
+    for (i, &b) in bytes.iter().enumerate() {
+        match b {
+            b'[' => depth += 1,
+            b']' => if depth > 0 { depth -= 1; },
+            b'#' | b'%' | b'/' if depth == 0 && i > 0 => return Some(i),
+            _ => {}
+        }
+    }
+    None
+}
+
+enum ReplaceAnchor { None, Start, End }
+
+/// Handle ${var/pat/rep}, ${var//pat/rep}, ${var/#pat/rep}, ${var/%pat/rep}.
+/// `spec` begins with '/'. The pattern is a shell glob.
+fn pattern_replace(val: &str, spec: &str) -> String {
+    let global = spec.starts_with("//");
+    let body = if global { &spec[2..] } else { &spec[1..] };
+    let (anchor, body) = if let Some(rest) = body.strip_prefix('#') {
+        (ReplaceAnchor::Start, rest)
+    } else if let Some(rest) = body.strip_prefix('%') {
+        (ReplaceAnchor::End, rest)
+    } else {
+        (ReplaceAnchor::None, body)
+    };
+    let (pat, rep) = body.split_once('/').unwrap_or((body, ""));
+    if pat.is_empty() {
+        return val.to_string();
+    }
+
+    match anchor {
+        ReplaceAnchor::Start => {
+            // longest prefix matching pat
+            for i in (1..=val.len()).rev() {
+                if val.is_char_boundary(i) && match_glob(pat, &val[..i]) {
+                    return format!("{}{}", rep, &val[i..]);
+                }
+            }
+            val.to_string()
+        }
+        ReplaceAnchor::End => {
+            // longest suffix matching pat
+            for i in 0..val.len() {
+                if val.is_char_boundary(i) && match_glob(pat, &val[i..]) {
+                    return format!("{}{}", &val[..i], rep);
+                }
+            }
+            val.to_string()
+        }
+        ReplaceAnchor::None => {
+            let mut result = String::new();
+            let mut i = 0;
+            let mut done = false;
+            while i < val.len() {
+                let matched_len = if !done || global {
+                    longest_match_at(pat, &val[i..])
+                } else {
+                    None
+                };
+                if let Some(l) = matched_len {
+                    result.push_str(rep);
+                    i += l;
+                    done = true;
+                } else {
+                    let ch = val[i..].chars().next().unwrap();
+                    result.push(ch);
+                    i += ch.len_utf8();
+                }
+            }
+            result
+        }
+    }
+}
+
+/// Longest non-empty prefix length of `s` matching glob `pat`, if any.
+fn longest_match_at(pat: &str, s: &str) -> Option<usize> {
+    for l in (1..=s.len()).rev() {
+        if s.is_char_boundary(l) && match_glob(pat, &s[..l]) {
+            return Some(l);
+        }
+    }
+    None
 }
 
 fn expand_brace_items(items: &[Vec<WordPart>], state: &mut ShellState) -> Vec<String> {
@@ -586,7 +862,8 @@ fn expand_process_sub(cmd: &str, kind: &ProcessSubKind, state: &mut ShellState) 
                 Err(_) => std::process::exit(2),
             }
         }
-        Ok(ForkResult::Parent { .. }) => {
+        Ok(ForkResult::Parent { child }) => {
+            state.procsub_pids.push(child.as_raw());
             match kind {
                 ProcessSubKind::Input => {
                     close(w).ok();
@@ -607,53 +884,11 @@ fn expand_process_sub(cmd: &str, kind: &ProcessSubKind, state: &mut ShellState) 
 }
 
 pub fn expand_arithmetic(expr: &str, state: &mut ShellState) -> String {
-    let expanded = expand_arith_vars(expr, state);
-    match eval_arithmetic(&expanded) {
+    let tokens = tokenize_arith(expr);
+    match eval_arith_expr(&tokens, &mut 0, state) {
         Ok(n) => n.to_string(),
         Err(_) => String::from("0"),
     }
-}
-
-fn expand_arith_vars(expr: &str, state: &mut ShellState) -> String {
-    let mut result = String::new();
-    let mut chars = expr.chars().peekable();
-    while let Some(&c) = chars.peek() {
-        if c == '$' {
-            chars.next();
-            let mut var = String::new();
-            while let Some(&c2) = chars.peek() {
-                if c2.is_alphanumeric() || c2 == '_' {
-                    var.push(c2);
-                    chars.next();
-                } else {
-                    break;
-                }
-            }
-            if !var.is_empty() {
-                result.push_str(state.get_var(&var).unwrap_or("0"));
-            }
-        } else if c.is_alphabetic() || c == '_' {
-            let mut var = String::new();
-            while let Some(&c2) = chars.peek() {
-                if c2.is_alphanumeric() || c2 == '_' {
-                    var.push(c2);
-                    chars.next();
-                } else {
-                    break;
-                }
-            }
-            result.push_str(state.get_var(&var).unwrap_or("0"));
-        } else {
-            result.push(c);
-            chars.next();
-        }
-    }
-    result
-}
-
-fn eval_arithmetic(expr: &str) -> Result<i64, String> {
-    let tokens = tokenize_arith(expr);
-    parse_arith_expr(&tokens, &mut 0)
 }
 
 fn tokenize_arith(expr: &str) -> Vec<ArithToken> {
@@ -661,41 +896,102 @@ fn tokenize_arith(expr: &str) -> Vec<ArithToken> {
     let mut chars = expr.chars().peekable();
     while let Some(&c) = chars.peek() {
         match c {
-            ' ' | '\t' => { chars.next(); }
+            ' ' | '\t' | '\n' => { chars.next(); }
             '0'..='9' => {
                 let mut n = String::new();
-                while let Some(&d) = chars.peek() {
-                    if d.is_ascii_digit() { n.push(d); chars.next(); } else { break; }
+                // Handle hex (0x), octal (0) prefixes
+                if c == '0' {
+                    n.push(c);
+                    chars.next();
+                    match chars.peek() {
+                        Some(&'x') | Some(&'X') => {
+                            n.push('x');
+                            chars.next();
+                            while let Some(&d) = chars.peek() {
+                                if d.is_ascii_hexdigit() { n.push(d); chars.next(); } else { break; }
+                            }
+                        }
+                        _ => {
+                            while let Some(&d) = chars.peek() {
+                                if d.is_ascii_digit() { n.push(d); chars.next(); } else { break; }
+                            }
+                        }
+                    }
+                } else {
+                    while let Some(&d) = chars.peek() {
+                        if d.is_ascii_digit() { n.push(d); chars.next(); } else { break; }
+                    }
                 }
-                tokens.push(ArithToken::Num(n.parse().unwrap_or(0)));
+                let val = if n.starts_with("0x") || n.starts_with("0X") {
+                    i64::from_str_radix(&n[2..], 16).unwrap_or(0)
+                } else if n.starts_with('0') && n.len() > 1 {
+                    i64::from_str_radix(&n[1..], 8).unwrap_or(0)
+                } else {
+                    n.parse().unwrap_or(0)
+                };
+                tokens.push(ArithToken::Num(val));
             }
-            '+' => { chars.next(); tokens.push(ArithToken::Plus); }
-            '-' => { chars.next(); tokens.push(ArithToken::Minus); }
-            '*' => { chars.next(); tokens.push(ArithToken::Star); }
-            '/' => { chars.next(); tokens.push(ArithToken::Slash); }
-            '%' => { chars.next(); tokens.push(ArithToken::Percent); }
+            'a'..='z' | 'A'..='Z' | '_' => {
+                let mut name = String::new();
+                while let Some(&c2) = chars.peek() {
+                    if c2.is_alphanumeric() || c2 == '_' { name.push(c2); chars.next(); } else { break; }
+                }
+                tokens.push(ArithToken::Ident(name));
+            }
+            '$' => {
+                chars.next();
+                let mut name = String::new();
+                while let Some(&c2) = chars.peek() {
+                    if c2.is_alphanumeric() || c2 == '_' { name.push(c2); chars.next(); } else { break; }
+                }
+                tokens.push(ArithToken::Ident(name));
+            }
+            '+' => {
+                chars.next();
+                match chars.peek() {
+                    Some(&'+') => { chars.next(); tokens.push(ArithToken::Increment); }
+                    Some(&'=') => { chars.next(); tokens.push(ArithToken::PlusAssign); }
+                    _ => tokens.push(ArithToken::Plus),
+                }
+            }
+            '-' => {
+                chars.next();
+                match chars.peek() {
+                    Some(&'-') => { chars.next(); tokens.push(ArithToken::Decrement); }
+                    Some(&'=') => { chars.next(); tokens.push(ArithToken::MinusAssign); }
+                    _ => tokens.push(ArithToken::Minus),
+                }
+            }
+            '*' => {
+                chars.next();
+                if chars.peek() == Some(&'=') { chars.next(); tokens.push(ArithToken::StarAssign); }
+                else { tokens.push(ArithToken::Star); }
+            }
+            '/' => {
+                chars.next();
+                if chars.peek() == Some(&'=') { chars.next(); tokens.push(ArithToken::SlashAssign); }
+                else { tokens.push(ArithToken::Slash); }
+            }
+            '%' => {
+                chars.next();
+                if chars.peek() == Some(&'=') { chars.next(); tokens.push(ArithToken::PercentAssign); }
+                else { tokens.push(ArithToken::Percent); }
+            }
             '(' => { chars.next(); tokens.push(ArithToken::LParen); }
             ')' => { chars.next(); tokens.push(ArithToken::RParen); }
             '?' => { chars.next(); tokens.push(ArithToken::Question); }
             ':' => { chars.next(); tokens.push(ArithToken::Colon); }
             '~' => { chars.next(); tokens.push(ArithToken::BitNot); }
+            ',' => { chars.next(); tokens.push(ArithToken::Comma); }
             '&' => {
                 chars.next();
-                if chars.peek() == Some(&'&') {
-                    chars.next();
-                    tokens.push(ArithToken::LogicalAnd);
-                } else {
-                    tokens.push(ArithToken::BitAnd);
-                }
+                if chars.peek() == Some(&'&') { chars.next(); tokens.push(ArithToken::LogicalAnd); }
+                else { tokens.push(ArithToken::BitAnd); }
             }
             '|' => {
                 chars.next();
-                if chars.peek() == Some(&'|') {
-                    chars.next();
-                    tokens.push(ArithToken::LogicalOr);
-                } else {
-                    tokens.push(ArithToken::BitOr);
-                }
+                if chars.peek() == Some(&'|') { chars.next(); tokens.push(ArithToken::LogicalOr); }
+                else { tokens.push(ArithToken::BitOr); }
             }
             '^' => { chars.next(); tokens.push(ArithToken::BitXor); }
             '<' => {
@@ -703,7 +999,7 @@ fn tokenize_arith(expr: &str) -> Vec<ArithToken> {
                 match chars.peek() {
                     Some(&'=') => { chars.next(); tokens.push(ArithToken::Le); }
                     Some(&'<') => { chars.next(); tokens.push(ArithToken::LShift); }
-                    _ => { tokens.push(ArithToken::Lt); }
+                    _ => tokens.push(ArithToken::Lt),
                 }
             }
             '>' => {
@@ -711,24 +1007,18 @@ fn tokenize_arith(expr: &str) -> Vec<ArithToken> {
                 match chars.peek() {
                     Some(&'=') => { chars.next(); tokens.push(ArithToken::Ge); }
                     Some(&'>') => { chars.next(); tokens.push(ArithToken::RShift); }
-                    _ => { tokens.push(ArithToken::Gt); }
+                    _ => tokens.push(ArithToken::Gt),
                 }
             }
             '=' => {
                 chars.next();
-                if chars.peek() == Some(&'=') {
-                    chars.next();
-                    tokens.push(ArithToken::Eq);
-                }
+                if chars.peek() == Some(&'=') { chars.next(); tokens.push(ArithToken::Eq); }
+                else { tokens.push(ArithToken::Assign); }
             }
             '!' => {
                 chars.next();
-                if chars.peek() == Some(&'=') {
-                    chars.next();
-                    tokens.push(ArithToken::Ne);
-                } else {
-                    tokens.push(ArithToken::Not);
-                }
+                if chars.peek() == Some(&'=') { chars.next(); tokens.push(ArithToken::Ne); }
+                else { tokens.push(ArithToken::Not); }
             }
             _ => { chars.next(); }
         }
@@ -738,156 +1028,202 @@ fn tokenize_arith(expr: &str) -> Vec<ArithToken> {
 
 #[derive(Debug, Clone)]
 enum ArithToken {
-    // Literals
     Num(i64),
-
-    // Arithmetic operators
+    Ident(String),
     Plus, Minus, Star, Slash, Percent,
-
-    // Bitwise operators
-    BitAnd, BitOr, BitXor, BitNot,
-    LShift, RShift,
-
-    // Logical operators
+    Increment, Decrement,
+    Assign, PlusAssign, MinusAssign, StarAssign, SlashAssign, PercentAssign,
+    BitAnd, BitOr, BitXor, BitNot, LShift, RShift,
     LogicalAnd, LogicalOr, Not,
-
-    // Comparison operators
     Lt, Le, Gt, Ge, Eq, Ne,
-
-    // Ternary operator
-    Question, Colon,
-
-    // Parentheses
+    Question, Colon, Comma,
     LParen, RParen,
 }
 
-fn parse_arith_expr(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, String> {
-    parse_arith_ternary(tokens, pos)
+fn eval_arith_expr(tokens: &[ArithToken], pos: &mut usize, state: &mut ShellState) -> Result<i64, String> {
+    let val = eval_arith_assign(tokens, pos, state)?;
+    while *pos < tokens.len() && matches!(tokens.get(*pos), Some(ArithToken::Comma)) {
+        *pos += 1;
+        return eval_arith_expr(tokens, pos, state);
+    }
+    Ok(val)
 }
 
-fn parse_arith_ternary(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, String> {
-    let mut cond = parse_arith_logical_or(tokens, pos)?;
+fn eval_arith_assign(tokens: &[ArithToken], pos: &mut usize, state: &mut ShellState) -> Result<i64, String> {
+    let save_pos = *pos;
+    if let Some(ArithToken::Ident(name)) = tokens.get(*pos) {
+        let name = name.clone();
+        *pos += 1;
+        match tokens.get(*pos) {
+            Some(ArithToken::Assign) => {
+                *pos += 1;
+                let val = eval_arith_assign(tokens, pos, state)?;
+                state.set_var(&name, &val.to_string());
+                return Ok(val);
+            }
+            Some(ArithToken::PlusAssign) => {
+                *pos += 1;
+                let cur = get_var_value(&name, state);
+                let val = cur + eval_arith_assign(tokens, pos, state)?;
+                state.set_var(&name, &val.to_string());
+                return Ok(val);
+            }
+            Some(ArithToken::MinusAssign) => {
+                *pos += 1;
+                let cur = get_var_value(&name, state);
+                let val = cur - eval_arith_assign(tokens, pos, state)?;
+                state.set_var(&name, &val.to_string());
+                return Ok(val);
+            }
+            Some(ArithToken::StarAssign) => {
+                *pos += 1;
+                let cur = get_var_value(&name, state);
+                let val = cur * eval_arith_assign(tokens, pos, state)?;
+                state.set_var(&name, &val.to_string());
+                return Ok(val);
+            }
+            Some(ArithToken::SlashAssign) => {
+                *pos += 1;
+                let cur = get_var_value(&name, state);
+                let rhs = eval_arith_assign(tokens, pos, state)?;
+                if rhs == 0 { return Err("division by zero".into()); }
+                let val = cur / rhs;
+                state.set_var(&name, &val.to_string());
+                return Ok(val);
+            }
+            Some(ArithToken::PercentAssign) => {
+                *pos += 1;
+                let cur = get_var_value(&name, state);
+                let rhs = eval_arith_assign(tokens, pos, state)?;
+                if rhs == 0 { return Err("division by zero".into()); }
+                let val = cur % rhs;
+                state.set_var(&name, &val.to_string());
+                return Ok(val);
+            }
+            _ => {}
+        }
+    }
+    *pos = save_pos;
+    eval_arith_ternary(tokens, pos, state)
+}
+
+fn eval_arith_ternary(tokens: &[ArithToken], pos: &mut usize, state: &mut ShellState) -> Result<i64, String> {
+    let cond = eval_arith_logical_or(tokens, pos, state)?;
     if *pos < tokens.len() && matches!(tokens.get(*pos), Some(ArithToken::Question)) {
         *pos += 1;
-        let true_val = parse_arith_ternary(tokens, pos)?;
+        let true_val = eval_arith_assign(tokens, pos, state)?;
         if *pos < tokens.len() && matches!(tokens.get(*pos), Some(ArithToken::Colon)) {
             *pos += 1;
-            let false_val = parse_arith_ternary(tokens, pos)?;
-            cond = if cond != 0 { true_val } else { false_val };
+            let false_val = eval_arith_assign(tokens, pos, state)?;
+            return Ok(if cond != 0 { true_val } else { false_val });
         }
     }
     Ok(cond)
 }
 
-fn parse_arith_logical_or(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, String> {
-    let mut left = parse_arith_logical_and(tokens, pos)?;
+fn eval_arith_logical_or(tokens: &[ArithToken], pos: &mut usize, state: &mut ShellState) -> Result<i64, String> {
+    let mut left = eval_arith_logical_and(tokens, pos, state)?;
     while *pos < tokens.len() && matches!(tokens.get(*pos), Some(ArithToken::LogicalOr)) {
         *pos += 1;
-        // Short-circuit evaluation: if left is non-zero, result is 1
-        if left != 0 {
-            return Ok(1);
-        }
-        let right = parse_arith_logical_and(tokens, pos)?;
+        if left != 0 { let _ = eval_arith_logical_and(tokens, pos, state)?; return Ok(1); }
+        let right = eval_arith_logical_and(tokens, pos, state)?;
         left = if right != 0 { 1 } else { 0 };
     }
     Ok(left)
 }
 
-fn parse_arith_logical_and(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, String> {
-    let mut left = parse_arith_bitwise_or(tokens, pos)?;
+fn eval_arith_logical_and(tokens: &[ArithToken], pos: &mut usize, state: &mut ShellState) -> Result<i64, String> {
+    let mut left = eval_arith_bitwise_or(tokens, pos, state)?;
     while *pos < tokens.len() && matches!(tokens.get(*pos), Some(ArithToken::LogicalAnd)) {
         *pos += 1;
-        // Short-circuit evaluation: if left is zero, result is 0
-        if left == 0 {
-            return Ok(0);
-        }
-        let right = parse_arith_bitwise_or(tokens, pos)?;
+        if left == 0 { let _ = eval_arith_bitwise_or(tokens, pos, state)?; return Ok(0); }
+        let right = eval_arith_bitwise_or(tokens, pos, state)?;
         left = if right != 0 { 1 } else { 0 };
     }
     Ok(left)
 }
 
-fn parse_arith_bitwise_or(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, String> {
-    let mut left = parse_arith_bitwise_xor(tokens, pos)?;
+fn eval_arith_bitwise_or(tokens: &[ArithToken], pos: &mut usize, state: &mut ShellState) -> Result<i64, String> {
+    let mut left = eval_arith_bitwise_xor(tokens, pos, state)?;
     while *pos < tokens.len() && matches!(tokens.get(*pos), Some(ArithToken::BitOr)) {
         *pos += 1;
-        left |= parse_arith_bitwise_xor(tokens, pos)?;
+        left |= eval_arith_bitwise_xor(tokens, pos, state)?;
     }
     Ok(left)
 }
 
-fn parse_arith_bitwise_xor(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, String> {
-    let mut left = parse_arith_bitwise_and(tokens, pos)?;
+fn eval_arith_bitwise_xor(tokens: &[ArithToken], pos: &mut usize, state: &mut ShellState) -> Result<i64, String> {
+    let mut left = eval_arith_bitwise_and(tokens, pos, state)?;
     while *pos < tokens.len() && matches!(tokens.get(*pos), Some(ArithToken::BitXor)) {
         *pos += 1;
-        left ^= parse_arith_bitwise_and(tokens, pos)?;
+        left ^= eval_arith_bitwise_and(tokens, pos, state)?;
     }
     Ok(left)
 }
 
-fn parse_arith_bitwise_and(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, String> {
-    let mut left = parse_arith_comparison(tokens, pos)?;
+fn eval_arith_bitwise_and(tokens: &[ArithToken], pos: &mut usize, state: &mut ShellState) -> Result<i64, String> {
+    let mut left = eval_arith_comparison(tokens, pos, state)?;
     while *pos < tokens.len() && matches!(tokens.get(*pos), Some(ArithToken::BitAnd)) {
         *pos += 1;
-        left &= parse_arith_comparison(tokens, pos)?;
+        left &= eval_arith_comparison(tokens, pos, state)?;
     }
     Ok(left)
 }
 
-fn parse_arith_comparison(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, String> {
-    let mut left = parse_arith_shift(tokens, pos)?;
+fn eval_arith_comparison(tokens: &[ArithToken], pos: &mut usize, state: &mut ShellState) -> Result<i64, String> {
+    let mut left = eval_arith_shift(tokens, pos, state)?;
     while *pos < tokens.len() {
         match tokens.get(*pos) {
-            Some(ArithToken::Lt) => { *pos += 1; let r = parse_arith_shift(tokens, pos)?; left = if left < r { 1 } else { 0 }; }
-            Some(ArithToken::Le) => { *pos += 1; let r = parse_arith_shift(tokens, pos)?; left = if left <= r { 1 } else { 0 }; }
-            Some(ArithToken::Gt) => { *pos += 1; let r = parse_arith_shift(tokens, pos)?; left = if left > r { 1 } else { 0 }; }
-            Some(ArithToken::Ge) => { *pos += 1; let r = parse_arith_shift(tokens, pos)?; left = if left >= r { 1 } else { 0 }; }
-            Some(ArithToken::Eq) => { *pos += 1; let r = parse_arith_shift(tokens, pos)?; left = if left == r { 1 } else { 0 }; }
-            Some(ArithToken::Ne) => { *pos += 1; let r = parse_arith_shift(tokens, pos)?; left = if left != r { 1 } else { 0 }; }
+            Some(ArithToken::Lt) => { *pos += 1; let r = eval_arith_shift(tokens, pos, state)?; left = if left < r { 1 } else { 0 }; }
+            Some(ArithToken::Le) => { *pos += 1; let r = eval_arith_shift(tokens, pos, state)?; left = if left <= r { 1 } else { 0 }; }
+            Some(ArithToken::Gt) => { *pos += 1; let r = eval_arith_shift(tokens, pos, state)?; left = if left > r { 1 } else { 0 }; }
+            Some(ArithToken::Ge) => { *pos += 1; let r = eval_arith_shift(tokens, pos, state)?; left = if left >= r { 1 } else { 0 }; }
+            Some(ArithToken::Eq) => { *pos += 1; let r = eval_arith_shift(tokens, pos, state)?; left = if left == r { 1 } else { 0 }; }
+            Some(ArithToken::Ne) => { *pos += 1; let r = eval_arith_shift(tokens, pos, state)?; left = if left != r { 1 } else { 0 }; }
             _ => break,
         }
     }
     Ok(left)
 }
 
-fn parse_arith_shift(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, String> {
-    let mut left = parse_arith_additive(tokens, pos)?;
+fn eval_arith_shift(tokens: &[ArithToken], pos: &mut usize, state: &mut ShellState) -> Result<i64, String> {
+    let mut left = eval_arith_additive(tokens, pos, state)?;
     while *pos < tokens.len() {
         match tokens.get(*pos) {
-            Some(ArithToken::LShift) => { *pos += 1; left <<= parse_arith_additive(tokens, pos)?; }
-            Some(ArithToken::RShift) => { *pos += 1; left >>= parse_arith_additive(tokens, pos)?; }
+            Some(ArithToken::LShift) => { *pos += 1; left <<= eval_arith_additive(tokens, pos, state)?; }
+            Some(ArithToken::RShift) => { *pos += 1; left >>= eval_arith_additive(tokens, pos, state)?; }
             _ => break,
         }
     }
     Ok(left)
 }
 
-fn parse_arith_additive(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, String> {
-    let mut left = parse_arith_term(tokens, pos)?;
+fn eval_arith_additive(tokens: &[ArithToken], pos: &mut usize, state: &mut ShellState) -> Result<i64, String> {
+    let mut left = eval_arith_term(tokens, pos, state)?;
     while *pos < tokens.len() {
         match tokens.get(*pos) {
-            Some(ArithToken::Plus) => { *pos += 1; left += parse_arith_term(tokens, pos)?; }
-            Some(ArithToken::Minus) => { *pos += 1; left -= parse_arith_term(tokens, pos)?; }
+            Some(ArithToken::Plus) => { *pos += 1; left += eval_arith_term(tokens, pos, state)?; }
+            Some(ArithToken::Minus) => { *pos += 1; left -= eval_arith_term(tokens, pos, state)?; }
             _ => break,
         }
     }
     Ok(left)
 }
 
-fn parse_arith_term(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, String> {
-    let mut left = parse_arith_unary(tokens, pos)?;
+fn eval_arith_term(tokens: &[ArithToken], pos: &mut usize, state: &mut ShellState) -> Result<i64, String> {
+    let mut left = eval_arith_unary(tokens, pos, state)?;
     while *pos < tokens.len() {
         match tokens.get(*pos) {
-            Some(ArithToken::Star) => { *pos += 1; left *= parse_arith_unary(tokens, pos)?; }
+            Some(ArithToken::Star) => { *pos += 1; left *= eval_arith_unary(tokens, pos, state)?; }
             Some(ArithToken::Slash) => {
                 *pos += 1;
-                let r = parse_arith_unary(tokens, pos)?;
+                let r = eval_arith_unary(tokens, pos, state)?;
                 if r == 0 { return Err("division by zero".into()); }
                 left /= r;
             }
             Some(ArithToken::Percent) => {
                 *pos += 1;
-                let r = parse_arith_unary(tokens, pos)?;
+                let r = eval_arith_unary(tokens, pos, state)?;
                 if r == 0 { return Err("division by zero".into()); }
                 left %= r;
             }
@@ -897,22 +1233,65 @@ fn parse_arith_term(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, Strin
     Ok(left)
 }
 
-fn parse_arith_unary(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, String> {
+fn eval_arith_unary(tokens: &[ArithToken], pos: &mut usize, state: &mut ShellState) -> Result<i64, String> {
     match tokens.get(*pos) {
-        Some(ArithToken::Minus) => { *pos += 1; Ok(-parse_arith_unary(tokens, pos)?) }
-        Some(ArithToken::Plus) => { *pos += 1; parse_arith_unary(tokens, pos) }
-        Some(ArithToken::Not) => { *pos += 1; let v = parse_arith_unary(tokens, pos)?; Ok(if v == 0 { 1 } else { 0 }) }
-        Some(ArithToken::BitNot) => { *pos += 1; Ok(!parse_arith_unary(tokens, pos)?) }
-        _ => parse_arith_primary(tokens, pos),
+        Some(ArithToken::Minus) => { *pos += 1; Ok(-eval_arith_unary(tokens, pos, state)?) }
+        Some(ArithToken::Plus) => { *pos += 1; eval_arith_unary(tokens, pos, state) }
+        Some(ArithToken::Not) => { *pos += 1; let v = eval_arith_unary(tokens, pos, state)?; Ok(if v == 0 { 1 } else { 0 }) }
+        Some(ArithToken::BitNot) => { *pos += 1; Ok(!eval_arith_unary(tokens, pos, state)?) }
+        Some(ArithToken::Increment) => {
+            *pos += 1;
+            if let Some(ArithToken::Ident(name)) = tokens.get(*pos) {
+                let name = name.clone();
+                *pos += 1;
+                let val = get_var_value(&name, state) + 1;
+                state.set_var(&name, &val.to_string());
+                Ok(val)
+            } else { Ok(0) }
+        }
+        Some(ArithToken::Decrement) => {
+            *pos += 1;
+            if let Some(ArithToken::Ident(name)) = tokens.get(*pos) {
+                let name = name.clone();
+                *pos += 1;
+                let val = get_var_value(&name, state) - 1;
+                state.set_var(&name, &val.to_string());
+                Ok(val)
+            } else { Ok(0) }
+        }
+        _ => eval_arith_postfix(tokens, pos, state),
     }
 }
 
-fn parse_arith_primary(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, String> {
+fn eval_arith_postfix(tokens: &[ArithToken], pos: &mut usize, state: &mut ShellState) -> Result<i64, String> {
+    if let Some(ArithToken::Ident(name)) = tokens.get(*pos) {
+        let name = name.clone();
+        *pos += 1;
+        match tokens.get(*pos) {
+            Some(ArithToken::Increment) => {
+                *pos += 1;
+                let val = get_var_value(&name, state);
+                state.set_var(&name, &(val + 1).to_string());
+                return Ok(val);
+            }
+            Some(ArithToken::Decrement) => {
+                *pos += 1;
+                let val = get_var_value(&name, state);
+                state.set_var(&name, &(val - 1).to_string());
+                return Ok(val);
+            }
+            _ => return Ok(get_var_value(&name, state)),
+        }
+    }
+    eval_arith_primary(tokens, pos, state)
+}
+
+fn eval_arith_primary(tokens: &[ArithToken], pos: &mut usize, state: &mut ShellState) -> Result<i64, String> {
     match tokens.get(*pos) {
         Some(ArithToken::Num(n)) => { let n = *n; *pos += 1; Ok(n) }
         Some(ArithToken::LParen) => {
             *pos += 1;
-            let v = parse_arith_expr(tokens, pos)?;
+            let v = eval_arith_expr(tokens, pos, state)?;
             if matches!(tokens.get(*pos), Some(ArithToken::RParen)) {
                 *pos += 1;
             }
@@ -920,6 +1299,10 @@ fn parse_arith_primary(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, St
         }
         _ => Ok(0),
     }
+}
+
+fn get_var_value(name: &str, state: &ShellState) -> i64 {
+    state.get_var(name).unwrap_or("0").parse::<i64>().unwrap_or(0)
 }
 
 fn contains_glob(s: &str) -> bool {

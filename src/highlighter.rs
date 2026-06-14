@@ -71,7 +71,7 @@ pub fn highlight(buffer: &str, state: &mut ShellState) -> Vec<StyledSpan> {
                 StyledSpan { text, fg: Some(Color::Magenta), bold: false, underline: false }
             }
             Token::RedirectOut | Token::RedirectAppend | Token::RedirectIn |
-            Token::HereDoc | Token::HereString | Token::DupFd | Token::RedirectFd(_, _) => {
+            Token::HereDoc | Token::HereDocStrip | Token::HereString | Token::DupFd | Token::RedirectFd(_, _) => {
                 StyledSpan { text, fg: Some(Color::Blue), bold: false, underline: false }
             }
             Token::LParen | Token::RParen | Token::LBrace | Token::RBrace => {

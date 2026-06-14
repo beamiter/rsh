@@ -14,7 +14,7 @@ use crate::session;
 use crate::signal;
 use nix::libc;
 use nix::unistd::{getpgrp, getpid, setpgid, tcsetpgrp};
-use std::io::{self, BufRead};
+use std::io::{self, BufRead, Write};
 use std::sync::atomic::Ordering;
 
 pub struct Shell {
@@ -357,7 +357,11 @@ impl Shell {
                     break;
                 }
                 Err(e) => {
-                    eprintln!("rsh: editor error: {}", e);
+                    // A read_line error usually means the terminal/pty was torn down
+                    // (e.g. EIO once the master is closed). Don't use eprintln! here:
+                    // writing to a dead stderr fails and eprintln! would panic, which
+                    // would skip the session/history save below. Report best-effort.
+                    let _ = writeln!(io::stderr(), "rsh: editor error: {}", e);
                     break;
                 }
             }

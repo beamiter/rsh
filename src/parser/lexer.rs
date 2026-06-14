@@ -15,6 +15,7 @@ pub enum Token {
     RedirectAppend, // >>
     RedirectIn,   // <
     HereDoc,      // <<
+    HereDocStrip, // <<-
     HereString,   // <<<
     DupFd,        // >&
     RedirectAllOut, // &> (redirect stdout and stderr)
@@ -25,6 +26,8 @@ pub enum Token {
     LBrace,       // {   (reserved word)
     RBrace,       // }   (reserved word)
     DoubleSemi,   // ;;
+    SemiAmp,      // ;&   (case fall-through)
+    DoubleSemiAmp,// ;;&  (case continue-match)
     Newline,
     Eof,
 }
@@ -34,6 +37,8 @@ pub enum RedirectOp {
     Output,
     Append,
     Input,
+    DupOutput, // N>&M  duplicate output fd
+    DupInput,  // N<&M  duplicate input fd
 }
 
 #[derive(Debug, Clone)]
@@ -105,13 +110,16 @@ impl<'a> Lexer<'a> {
     }
 
     fn read_double_quoted(&mut self) -> String {
+        // Preserve backslash escapes verbatim so the parser's word-part stage can
+        // decide how to handle them (a backslash only escapes $ ` " \ newline inside
+        // double quotes). Backslash-newline is a line continuation and is removed.
         let mut s = String::new();
         loop {
             match self.next_char() {
                 Some('"') => break,
                 Some('\\') => {
                     match self.next_char() {
-                        Some(c @ ('$' | '`' | '"' | '\\' | '\n')) => s.push(c),
+                        Some('\n') => {} // line continuation
                         Some(c) => { s.push('\\'); s.push(c); }
                         None => { s.push('\\'); break; }
                     }
@@ -174,6 +182,44 @@ impl<'a> Lexer<'a> {
                             }
                         } else {
                             break; // normal redirect
+                        }
+                    }
+                    '$' if self.peek_char_at(1) == Some('\'') => {
+                        // ANSI-C quoting $'...' -- preserve backslash escapes so the
+                        // parser can decode them; a backslash-escaped ' does not close.
+                        self.next_char(); // $
+                        self.next_char(); // '
+                        word.push('$');
+                        word.push('\'');
+                        loop {
+                            match self.next_char() {
+                                Some('\'') => { word.push('\''); break; }
+                                Some('\\') => {
+                                    word.push('\\');
+                                    if let Some(c2) = self.next_char() { word.push(c2); }
+                                }
+                                Some(c2) => word.push(c2),
+                                None => break,
+                            }
+                        }
+                    }
+                    '$' if self.peek_char_at(1) == Some('(') => {
+                        // Command substitution $(...) or arithmetic $((...)).
+                        // Read the whole parenthesized group (naive paren counting,
+                        // matching the process-substitution reader above) so the
+                        // word-part parser can decode it later.
+                        self.next_char(); // $
+                        self.next_char(); // (
+                        word.push('$');
+                        word.push('(');
+                        let mut depth = 1;
+                        while let Some(c2) = self.next_char() {
+                            word.push(c2);
+                            if c2 == '(' { depth += 1; }
+                            if c2 == ')' {
+                                depth -= 1;
+                                if depth == 0 { break; }
+                            }
                         }
                     }
                     '\'' => {
@@ -244,7 +290,14 @@ impl<'a> Lexer<'a> {
             Some(';') => {
                 self.next_char();
                 match self.peek_char() {
-                    Some(';') => { self.next_char(); Token::DoubleSemi }
+                    Some(';') => {
+                        self.next_char();
+                        match self.peek_char() {
+                            Some('&') => { self.next_char(); Token::DoubleSemiAmp }
+                            _ => Token::DoubleSemi,
+                        }
+                    }
+                    Some('&') => { self.next_char(); Token::SemiAmp }
                     _ => Token::Semi,
                 }
             }
@@ -271,6 +324,7 @@ impl<'a> Lexer<'a> {
                         self.next_char();
                         match self.peek_char() {
                             Some('<') => { self.next_char(); Token::HereString }
+                            Some('-') => { self.next_char(); Token::HereDocStrip }
                             _ => Token::HereDoc,
                         }
                     }
@@ -301,14 +355,17 @@ impl<'a> Lexer<'a> {
                         self.next_char();
                         match self.peek_char() {
                             Some('>') => { self.next_char(); Token::RedirectFd(fd, RedirectOp::Append) }
-                            Some('&') => { self.next_char(); Token::RedirectFd(fd, RedirectOp::Output) }
+                            Some('&') => { self.next_char(); Token::RedirectFd(fd, RedirectOp::DupOutput) }
                             _ => Token::RedirectFd(fd, RedirectOp::Output),
                         }
                     }
                     Some('<') => {
                         let fd: i32 = num_str.parse().unwrap_or(0);
                         self.next_char();
-                        Token::RedirectFd(fd, RedirectOp::Input)
+                        match self.peek_char() {
+                            Some('&') => { self.next_char(); Token::RedirectFd(fd, RedirectOp::DupInput) }
+                            _ => Token::RedirectFd(fd, RedirectOp::Input),
+                        }
                     }
                     _ => {
                         // Not a redirect, read as word

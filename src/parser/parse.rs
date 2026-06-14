@@ -26,18 +26,43 @@ impl std::fmt::Display for ParseError {
     }
 }
 
+/// Split a C-style for header into its `init ; condition ; update` sections on
+/// top-level semicolons (those not nested inside parentheses).
+fn split_for_header(s: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut cur = String::new();
+    let mut depth = 0i32;
+    for c in s.chars() {
+        match c {
+            '(' => { depth += 1; cur.push(c); }
+            ')' => { depth -= 1; cur.push(c); }
+            ';' if depth == 0 => {
+                parts.push(cur.trim().to_string());
+                cur.clear();
+            }
+            _ => cur.push(c),
+        }
+    }
+    parts.push(cur.trim().to_string());
+    parts
+}
+
 pub struct Parser<'a> {
     lexer: Lexer<'a>,
     current: SpannedToken,
     peeked: Option<SpannedToken>,
     input: &'a str,
+    // Pending here-doc body regions to skip: (newline_trigger_pos, resume_pos).
+    // When the line-ending newline at trigger is consumed, the lexer jumps to
+    // resume, stepping over the here-doc body that was already collected.
+    heredoc_skips: Vec<(usize, usize)>,
 }
 
 impl<'a> Parser<'a> {
     pub fn new(input: &'a str) -> Self {
         let mut lexer = Lexer::new(input);
         let current = lexer.next_token();
-        Parser { lexer, current, peeked: None, input }
+        Parser { lexer, current, peeked: None, input, heredoc_skips: Vec::new() }
     }
 
     fn advance(&mut self) {
@@ -45,6 +70,21 @@ impl<'a> Parser<'a> {
             self.current = t;
         } else {
             self.current = self.lexer.next_token();
+        }
+        self.apply_heredoc_skip();
+    }
+
+    /// If the current token is a line-ending newline that has a pending here-doc
+    /// body after it, jump the lexer past that body.
+    fn apply_heredoc_skip(&mut self) {
+        if self.current.token != Token::Newline || self.heredoc_skips.is_empty() {
+            return;
+        }
+        let pos = self.current.span.0;
+        if let Some(i) = self.heredoc_skips.iter().position(|(trigger, _)| *trigger == pos) {
+            let (_, resume) = self.heredoc_skips.remove(i);
+            self.lexer.set_pos(resume.min(self.input.len()));
+            self.peeked = None;
         }
     }
 
@@ -67,42 +107,47 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn collect_here_doc_content(&mut self, delimiter: &str, strip_tabs: bool) -> String {
+    /// Collect a here-doc body. `after_delim` is the input offset just past the
+    /// delimiter word. The body begins at the first newline at/after that offset
+    /// (so any same-line tokens like `| sort` are left for normal lexing) and runs
+    /// until a line equal to the delimiter. A skip is registered so the lexer steps
+    /// over the body once the line-ending newline is consumed.
+    fn collect_here_doc_content(&mut self, delimiter: &str, strip_tabs: bool, after_delim: usize) -> String {
         let input = self.input;
-        let start_pos = self.lexer.pos();
+        let after_delim = after_delim.min(input.len());
 
-        // Read lines from the input until we find the delimiter
-        let remaining = &input[start_pos..];
+        // Find the newline that ends the line carrying the `<<` operator.
+        let nl1 = match input[after_delim..].find('\n') {
+            Some(off) => after_delim + off,
+            None => return String::new(), // no body present
+        };
+        let body_start = nl1 + 1;
+
+        let remaining = &input[body_start..];
         let mut content = String::new();
-        let mut line_start = 0;
+        let mut line_start = 0usize;
+        let mut resume = input.len();
 
         for line in remaining.lines() {
             let line_len = line.len();
-            let trimmed = if strip_tabs {
-                line.trim_start_matches('\t')
-            } else {
-                line
-            };
+            let trimmed = if strip_tabs { line.trim_start_matches('\t') } else { line };
 
-            // Check if this line is exactly the delimiter
             if trimmed == delimiter {
-                // Found the delimiter, advance position and break
-                let current_pos = start_pos + line_start + line_len + 1; // +1 for newline
-                self.lexer.set_pos(current_pos.min(input.len()));
+                resume = (body_start + line_start + line_len + 1).min(input.len());
                 break;
             }
 
-            // Add this line to content
             if !content.is_empty() {
                 content.push('\n');
             }
-            content.push_str(line);
-
-            line_start += line_len + 1; // +1 for newline
+            content.push_str(trimmed);
+            line_start += line_len + 1;
         }
 
-        // Re-sync the current token after updating position
-        self.current = self.lexer.next_token();
+        // Defer the body skip until the line-ending newline at nl1 is consumed.
+        self.heredoc_skips.push((nl1, resume));
+        // If that newline is the current (or buffered) token, the skip must fire now.
+        self.apply_heredoc_skip();
 
         content
     }
@@ -131,18 +176,19 @@ impl<'a> Parser<'a> {
     fn is_redirect(&self) -> bool {
         matches!(self.current.token,
             Token::RedirectOut | Token::RedirectAppend | Token::RedirectIn |
-            Token::HereDoc | Token::HereString | Token::DupFd |
+            Token::HereDoc | Token::HereDocStrip | Token::HereString | Token::DupFd |
             Token::RedirectAllOut | Token::RedirectAllAppend |
             Token::RedirectFd(_, _))
     }
 
     fn parse_redirect(&mut self) -> Result<Redirect, ParseError> {
+        let is_heredoc_strip = self.current.token == Token::HereDocStrip;
         let (fd, kind, is_here_doc) = match &self.current.token {
             Token::RedirectOut => (None, RedirectKind::Output, false),
             Token::RedirectAppend => (None, RedirectKind::Append, false),
             Token::RedirectIn => (None, RedirectKind::Input, false),
             Token::HereString => (None, RedirectKind::HereString, true),
-            Token::HereDoc => (None, RedirectKind::HereDoc, true),
+            Token::HereDoc | Token::HereDocStrip => (None, RedirectKind::HereDoc, true),
             Token::DupFd => (None, RedirectKind::DupOutput, false),
             Token::RedirectAllOut => (None, RedirectKind::OutputAll, false),
             Token::RedirectAllAppend => (None, RedirectKind::AppendAll, false),
@@ -152,31 +198,41 @@ impl<'a> Parser<'a> {
                     RedirectOp::Output => RedirectKind::Output,
                     RedirectOp::Append => RedirectKind::Append,
                     RedirectOp::Input => RedirectKind::Input,
+                    RedirectOp::DupOutput => RedirectKind::DupOutput,
+                    RedirectOp::DupInput => RedirectKind::DupInput,
                 };
                 (fd, kind, false)
             }
             _ => return Err(ParseError::Unexpected("expected redirect".into())),
         };
         self.advance();
+        // Anchor here-doc body collection to the end of the delimiter token, before
+        // expect_word advances the lexer (and any look-ahead) past it.
+        let delim_span_end = self.current.span.1;
         let target_str = self.expect_word()?;
 
         // For here-doc and here-string, collect the content
         let here_doc_opt = if is_here_doc {
             let delimiter = target_str.clone();
-            // Check if delimiter is escaped (starts with backslash) for no expansion
-            let expand_vars = !delimiter.starts_with('\\');
 
-            let content = if kind == RedirectKind::HereDoc {
-                self.collect_here_doc_content(&delimiter, false)
+            let (content, expand_vars) = if kind == RedirectKind::HereDoc {
+                // A quoted or backslash-escaped delimiter suppresses expansion.
+                let quoted = delimiter.starts_with('\\')
+                    || delimiter.starts_with('\'')
+                    || delimiter.starts_with('"');
+                let clean_delim = delimiter.trim_matches(|c| c == '\\' || c == '\'' || c == '"').to_string();
+                let c = self.collect_here_doc_content(&clean_delim, is_heredoc_strip, delim_span_end);
+                (c, !quoted)
             } else {
-                // HereString: content is the target string itself
-                format!("{}\n", delimiter)
+                // HereString: content is the target string itself; expansion happens
+                // later via the word-part stage (which respects its own quoting).
+                (format!("{}\n", delimiter), true)
             };
 
             Some(HereDocOptions {
                 delimiter,
                 content,
-                strip_tabs: false,  // TODO: detect <<- syntax
+                strip_tabs: is_heredoc_strip,
                 expand_vars,
             })
         } else {
@@ -376,76 +432,41 @@ impl<'a> Parser<'a> {
         self.advance(); // consume first (
         self.advance(); // consume second (
 
-        // Parse init expression (up to first semicolon)
-        let mut init = String::new();
-        while self.current.token != Token::Semi && self.current.token != Token::Eof {
-            if let Token::Word(w) = &self.current.token {
-                init.push_str(w);
-                init.push(' ');
-            }
-            self.advance();
-        }
-        if self.current.token == Token::Semi {
-            self.advance();
-        } else {
-            return Err(ParseError::Incomplete);
-        }
-
-        // Parse condition expression (up to second semicolon)
-        let mut condition = String::new();
-        while self.current.token != Token::Semi && self.current.token != Token::Eof {
-            if let Token::Word(w) = &self.current.token {
-                condition.push_str(w);
-                condition.push(' ');
-            }
-            self.advance();
-        }
-        if self.current.token == Token::Semi {
-            self.advance();
-        } else {
-            return Err(ParseError::Incomplete);
-        }
-
-        // Parse update expression (up to ))
-        let mut update = String::new();
-        let mut paren_depth = 0;
+        // Slice the raw header text between (( and )) directly from the source.
+        // This preserves arithmetic operators (<, >, ++, ...) that the lexer would
+        // otherwise split into separate tokens, and handles `;;` (lexed as
+        // DoubleSemi) in headers like `for ((;;))`.
+        let content_start = self.current.span.0;
+        let content_end;
+        let mut depth = 0i32;
         loop {
-            match &self.current.token {
-                Token::RParen => {
-                    if paren_depth == 0 {
-                        if let Token::RParen = self.peek() {
-                            self.advance(); // consume first )
-                            self.advance(); // consume second )
-                            break;
-                        }
-                    }
-                    paren_depth -= 1;
-                    if let Token::Word(w) = &self.current.token {
-                        update.push_str(w);
-                        update.push(' ');
-                    }
-                    self.advance();
-                }
-                Token::LParen => {
-                    paren_depth += 1;
-                    if let Token::Word(w) = &self.current.token {
-                        update.push_str(w);
-                        update.push(' ');
-                    }
-                    self.advance();
-                }
-                Token::Eof => return Err(ParseError::Incomplete),
-                Token::Word(w) => {
-                    update.push_str(w);
-                    update.push(' ');
-                    self.advance();
-                }
-                _ => {
-                    self.advance();
-                }
+            if self.current.token == Token::Eof {
+                return Err(ParseError::Incomplete);
             }
+            if self.current.token == Token::RParen && depth == 0 && *self.peek() == Token::RParen {
+                content_end = self.current.span.0;
+                self.advance(); // consume first )
+                self.advance(); // consume second )
+                break;
+            }
+            match self.current.token {
+                Token::LParen => depth += 1,
+                Token::RParen => depth -= 1,
+                _ => {}
+            }
+            self.advance();
         }
 
+        let raw = self.input.get(content_start..content_end).unwrap_or("");
+        let parts = split_for_header(raw);
+        let init = parts.get(0).cloned().unwrap_or_default();
+        let condition = parts.get(1).cloned().unwrap_or_default();
+        let update = parts.get(2).cloned().unwrap_or_default();
+
+        // Optional separator (`;` or newline) between )) and `do`.
+        if self.current.token == Token::Semi {
+            self.advance();
+        }
         self.skip_newlines();
         self.expect_keyword("do")?;
         self.skip_newlines();
@@ -514,11 +535,14 @@ impl<'a> Parser<'a> {
             self.advance();
             self.skip_newlines();
             let body = self.parse_command_list()?;
-            if self.current.token == Token::DoubleSemi {
-                self.advance();
-                self.skip_newlines();
-            }
-            arms.push(CaseArm { patterns, body });
+            let terminator = match self.current.token {
+                Token::DoubleSemi => { self.advance(); CaseTerminator::Break }
+                Token::SemiAmp => { self.advance(); CaseTerminator::FallThrough }
+                Token::DoubleSemiAmp => { self.advance(); CaseTerminator::ContinueMatch }
+                _ => CaseTerminator::Break, // last arm: directly before esac
+            };
+            self.skip_newlines();
+            arms.push(CaseArm { patterns, body, terminator });
         }
         self.expect_keyword("esac")?;
         let redirects = self.parse_optional_redirects()?;
@@ -1034,6 +1058,9 @@ pub fn parse_word_parts(raw: &str) -> Word {
                     if c2 == '"' { chars.next(); break; }
                     if c2 == '\\' {
                         chars.next();
+                        // Preserve the backslash; parse_word_parts_inner decides whether
+                        // it escapes the following char (only $ ` " \ are special here).
+                        inner.push('\\');
                         if let Some(&c3) = chars.peek() {
                             inner.push(c3);
                             chars.next();
@@ -1052,6 +1079,23 @@ pub fn parse_word_parts(raw: &str) -> Word {
                 }
                 chars.next();
                 match chars.peek() {
+                    Some(&'\'') => {
+                        // ANSI-C quoting $'...' -- decode escapes, no further expansion.
+                        chars.next();
+                        let mut raw = String::new();
+                        while let Some(&c2) = chars.peek() {
+                            if c2 == '\\' {
+                                raw.push('\\');
+                                chars.next();
+                                if let Some(&c3) = chars.peek() { raw.push(c3); chars.next(); }
+                                continue;
+                            }
+                            if c2 == '\'' { chars.next(); break; }
+                            raw.push(c2);
+                            chars.next();
+                        }
+                        parts.push(WordPart::SingleQuoted(decode_ansi_c(&raw)));
+                    }
                     Some(&'(') => {
                         chars.next();
                         if chars.peek() == Some(&'(') {
@@ -1274,7 +1318,32 @@ fn parse_word_parts_inner(input: &str) -> Vec<WordPart> {
     let mut literal = String::new();
 
     while let Some(&c) = chars.peek() {
-        if c == '$' {
+        if c == '\\' {
+            // Inside double quotes, backslash only escapes $ ` " \ (and newline).
+            chars.next();
+            match chars.peek() {
+                Some(&c2 @ ('$' | '`' | '"' | '\\')) => { literal.push(c2); chars.next(); }
+                Some(&'\n') => { chars.next(); } // line continuation
+                _ => literal.push('\\'),
+            }
+        } else if c == '`' {
+            if !literal.is_empty() {
+                parts.push(WordPart::Literal(std::mem::take(&mut literal)));
+            }
+            chars.next();
+            let mut cmd = String::new();
+            while let Some(&c2) = chars.peek() {
+                if c2 == '`' { chars.next(); break; }
+                if c2 == '\\' {
+                    chars.next();
+                    if let Some(&c3) = chars.peek() { cmd.push(c3); chars.next(); }
+                    continue;
+                }
+                cmd.push(c2);
+                chars.next();
+            }
+            parts.push(WordPart::CommandSub(cmd));
+        } else if c == '$' {
             if !literal.is_empty() {
                 parts.push(WordPart::Literal(std::mem::take(&mut literal)));
             }
@@ -1300,8 +1369,10 @@ fn parse_word_parts_inner(input: &str) -> Vec<WordPart> {
                 Some(&'{') => {
                     chars.next();
                     let mut var = String::new();
+                    let mut depth = 1;
                     while let Some(&c2) = chars.peek() {
-                        if c2 == '}' { chars.next(); break; }
+                        if c2 == '{' { depth += 1; }
+                        if c2 == '}' { depth -= 1; if depth == 0 { chars.next(); break; } }
                         var.push(c2);
                         chars.next();
                     }
@@ -1309,15 +1380,44 @@ fn parse_word_parts_inner(input: &str) -> Vec<WordPart> {
                 }
                 Some(&'(') => {
                     chars.next();
-                    let mut cmd = String::new();
-                    let mut depth = 1;
-                    while let Some(&c2) = chars.peek() {
-                        if c2 == '(' { depth += 1; }
-                        if c2 == ')' { depth -= 1; if depth == 0 { chars.next(); break; } }
-                        cmd.push(c2);
+                    if chars.peek() == Some(&'(') {
+                        // Arithmetic $((...))
                         chars.next();
+                        let mut expr = String::new();
+                        let mut depth = 1;
+                        while let Some(&c2) = chars.peek() {
+                            if c2 == ')' {
+                                chars.next();
+                                if chars.peek() == Some(&')') {
+                                    chars.next();
+                                    depth -= 1;
+                                    if depth == 0 { break; }
+                                    expr.push_str("))");
+                                } else {
+                                    expr.push(')');
+                                }
+                            } else if c2 == '(' {
+                                chars.next();
+                                depth += 1;
+                                expr.push('(');
+                            } else {
+                                expr.push(c2);
+                                chars.next();
+                            }
+                        }
+                        parts.push(WordPart::Arithmetic(expr));
+                    } else {
+                        // Command substitution $(...)
+                        let mut cmd = String::new();
+                        let mut depth = 1;
+                        while let Some(&c2) = chars.peek() {
+                            if c2 == '(' { depth += 1; }
+                            if c2 == ')' { depth -= 1; if depth == 0 { chars.next(); break; } }
+                            cmd.push(c2);
+                            chars.next();
+                        }
+                        parts.push(WordPart::CommandSub(cmd));
                     }
-                    parts.push(WordPart::CommandSub(cmd));
                 }
                 _ => literal.push('$'),
             }
@@ -1331,6 +1431,74 @@ fn parse_word_parts_inner(input: &str) -> Vec<WordPart> {
         parts.push(WordPart::Literal(literal));
     }
     parts
+}
+
+/// Decode ANSI-C escape sequences for $'...' quoting.
+fn decode_ansi_c(s: &str) -> String {
+    let mut out = String::new();
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('r') => out.push('\r'),
+            Some('a') => out.push('\u{07}'),
+            Some('b') => out.push('\u{08}'),
+            Some('e') | Some('E') => out.push('\u{1b}'),
+            Some('f') => out.push('\u{0c}'),
+            Some('v') => out.push('\u{0b}'),
+            Some('\\') => out.push('\\'),
+            Some('\'') => out.push('\''),
+            Some('"') => out.push('"'),
+            Some('?') => out.push('?'),
+            Some('x') => {
+                let mut hex = String::new();
+                while hex.len() < 2 {
+                    match chars.peek() {
+                        Some(&h) if h.is_ascii_hexdigit() => { hex.push(h); chars.next(); }
+                        _ => break,
+                    }
+                }
+                if let Ok(n) = u32::from_str_radix(&hex, 16) {
+                    if let Some(ch) = char::from_u32(n) { out.push(ch); }
+                } else {
+                    out.push('\\'); out.push('x'); out.push_str(&hex);
+                }
+            }
+            Some('u') => {
+                let mut hex = String::new();
+                while hex.len() < 4 {
+                    match chars.peek() {
+                        Some(&h) if h.is_ascii_hexdigit() => { hex.push(h); chars.next(); }
+                        _ => break,
+                    }
+                }
+                if let Ok(n) = u32::from_str_radix(&hex, 16) {
+                    if let Some(ch) = char::from_u32(n) { out.push(ch); }
+                }
+            }
+            Some(c @ '0'..='7') => {
+                let mut oct = String::new();
+                oct.push(c);
+                while oct.len() < 3 {
+                    match chars.peek() {
+                        Some(&o) if ('0'..='7').contains(&o) => { oct.push(o); chars.next(); }
+                        _ => break,
+                    }
+                }
+                if let Ok(n) = u32::from_str_radix(&oct, 8) {
+                    if let Some(ch) = char::from_u32(n) { out.push(ch); }
+                }
+            }
+            Some(other) => { out.push('\\'); out.push(other); }
+            None => out.push('\\'),
+        }
+    }
+    out
 }
 
 fn parse_brace_range(content: &str) -> Option<WordPart> {

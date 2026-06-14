@@ -15,7 +15,7 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "cd", "exit", "export", "unset", "echo", "printf", "pwd",
     "alias", "unalias", "type", "source", ".", "eval", "read",
     "true", "false", "test", "[", "return", "break", "continue",
-    "shift", "set", "local", "jobs", "fg", "bg", "history", "help",
+    "shift", "set", "local", "jobs", "fg", "bg", "wait", "history", "help",
     "pushd", "popd", "dirs", "trap", "command", "builtin", "[[",
     "declare", "z", "hook", "complete", "compgen", "disown", "shopt",
     "from-json", "to-json", "to-table", "where", "sort-by", "select",
@@ -73,7 +73,7 @@ pub fn run_builtin(name: &str, args: &[String], state: &mut ShellState) -> i32 {
         }
         "shift" => builtin_shift(state),
         "exec" => builtin_exec(args, state),
-        "help" => { println!("rsh: a fish-like shell with bash compatibility\nBuiltins: cd, exit, export, unset, echo, printf, pwd, alias, type, source,\n  eval, read, test, set, local, shift, jobs, fg, bg, history, pushd, popd,\n  dirs, trap, command, builtin, declare, z, bookmark, hook, complete, compgen,\n  disown, from-json, to-json, to-table, where, sort-by, select, help"); 0 }
+        "help" => builtin_help(args),
         "history" => builtin_history(state),
         "pushd" => builtin_pushd(args, state),
         "popd" => builtin_popd(state),
@@ -135,6 +135,7 @@ pub fn run_builtin(name: &str, args: &[String], state: &mut ShellState) -> i32 {
         "complete" => builtin_complete(args, state),
         "compgen" => builtin_compgen(args, state),
         "disown" => builtin_disown(args, state),
+        "wait" => builtin_wait(args, state),
         "shopt" => builtin_shopt(args, state),
         "from-json" => builtin_from_json(),
         "to-json" => builtin_to_json(),
@@ -1160,44 +1161,57 @@ fn builtin_history(_state: &ShellState) -> i32 {
 }
 
 fn builtin_printf(args: &[String]) -> i32 {
+    use std::io::Write;
     if args.is_empty() { return 0; }
     let fmt = &args[0];
     let params = &args[1..];
+    let mut out = String::new();
     let mut pi = 0;
-    let mut chars = fmt.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            match chars.next() {
-                Some('n') => print!("\n"),
-                Some('t') => print!("\t"),
-                Some('r') => print!("\r"),
-                Some('\\') => print!("\\"),
-                Some('0') => print!("\0"),
-                Some('a') => print!("\x07"),
-                Some('b') => print!("\x08"),
-                Some(c2) => { print!("\\{}", c2); }
-                None => print!("\\"),
+    // Reuse the format string over remaining arguments, like bash printf.
+    loop {
+        let start_pi = pi;
+        let mut consumed_conversion = false;
+        let mut chars = fmt.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\\' {
+                match chars.next() {
+                    Some('n') => out.push('\n'),
+                    Some('t') => out.push('\t'),
+                    Some('r') => out.push('\r'),
+                    Some('\\') => out.push('\\'),
+                    Some('0') => out.push('\0'),
+                    Some('a') => out.push('\x07'),
+                    Some('b') => out.push('\x08'),
+                    Some(c2) => { out.push('\\'); out.push(c2); }
+                    None => out.push('\\'),
+                }
+            } else if c == '%' {
+                let arg = params.get(pi).map(|s| s.as_str()).unwrap_or("");
+                match chars.next() {
+                    Some('s') => out.push_str(arg),
+                    Some('d') | Some('i') => out.push_str(&arg.parse::<i64>().unwrap_or(0).to_string()),
+                    Some('f') => out.push_str(&arg.parse::<f64>().unwrap_or(0.0).to_string()),
+                    Some('x') => out.push_str(&format!("{:x}", arg.parse::<i64>().unwrap_or(0))),
+                    Some('X') => out.push_str(&format!("{:X}", arg.parse::<i64>().unwrap_or(0))),
+                    Some('o') => out.push_str(&format!("{:o}", arg.parse::<i64>().unwrap_or(0))),
+                    Some('c') => out.push(arg.chars().next().unwrap_or('\0')),
+                    Some('%') => { out.push('%'); continue; }
+                    Some(c2) => { out.push('%'); out.push(c2); }
+                    None => out.push('%'),
+                }
+                pi += 1;
+                consumed_conversion = true;
+            } else {
+                out.push(c);
             }
-        } else if c == '%' {
-            let arg = params.get(pi).map(|s| s.as_str()).unwrap_or("");
-            match chars.next() {
-                Some('s') => print!("{}", arg),
-                Some('d') | Some('i') => print!("{}", arg.parse::<i64>().unwrap_or(0)),
-                Some('f') => print!("{}", arg.parse::<f64>().unwrap_or(0.0)),
-                Some('x') => print!("{:x}", arg.parse::<i64>().unwrap_or(0)),
-                Some('X') => print!("{:X}", arg.parse::<i64>().unwrap_or(0)),
-                Some('o') => print!("{:o}", arg.parse::<i64>().unwrap_or(0)),
-                Some('c') => print!("{}", arg.chars().next().unwrap_or('\0')),
-                Some('%') => { print!("%"); continue; }
-                Some(c2) => print!("%{}", c2),
-                None => print!("%"),
-            }
-            pi += 1;
-        } else {
-            print!("{}", c);
+        }
+        // A format with no arg-consuming conversion prints exactly once; otherwise
+        // repeat until all arguments are consumed.
+        if !consumed_conversion || pi >= params.len() || pi == start_pi {
+            break;
         }
     }
-    use std::io::Write;
+    print!("{}", out);
     std::io::stdout().flush().ok();
     0
 }
@@ -1823,7 +1837,7 @@ fn builtin_z(args: &[String], state: &mut ShellState) -> i32 {
 
     // Handle list/remove/clear operations with the lock held
     {
-        let mut z_db = z_db.lock().unwrap();
+        let mut z_db = z_db.lock().unwrap_or_else(|e| e.into_inner());
 
         if args.is_empty() || (args.len() == 1 && args[0] == "-l") {
             for (path, score) in z_db.list() {
@@ -1849,7 +1863,7 @@ fn builtin_z(args: &[String], state: &mut ShellState) -> i32 {
     // (which also acquires z_db lock)
     let keywords: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     let target = {
-        let z_db = z_db.lock().unwrap();
+        let z_db = z_db.lock().unwrap_or_else(|e| e.into_inner());
         z_db.query(&keywords)
     };
 
@@ -1999,27 +2013,106 @@ fn builtin_complete(args: &[String], state: &mut ShellState) -> i32 {
     0
 }
 
-fn builtin_compgen(args: &[String], _state: &mut ShellState) -> i32 {
+fn builtin_compgen(args: &[String], state: &mut ShellState) -> i32 {
     if args.is_empty() { return 0; }
     let mut word_list: Vec<String> = Vec::new();
+    let mut action: Option<&str> = None;
     let mut prefix = "";
+    let mut glob_pattern: Option<&str> = None;
     let mut i = 0;
 
     while i < args.len() {
         match args[i].as_str() {
             "-W" => { i += 1; if i < args.len() { word_list = args[i].split_whitespace().map(|s| s.to_string()).collect(); } }
+            "-A" => { i += 1; if i < args.len() { action = Some(args[i].as_str()); } }
+            "-c" => { action = Some("command"); }
+            "-b" => { action = Some("builtin"); }
+            "-a" => { action = Some("alias"); }
+            "-d" => { action = Some("directory"); }
+            "-f" => { action = Some("file"); }
+            "-v" => { action = Some("variable"); }
+            "-G" => { i += 1; if i < args.len() { glob_pattern = Some(args[i].as_str()); } }
             s if !s.starts_with('-') => { prefix = s; }
             _ => {}
         }
         i += 1;
     }
 
-    for word in &word_list {
-        if word.starts_with(prefix) {
-            println!("{}", word);
+    let mut results: Vec<String> = Vec::new();
+
+    if let Some(act) = action {
+        match act {
+            "command" => {
+                let cache = state.path_cache().clone();
+                results.extend(cache.into_iter().filter(|c| c.starts_with(prefix)));
+                results.extend(BUILTIN_NAMES.iter().filter(|b| b.starts_with(prefix)).map(|s| s.to_string()));
+            }
+            "builtin" => {
+                results.extend(BUILTIN_NAMES.iter().filter(|b| b.starts_with(prefix)).map(|s| s.to_string()));
+            }
+            "alias" => {
+                results.extend(state.aliases.keys().filter(|a| a.starts_with(prefix)).cloned());
+            }
+            "function" => {
+                results.extend(state.functions.keys().filter(|f| f.starts_with(prefix)).cloned());
+            }
+            "directory" => {
+                if let Ok(entries) = std::fs::read_dir(".") {
+                    for entry in entries.flatten() {
+                        if let Ok(ft) = entry.file_type() {
+                            if ft.is_dir() {
+                                if let Some(name) = entry.file_name().to_str() {
+                                    if name.starts_with(prefix) {
+                                        results.push(name.to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            "file" => {
+                if let Ok(entries) = std::fs::read_dir(".") {
+                    for entry in entries.flatten() {
+                        if let Some(name) = entry.file_name().to_str() {
+                            if name.starts_with(prefix) {
+                                results.push(name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            "variable" => {
+                results.extend(state.env_vars.keys().filter(|v| v.starts_with(prefix)).cloned());
+            }
+            _ => {}
         }
     }
-    0
+
+    if let Some(pat) = glob_pattern {
+        if let Ok(paths) = glob::glob(pat) {
+            for path in paths.flatten() {
+                if let Some(s) = path.to_str() {
+                    if prefix.is_empty() || s.starts_with(prefix) {
+                        results.push(s.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    for word in &word_list {
+        if word.starts_with(prefix) {
+            results.push(word.clone());
+        }
+    }
+
+    results.sort();
+    results.dedup();
+    for r in &results {
+        println!("{}", r);
+    }
+    if results.is_empty() { 1 } else { 0 }
 }
 
 // ============================================================
@@ -2052,6 +2145,60 @@ fn builtin_disown(args: &[String], state: &mut ShellState) -> i32 {
             1
         }
     }
+}
+
+fn builtin_wait(args: &[String], state: &mut ShellState) -> i32 {
+    use nix::sys::wait::{waitpid, WaitStatus, WaitPidFlag};
+    use nix::unistd::Pid;
+
+    if args.is_empty() {
+        loop {
+            match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
+                Ok(WaitStatus::Exited(pid, _)) | Ok(WaitStatus::Signaled(pid, _, _)) => {
+                    state.jobs.jobs.retain(|j| j.pid != pid);
+                }
+                _ => break,
+            }
+        }
+        return state.last_exit_code;
+    }
+
+    let mut last_status = 0;
+    for arg in args {
+        let pid_raw = if arg.starts_with('%') {
+            let id: Option<usize> = arg.trim_start_matches('%').parse().ok();
+            match id.and_then(|id| state.jobs.get_by_id(id)) {
+                Some(job) => job.pid.as_raw(),
+                None => {
+                    eprintln!("rsh: wait: {}: no such job", arg);
+                    last_status = 127;
+                    continue;
+                }
+            }
+        } else {
+            match arg.parse::<i32>() {
+                Ok(p) => p,
+                Err(_) => {
+                    eprintln!("rsh: wait: {}: not a pid or valid job spec", arg);
+                    last_status = 127;
+                    continue;
+                }
+            }
+        };
+
+        match waitpid(Pid::from_raw(pid_raw), None) {
+            Ok(WaitStatus::Exited(pid, code)) => {
+                state.jobs.jobs.retain(|j| j.pid != pid);
+                last_status = code;
+            }
+            Ok(WaitStatus::Signaled(pid, sig, _)) => {
+                state.jobs.jobs.retain(|j| j.pid != pid);
+                last_status = 128 + sig as i32;
+            }
+            _ => { last_status = 127; }
+        }
+    }
+    last_status
 }
 
 // ============================================================
@@ -2398,4 +2545,73 @@ fn builtin_math(args: &[String]) -> i32 {
         Some(result) => { println!("{}", result); 0 }
         None => { eprintln!("math: no numeric values for field '{}'", field); 1 }
     }
+}
+
+const HELP_ENTRIES: &[(&str, &str)] = &[
+    ("cd", "cd [-] [dir] — Change working directory. cd - returns to previous."),
+    ("exit", "exit [N] — Exit the shell with status N (default: last command's status)."),
+    ("export", "export [-n] name[=value] — Set environment variables. -n unexports."),
+    ("unset", "unset name... — Remove variables or functions."),
+    ("echo", "echo [-neE] [args...] — Print arguments. -n no newline, -e escapes."),
+    ("printf", "printf format [args...] — Formatted output (C-style)."),
+    ("pwd", "pwd — Print current working directory."),
+    ("alias", "alias [name[=value]...] — Define or display aliases."),
+    ("unalias", "unalias [-a] name... — Remove aliases. -a removes all."),
+    ("type", "type name... — Show how each name would be interpreted as a command."),
+    ("source", "source file [args] — Execute commands from file in current shell."),
+    ("eval", "eval [args...] — Concatenate args and execute as a command."),
+    ("read", "read [-p prompt] [-t timeout] [-r] var... — Read line from stdin."),
+    ("test", "test expr / [ expr ] — Evaluate conditional expression."),
+    ("set", "set [-/+euxo option] — Set/unset shell options. set -e enables errexit."),
+    ("local", "local name[=value]... — Declare local variables in a function."),
+    ("shift", "shift [N] — Shift positional parameters left by N (default 1)."),
+    ("jobs", "jobs — List active jobs."),
+    ("fg", "fg [%N] — Bring job N to foreground."),
+    ("bg", "bg [%N] — Resume job N in background."),
+    ("wait", "wait [pid|%jobspec...] — Wait for processes to complete."),
+    ("trap", "trap [action] signal... — Set signal handlers. trap '' SIG ignores."),
+    ("return", "return [N] — Return from a function with exit status N."),
+    ("break", "break [N] — Exit from N enclosing loops."),
+    ("continue", "continue [N] — Resume next iteration of Nth enclosing loop."),
+    ("declare", "declare [-aAirx] name[=value] — Declare variables with attributes."),
+    ("history", "history — Display command history."),
+    ("pushd", "pushd [dir] — Push directory onto stack and cd to it."),
+    ("popd", "popd — Pop directory from stack and cd to it."),
+    ("dirs", "dirs — Display directory stack."),
+    ("complete", "complete [-W words] [-F func] cmd — Register completions."),
+    ("compgen", "compgen [-abcdfv] [-A action] [-W words] [-G glob] [prefix]"),
+    ("disown", "disown [-a] [%N] — Remove job from table (won't receive SIGHUP)."),
+    ("shopt", "shopt [-su] opt... — Set/unset shell options (globstar, extglob, etc)."),
+    ("exec", "exec cmd [args] — Replace shell with command (no fork)."),
+    ("z", "z [query] — Jump to frecency-ranked directory matching query."),
+    ("bookmark", "bookmark <add|go|ls|rm> [name] — Manage directory bookmarks."),
+    ("hook", "hook <add|remove|list> <precmd|preexec|chpwd> [cmd]"),
+    ("from-json", "from-json — Parse JSON from stdin into structured pipeline."),
+    ("to-json", "to-json — Output structured data as JSON."),
+    ("to-table", "to-table — Output structured data as aligned table."),
+    ("where", "where field op value — Filter structured records."),
+    ("sort-by", "sort-by field — Sort structured records by field."),
+    ("select", "select field... — Project fields from structured records."),
+];
+
+fn builtin_help(args: &[String]) -> i32 {
+    if args.is_empty() {
+        println!("rsh — a modern shell with bash compatibility and AI features\n");
+        println!("Core builtins:");
+        for (name, desc) in HELP_ENTRIES {
+            println!("  {:12} {}", name, desc.split(" — ").nth(1).unwrap_or(desc));
+        }
+        println!("\nType 'help <command>' for detailed help on a specific builtin.");
+        return 0;
+    }
+
+    let cmd = args[0].as_str();
+    for (name, desc) in HELP_ENTRIES {
+        if *name == cmd {
+            println!("{}", desc);
+            return 0;
+        }
+    }
+    eprintln!("rsh: help: no help for '{}'", cmd);
+    1
 }

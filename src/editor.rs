@@ -16,7 +16,7 @@ use nix::libc;
 use crossterm::{
     cursor::{self, MoveToColumn, MoveUp},
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
-    style::{Color, Print, ResetColor, SetAttribute, SetForegroundColor, Attribute},
+    style::{Color, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor, Attribute},
     terminal::{self, Clear, ClearType},
     ExecutableCommand, QueueableCommand,
 };
@@ -49,6 +49,12 @@ pub struct Editor {
     ai_pending: bool,
     ai_explain_mode: bool,
     pub last_error_info: Option<(String, String, i32)>,
+    pub key_bindings: crate::keybindings::KeyBindingManager,
+    cached_prompt: String,
+    last_buffer_snapshot: String,
+    last_cursor_snapshot: usize,
+    last_suggestion_snapshot: Option<String>,
+    last_menu_snapshot: Option<usize>,
 }
 
 struct WorkflowMode {
@@ -93,6 +99,12 @@ impl Editor {
             ai_pending: false,
             ai_explain_mode: false,
             last_error_info: None,
+            key_bindings: crate::keybindings::KeyBindingManager::new(crate::keybindings::EditorMode::Emacs),
+            cached_prompt: String::new(),
+            last_buffer_snapshot: String::new(),
+            last_cursor_snapshot: 0,
+            last_suggestion_snapshot: None,
+            last_menu_snapshot: None,
         }
     }
 
@@ -113,11 +125,11 @@ impl Editor {
             crate::osc::prompt_start();
         }
 
-        let prompt_str = prompt::render_prompt(state);
-        let prompt_lines = prompt_str.matches('\n').count() as u16;
+        self.cached_prompt = prompt::render_prompt(state);
+        let prompt_lines = self.cached_prompt.matches('\n').count() as u16;
         self.last_rendered_lines = prompt_lines;
         self.last_cursor_row = prompt_lines;
-        print!("{}", prompt_str);
+        print!("{}", self.cached_prompt);
         io::stdout().flush()?;
 
         // OSC 133;B — prompt end / command input start marker
@@ -160,65 +172,84 @@ impl Editor {
                 return Ok(None);
             }
 
-            match event::poll(Duration::from_millis(100)) {
-                Ok(true) => {
-                    consecutive_timeouts = 0;
-                    match event::read()? {
-                        Event::Key(key) => {
-                            if key.code != KeyCode::Tab && key.code != KeyCode::BackTab {
-                                if key.code != KeyCode::Enter {
-                                    if let Some(menu) = self.completion_menu.take() {
-                                        if key.code == KeyCode::Esc {
-                                            self.buffer.replace_range(menu.word_start..self.cursor, &menu.original_word);
-                                            self.cursor = menu.word_start + menu.original_word.len();
-                                        }
+            // Drain every event crossterm has already parsed. crossterm reads ahead:
+            // one read() pulls all pending bytes into its own buffer, so we must empty
+            // that buffer here instead of assuming the kernel fd still has data. Each
+            // crossterm call is guarded by an explicit hangup check, because crossterm's
+            // event::poll/read uses an edge-triggered epoll and spins at 100% CPU on a
+            // closed pty (read() returns EOF forever, never EAGAIN). We must never let it
+            // touch the fd once the master is gone.
+            loop {
+                if matches!(Self::poll_stdin(0), StdinPoll::Hangup) {
+                    return Ok(None);
+                }
+                if !event::poll(Duration::from_millis(0))? {
+                    break;
+                }
+                consecutive_timeouts = 0;
+                match event::read()? {
+                    Event::Key(key) => {
+                        if key.code != KeyCode::Tab && key.code != KeyCode::BackTab {
+                            if key.code != KeyCode::Enter {
+                                if let Some(menu) = self.completion_menu.take() {
+                                    if key.code == KeyCode::Esc {
+                                        self.buffer.replace_range(menu.word_start..self.cursor, &menu.original_word);
+                                        self.cursor = menu.word_start + menu.original_word.len();
                                     }
                                 }
                             }
+                        }
 
-                            match self.handle_key(key, state, history)? {
-                                KeyAction::Continue => {}
-                                KeyAction::Submit => {
+                        match self.handle_key(key, state, history)? {
+                            KeyAction::Continue => {}
+                            KeyAction::Submit => {
+                                self.suggestion = None;
+                                self.repaint(state)?;
+                                print!("\r\n");
+                                let line = self.buffer.clone();
+                                return Ok(Some(line));
+                            }
+                            KeyAction::Eof => {
+                                if self.buffer.is_empty() {
                                     self.suggestion = None;
                                     self.repaint(state)?;
                                     print!("\r\n");
-                                    let line = self.buffer.clone();
-                                    return Ok(Some(line));
-                                }
-                                KeyAction::Eof => {
-                                    if self.buffer.is_empty() {
-                                        self.suggestion = None;
-                                        self.repaint(state)?;
-                                        print!("\r\n");
-                                        return Ok(None);
-                                    } else {
-                                        self.delete_char();
-                                    }
-                                }
-                                KeyAction::Interrupt => {
-                                    print!("^C\r\n");
-                                    return Ok(Some(String::new()));
+                                    return Ok(None);
+                                } else {
+                                    self.delete_char();
                                 }
                             }
+                            KeyAction::Interrupt => {
+                                print!("^C\r\n");
+                                return Ok(Some(String::new()));
+                            }
+                        }
 
-                            self.update_suggestion(history, state);
-                            self.repaint(state)?;
-                        }
-                        Event::Paste(text) => {
-                            self.buffer.insert_str(self.cursor, &text);
-                            self.cursor += text.len();
-                            self.update_suggestion(history, state);
-                            self.repaint(state)?;
-                        }
-                        Event::Resize(w, h) => {
-                            self.terminal_width = w;
-                            self.terminal_height = h;
-                            self.repaint(state)?;
-                        }
-                        _ => {}
+                        self.update_suggestion(history, state);
+                        self.repaint(state)?;
                     }
+                    Event::Paste(text) => {
+                        self.buffer.insert_str(self.cursor, &text);
+                        self.cursor += text.len();
+                        self.update_suggestion(history, state);
+                        self.repaint(state)?;
+                    }
+                    Event::Resize(w, h) => {
+                        self.terminal_width = w;
+                        self.terminal_height = h;
+                        self.repaint(state)?;
+                    }
+                    _ => {}
                 }
-                Ok(false) => {
+            }
+
+            // Nothing buffered. Wait for new input (or a hangup) on the raw fd. Doing
+            // the wait ourselves means a pty hangup that happens mid-wait is reported
+            // as POLLHUP and we exit cleanly, instead of crossterm's poll spinning.
+            match Self::poll_stdin(100) {
+                StdinPoll::Hangup => return Ok(None),
+                StdinPoll::Ready => {} // loop; the drain above will read it
+                StdinPoll::Timeout => {
                     consecutive_timeouts = consecutive_timeouts.saturating_add(1);
                     // Check for AI response
                     if self.ai_pending {
@@ -238,14 +269,33 @@ impl Editor {
                         }
                     }
                 }
-                Err(_) => {
-                    // poll() error typically means the fd is gone
-                    if Self::is_terminal_dead() {
-                        return Ok(None);
-                    }
-                }
             }
         }
+    }
+
+    /// Wait up to `timeout_ms` for stdin to become readable, distinguishing a real
+    /// hangup (pty master closed) from ordinary input. isatty() keeps returning true
+    /// after the master closes (the slave fd is still a tty), so POLLHUP is the only
+    /// reliable signal that the terminal went away.
+    fn poll_stdin(timeout_ms: i32) -> StdinPoll {
+        let mut pfd = libc::pollfd {
+            fd: libc::STDIN_FILENO,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let r = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+        if r <= 0 {
+            // r < 0: interrupted (EINTR) or error; r == 0: timed out. Either way the
+            // caller re-checks its flags and waits again.
+            return StdinPoll::Timeout;
+        }
+        if pfd.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+            return StdinPoll::Hangup;
+        }
+        if pfd.revents & libc::POLLIN != 0 {
+            return StdinPoll::Ready;
+        }
+        StdinPoll::Timeout
     }
 
     fn handle_key(&mut self, key: KeyEvent, state: &mut ShellState, history: &mut History) -> io::Result<KeyAction> {
@@ -955,6 +1005,12 @@ impl Editor {
                         word_start,
                         original_word,
                     });
+                    // Immediately apply first completion inline
+                    if let Some(ref menu) = self.completion_menu {
+                        let text = menu.completions[0].text.clone();
+                        self.buffer.replace_range(word_start..self.cursor, &text);
+                        self.cursor = word_start + text.len();
+                    }
                 }
             }
         }
@@ -1045,13 +1101,36 @@ impl Editor {
     }
 
     fn repaint(&mut self, state: &mut ShellState) -> io::Result<()> {
+        let menu_sel = self.completion_menu.as_ref().map(|m| m.selected);
+        let cursor_only = self.search_mode.is_none()
+            && self.buffer == self.last_buffer_snapshot
+            && self.suggestion == self.last_suggestion_snapshot
+            && menu_sel == self.last_menu_snapshot
+            && self.cursor != self.last_cursor_snapshot;
+
+        self.last_buffer_snapshot = self.buffer.clone();
+        self.last_cursor_snapshot = self.cursor;
+        self.last_suggestion_snapshot = self.suggestion.clone();
+        self.last_menu_snapshot = menu_sel;
+
         let mut out = stdout();
 
         if state.editing_mode == crate::environment::EditingMode::Vi {
             match self.vi_mode {
-                ViMode::Normal => { out.queue(Print("\x1b[1 q"))?; } // block cursor
-                ViMode::Insert => { out.queue(Print("\x1b[5 q"))?; } // line cursor
+                ViMode::Normal => { out.queue(Print("\x1b[1 q"))?; }
+                ViMode::Insert => { out.queue(Print("\x1b[5 q"))?; }
             }
+        }
+
+        // Fast path: only cursor moved, skip full redraw
+        if cursor_only && !self.buffer.contains('\n') {
+            let prompt_last = self.cached_prompt.rsplit('\n').next().unwrap_or(&self.cached_prompt);
+            let prompt_width = display_width(prompt_last) as u16;
+            let buf_before = &self.buffer[..self.cursor];
+            let col = prompt_width + display_width(buf_before) as u16;
+            out.queue(MoveToColumn(col))?;
+            out.flush()?;
+            return Ok(());
         }
 
         out.queue(MoveToColumn(0))?;
@@ -1174,11 +1253,10 @@ impl Editor {
             cursor_col = (10 + search.query.len()) as u16;
             cursor_row = 0;
         } else {
-            // Render prompt
-            let prompt_text = prompt::render_prompt(state);
-            let prompt_lines = prompt_text.matches('\n').count() as u16;
+            // Render prompt (cached — only recomputed at read_line entry)
+            let prompt_lines = self.cached_prompt.matches('\n').count() as u16;
             rendered_lines += prompt_lines;
-            out.queue(Print(&prompt_text))?;
+            out.queue(Print(&self.cached_prompt))?;
 
             // Render highlighted buffer with continuation prompts
             let spans = highlighter::highlight(&self.buffer, state);
@@ -1221,7 +1299,7 @@ impl Editor {
             let rprompt_w = prompt::rprompt_width(state);
             if rprompt_w > 0 {
                 let first_line = self.buffer.split('\n').next().unwrap_or("");
-                let prompt_last = prompt_text.rsplit('\n').next().unwrap_or(&prompt_text);
+                let prompt_last = self.cached_prompt.rsplit('\n').next().unwrap_or(&self.cached_prompt);
                 let content_width = display_width(prompt_last) + display_width(first_line);
                 let available = self.terminal_width as usize;
                 if content_width + rprompt_w + 2 < available {
@@ -1242,7 +1320,7 @@ impl Editor {
             }
 
             // Compute cursor screen position accounting for continuation prompts
-            let prompt_last_line = prompt_text.rsplit('\n').next().unwrap_or(&prompt_text);
+            let prompt_last_line = self.cached_prompt.rsplit('\n').next().unwrap_or(&self.cached_prompt);
             let prompt_width = display_width(prompt_last_line) as u16;
             let cont_width = display_width(&cont_prompt) as u16;
             let buf_before = &self.buffer[..self.cursor];
@@ -1289,9 +1367,6 @@ impl Editor {
             }
 
             // Render grouped completions with type badges
-            let mut count = 0;
-            let max_items = 20;
-
             let groups: Vec<(&str, &str, Vec<&Completion>)> = vec![
                 ("S", "Subcommands", subcommands),
                 ("F", "Flags", flags),
@@ -1305,94 +1380,135 @@ impl Editor {
                 ("*", "Others", others),
             ];
 
-            // Check if all items are the same kind (no need for headers then)
+            // Flatten groups into ordered items with badge info
             let non_empty_groups: Vec<_> = groups.iter().filter(|(_, _, items)| !items.is_empty()).collect();
             let single_group = non_empty_groups.len() == 1;
 
+            struct FlatItem<'a> {
+                comp: &'a Completion,
+                badge: &'a str,
+                group_start: bool,
+                group_header: &'a str,
+            }
+            let mut flat_items: Vec<FlatItem> = Vec::new();
             for (badge, header, items) in &groups {
-                if items.is_empty() || count >= max_items {
+                if items.is_empty() {
                     continue;
                 }
+                for (i, comp) in items.iter().enumerate() {
+                    flat_items.push(FlatItem {
+                        comp,
+                        badge,
+                        group_start: i == 0 && !single_group,
+                        group_header: header,
+                    });
+                }
+            }
 
-                // Print group header (skip if only one group)
-                if !single_group {
-                    if count > 0 {
+            let total = flat_items.len();
+            let max_visible = (self.terminal_height as usize / 2).max(5).min(total);
+
+            // Compute scroll window to keep selected item visible
+            let scroll_offset = if menu.selected < max_visible / 2 {
+                0
+            } else if menu.selected + max_visible / 2 >= total {
+                total.saturating_sub(max_visible)
+            } else {
+                menu.selected - max_visible / 2
+            };
+
+            // Show "↑ N above" indicator
+            if scroll_offset > 0 {
+                out.queue(SetAttribute(Attribute::Dim))?;
+                out.queue(SetForegroundColor(Color::DarkGrey))?;
+                out.queue(Print(format!("  ↑ {} more above", scroll_offset)))?;
+                out.queue(ResetColor)?;
+                out.queue(Print("\r\n"))?;
+                rendered_lines += 1;
+            }
+
+            let mut prev_group_header = "";
+            for (idx, item) in flat_items.iter().enumerate().skip(scroll_offset).take(max_visible) {
+                let is_selected = idx == menu.selected;
+
+                // Print group header if this is first item of a new group in visible range
+                if !single_group && item.group_start && item.group_header != prev_group_header {
+                    if idx > scroll_offset {
                         out.queue(Print("\r\n"))?;
                         rendered_lines += 1;
                     }
                     out.queue(SetForegroundColor(Color::DarkYellow))?;
                     out.queue(SetAttribute(Attribute::Dim))?;
-                    out.queue(Print(format!("[{}] ", badge)))?;
+                    out.queue(Print(format!("[{}] ", item.badge)))?;
                     out.queue(SetForegroundColor(Color::Cyan))?;
-                    out.queue(Print(*header))?;
+                    out.queue(Print(item.group_header))?;
                     out.queue(ResetColor)?;
                     out.queue(Print("\r\n"))?;
                     rendered_lines += 1;
                 }
+                if !single_group {
+                    prev_group_header = item.group_header;
+                }
 
-                for comp in items {
-                    if count >= max_items {
-                        break;
-                    }
+                // Type badge
+                if !is_selected {
+                    out.queue(SetForegroundColor(Color::DarkYellow))?;
+                    out.queue(SetAttribute(Attribute::Dim))?;
+                }
+                if single_group {
+                    out.queue(Print(format!("{} ", item.badge)))?;
+                } else {
+                    out.queue(Print("  "))?;
+                }
+                if !is_selected {
+                    out.queue(ResetColor)?;
+                }
 
-                    let is_selected = count == menu.selected;
+                // Highlight selected item
+                if is_selected {
+                    out.queue(SetBackgroundColor(Color::Rgb { r: 50, g: 50, b: 80 }))?;
+                    out.queue(SetForegroundColor(Color::White))?;
+                    out.queue(SetAttribute(Attribute::Bold))?;
+                } else if item.comp.is_dir {
+                    out.queue(SetForegroundColor(Color::Blue))?;
+                }
 
-                    // Type badge
-                    if !is_selected {
-                        out.queue(SetForegroundColor(Color::DarkYellow))?;
-                        out.queue(SetAttribute(Attribute::Dim))?;
-                    }
-                    if single_group {
-                        out.queue(Print(format!("{} ", badge)))?;
-                    } else {
-                        out.queue(Print("  "))?;
-                    }
-                    if !is_selected {
-                        out.queue(ResetColor)?;
-                    }
+                // Display name
+                let name_width = 20usize.min(self.terminal_width as usize / 3);
+                out.queue(Print(format!("{:<width$}", item.comp.display, width = name_width)))?;
 
-                    // Highlight selected item
-                    if is_selected {
-                        out.queue(SetForegroundColor(Color::Black))?;
-                        out.queue(SetAttribute(Attribute::Reverse))?;
-                    } else if comp.is_dir {
-                        out.queue(SetForegroundColor(Color::Blue))?;
-                    }
+                if is_selected {
+                    out.queue(SetBackgroundColor(Color::Reset))?;
+                    out.queue(ResetColor)?;
+                    out.queue(SetAttribute(Attribute::Reset))?;
+                } else if item.comp.is_dir {
+                    out.queue(ResetColor)?;
+                }
 
-                    // Display name
-                    let name_width = 20usize.min(self.terminal_width as usize / 3);
-                    out.queue(Print(format!("{:<width$}", comp.display, width = name_width)))?;
-
-                    if is_selected {
-                        out.queue(ResetColor)?;
-                        out.queue(SetAttribute(Attribute::Reset))?;
-                    } else if comp.is_dir {
-                        out.queue(ResetColor)?;
-                    }
-
-                    // Description (dim, after name) — skip generic kind labels
-                    if !is_selected {
-                        if let Some(ref d) = comp.description {
-                            if d != "builtin" && d != "alias" && d != "function" {
-                                out.queue(SetAttribute(Attribute::Dim))?;
-                                out.queue(SetForegroundColor(Color::White))?;
-                                let max_desc = (self.terminal_width as usize).saturating_sub(name_width + 5);
-                                let truncated = if d.len() > max_desc { &d[..max_desc] } else { d.as_str() };
-                                out.queue(Print(truncated))?;
-                                out.queue(ResetColor)?;
-                            }
+                // Description (dim, after name) — skip generic kind labels
+                if !is_selected {
+                    if let Some(ref d) = item.comp.description {
+                        if d != "builtin" && d != "alias" && d != "function" {
+                            out.queue(SetAttribute(Attribute::Dim))?;
+                            out.queue(SetForegroundColor(Color::White))?;
+                            let max_desc = (self.terminal_width as usize).saturating_sub(name_width + 5);
+                            let truncated = if d.len() > max_desc { &d[..max_desc] } else { d.as_str() };
+                            out.queue(Print(truncated))?;
+                            out.queue(ResetColor)?;
                         }
                     }
-
-                    out.queue(Print("\r\n"))?;
-                    rendered_lines += 1;
-                    count += 1;
                 }
+
+                out.queue(Print("\r\n"))?;
+                rendered_lines += 1;
             }
 
-            if menu.completions.len() > max_items {
+            // Show "↓ N below" indicator
+            let items_below = total.saturating_sub(scroll_offset + max_visible);
+            if items_below > 0 {
                 out.queue(SetAttribute(Attribute::Dim))?;
-                out.queue(Print(format!("  ... +{} more", menu.completions.len() - max_items)))?;
+                out.queue(SetForegroundColor(Color::DarkGrey))?;
+                out.queue(Print(format!("  ↓ {} more below", items_below)))?;
                 out.queue(ResetColor)?;
                 out.queue(Print("\r\n"))?;
                 rendered_lines += 1;
@@ -1677,6 +1793,13 @@ enum KeyAction {
     Submit,
     Eof,
     Interrupt,
+}
+
+/// Outcome of waiting on stdin: input ready, timed out, or the terminal hung up.
+enum StdinPoll {
+    Ready,
+    Timeout,
+    Hangup,
 }
 
 /// Compute indentation depth for auto-indent in multiline editing.

@@ -6,12 +6,66 @@ use crate::expand::{expand_word_to_string, expand_words};
 use crate::parser::ast::*;
 use crate::signal;
 
+use nix::errno::Errno;
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::{close, execvp, fork, pipe, setpgid, tcsetpgrp, ForkResult, Pid};
 use std::ffi::CString;
 use std::fs::{File, OpenOptions};
 use std::os::unix::io::{IntoRawFd, RawFd, AsRawFd, OwnedFd, BorrowedFd};
 use std::io::Write;
+
+fn shell_error(msg: &str) {
+    if atty::is(atty::Stream::Stderr) {
+        eprintln!("\x1b[1;31mrsh:\x1b[0m {}", msg);
+    } else {
+        eprintln!("rsh: {}", msg);
+    }
+}
+
+fn suggest_command(cmd: &str, state: &mut ShellState) -> Option<String> {
+    let mut best: Option<(String, usize)> = None;
+    let cache = state.path_cache().clone();
+    for candidate in cache.iter() {
+        let dist = edit_distance(cmd, candidate);
+        if dist <= 2 && dist < cmd.len() {
+            match &best {
+                Some((_, d)) if dist < *d => best = Some((candidate.clone(), dist)),
+                None => best = Some((candidate.clone(), dist)),
+                _ => {}
+            }
+        }
+    }
+    for name in builtins::BUILTIN_NAMES {
+        let dist = edit_distance(cmd, name);
+        if dist <= 2 && dist < cmd.len() {
+            match &best {
+                Some((_, d)) if dist < *d => best = Some((name.to_string(), dist)),
+                None => best = Some((name.to_string(), dist)),
+                _ => {}
+            }
+        }
+    }
+    best.map(|(s, _)| s)
+}
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let (m, n) = (a.len(), b.len());
+    if m == 0 { return n; }
+    if n == 0 { return m; }
+    let mut prev: Vec<usize> = (0..=n).collect();
+    let mut curr = vec![0; n + 1];
+    for i in 1..=m {
+        curr[0] = i;
+        for j in 1..=n {
+            let cost = if a[i-1] == b[j-1] { 0 } else { 1 };
+            curr[j] = (prev[j] + 1).min(curr[j-1] + 1).min(prev[j-1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[n]
+}
 
 /// Give terminal foreground to `pgrp`, then wait for the process, then reclaim
 /// the terminal for the shell's own process group.
@@ -44,15 +98,41 @@ fn child_exit(code: i32) -> ! {
     unsafe { nix::libc::_exit(code) }
 }
 
+fn exec_error_info(_cmd_name: &str) -> (&'static str, i32) {
+    match Errno::last() {
+        Errno::EACCES => ("Permission denied", 126),
+        Errno::ENOEXEC => ("cannot execute binary file", 126),
+        Errno::ENOENT => ("command not found", 127),
+        _ => ("command not found", 127),
+    }
+}
+
 pub fn execute_program(commands: &[CompleteCommand], state: &mut ShellState) -> i32 {
     let mut last = 0;
     for cmd in commands {
         last = execute_complete_command(cmd, state);
+        if last != 0 {
+            fire_err_trap(state);
+        }
     }
     last
 }
 
+fn fire_err_trap(state: &mut ShellState) {
+    if let Some(action) = state.traps.get("ERR").cloned() {
+        if !action.is_empty() {
+            if let Ok(cmds) = crate::parser::parse(&action) {
+                for cmd in &cmds {
+                    execute_complete_command(cmd, state);
+                }
+            }
+        }
+    }
+}
+
 pub fn execute_complete_command(cmd: &CompleteCommand, state: &mut ShellState) -> i32 {
+    // Sweep up any finished process-substitution children (non-blocking).
+    state.reap_procsubs();
     if cmd.background {
         // Fork for background execution
         match unsafe { fork() } {
@@ -112,6 +192,8 @@ fn execute_pipeline(pipeline: &Pipeline, state: &mut ShellState) -> i32 {
 
     if cmds.len() == 1 {
         let code = execute_command(&cmds[0], state);
+        state.pipestatus = vec![code];
+        state.set_array("PIPESTATUS", vec![code.to_string()]);
         return if pipeline.negated { if code == 0 { 1 } else { 0 } } else { code };
     }
 
@@ -123,8 +205,14 @@ fn execute_pipeline(pipeline: &Pipeline, state: &mut ShellState) -> i32 {
         let is_last = i == cmds.len() - 1;
 
         let (read_fd, write_fd): (Option<RawFd>, Option<RawFd>) = if !is_last {
-            let (r, w) = pipe().expect("pipe failed");
-            (Some(r.into_raw_fd()), Some(w.into_raw_fd()))
+            match pipe() {
+                Ok((r, w)) => (Some(r.into_raw_fd()), Some(w.into_raw_fd())),
+                Err(e) => {
+                    eprintln!("rsh: pipe failed: {}", e);
+                    if let Some(fd) = prev_read_fd { close(fd).ok(); }
+                    return 1;
+                }
+            }
         } else {
             (None, None)
         };
@@ -196,7 +284,8 @@ fn execute_pipeline(pipeline: &Pipeline, state: &mut ShellState) -> i32 {
             last_status = code;
         }
     }
-    state.pipestatus = pipestatus;
+    state.pipestatus = pipestatus.clone();
+    state.set_array("PIPESTATUS", pipestatus.iter().map(|c| c.to_string()).collect());
 
     if pipeline.negated { if last_status == 0 { 1 } else { 0 } } else { last_status }
 }
@@ -285,21 +374,24 @@ fn execute_simple_with_mode(cmd: &SimpleCommand, state: &mut ShellState, fork_ex
         } else {
             format!("{} {}", alias_val, args.join(" "))
         };
-        match crate::parser::parse(&full_cmd) {
-            Ok(cmds) => {
-                // Remove the alias temporarily to prevent infinite recursion
-                let removed_alias = state.aliases.remove(cmd_name);
-                let mut last = 0;
-                for c in &cmds {
-                    last = execute_complete_command(c, state);
-                }
-                // Restore the alias
-                if let Some(alias) = removed_alias {
-                    state.aliases.insert(cmd_name.clone(), alias);
-                }
-                return last;
+        let parse_result = if let Some(cached) = crate::parser::cache::cache_get(&full_cmd) {
+            Some(cached)
+        } else if let Ok(parsed) = crate::parser::parse(&full_cmd) {
+            crate::parser::cache::cache_insert(full_cmd.clone(), parsed.clone());
+            Some(parsed)
+        } else {
+            None
+        };
+        if let Some(cmds) = parse_result {
+            let removed_alias = state.aliases.remove(cmd_name);
+            let mut last = 0;
+            for c in &cmds {
+                last = execute_complete_command(c, state);
             }
-            Err(_) => {}
+            if let Some(alias) = removed_alias {
+                state.aliases.insert(cmd_name.clone(), alias);
+            }
+            return last;
         }
     }
 
@@ -361,8 +453,14 @@ fn execute_simple_with_mode(cmd: &SimpleCommand, state: &mut ShellState, fork_ex
             .collect();
 
         let _ = execvp(&c_cmd, &c_args);
-        eprintln!("rsh: {}: command not found", cmd_name);
-        return 127;
+        let (msg, code) = exec_error_info(&cmd_name);
+        shell_error(&format!("{}: {}", cmd_name, msg));
+        if code == 127 {
+            if let Some(suggestion) = suggest_command(&cmd_name, state) {
+                eprintln!("\x1b[2;33m       did you mean '{}'?\x1b[0m", suggestion);
+            }
+        }
+        return code;
     }
 
     match unsafe { fork() } {
@@ -384,12 +482,13 @@ fn execute_simple_with_mode(cmd: &SimpleCommand, state: &mut ShellState, fork_ex
                 .collect();
 
             let _ = execvp(&c_cmd, &c_args);
-            eprintln!("rsh: {}: command not found", cmd_name);
-            child_exit(127);
+            let (msg, code) = exec_error_info(&cmd_name);
+            shell_error(&format!("{}: {}", cmd_name, msg));
+            child_exit(code);
         }
         Ok(ForkResult::Parent { child }) => {
             setpgid(child, child).ok();
-            if state.interactive {
+            let exit_code = if state.interactive {
                 wait_for_fg(child, state)
             } else {
                 match waitpid(child, None) {
@@ -397,10 +496,16 @@ fn execute_simple_with_mode(cmd: &SimpleCommand, state: &mut ShellState, fork_ex
                     Ok(WaitStatus::Signaled(_, sig, _)) => 128 + sig as i32,
                     _ => 1,
                 }
+            };
+            if exit_code == 127 {
+                if let Some(suggestion) = suggest_command(&cmd_name, state) {
+                    eprintln!("\x1b[2;33m       did you mean '{}'?\x1b[0m", suggestion);
+                }
             }
+            exit_code
         }
         Err(e) => {
-            eprintln!("rsh: fork failed: {}", e);
+            shell_error(&format!("fork failed: {}", e));
             1
         }
     }
@@ -454,7 +559,7 @@ pub fn execute_compound(cmd: &CompoundCommand, state: &mut ShellState) -> i32 {
                 let mut matched = false;
 
                 for (condition, body) in conditions {
-                    let cond_code = execute_command_list(condition, state);
+                    let cond_code = execute_condition(condition, state);
                     if cond_code == 0 {
                         code = execute_command_list(body, state);
                         matched = true;
@@ -543,9 +648,16 @@ pub fn execute_compound(cmd: &CompoundCommand, state: &mut ShellState) -> i32 {
             with_redirects(redirects, state, |state| {
                 let mut code = 0;
                 loop {
-                    let cond = execute_command_list(condition, state);
+                    let cond = execute_condition(condition, state);
                     if cond != 0 { break; }
                     code = execute_command_list(body, state);
+                    if state.loop_break {
+                        state.loop_break = false;
+                        break;
+                    }
+                    if state.loop_continue {
+                        state.loop_continue = false;
+                    }
                 }
                 code
             })
@@ -554,9 +666,16 @@ pub fn execute_compound(cmd: &CompoundCommand, state: &mut ShellState) -> i32 {
             with_redirects(redirects, state, |state| {
                 let mut code = 0;
                 loop {
-                    let cond = execute_command_list(condition, state);
+                    let cond = execute_condition(condition, state);
                     if cond == 0 { break; }
                     code = execute_command_list(body, state);
+                    if state.loop_break {
+                        state.loop_break = false;
+                        break;
+                    }
+                    if state.loop_continue {
+                        state.loop_continue = false;
+                    }
                 }
                 code
             })
@@ -564,16 +683,29 @@ pub fn execute_compound(cmd: &CompoundCommand, state: &mut ShellState) -> i32 {
         CompoundCommand::Case { word, arms, redirects } => {
             with_redirects(redirects, state, |state| {
                 let value = expand_word_to_string(word, state);
-
-                for arm in arms {
-                    for pattern in &arm.patterns {
-                        let pat = expand_word_to_string(pattern, state);
-                        if match_pattern(&value, &pat) {
-                            return execute_command_list(&arm.body, state);
+                let mut last = 0;
+                let mut i = 0;
+                // `fall` is true when the previous arm ended with ;& and we must
+                // run this arm's body unconditionally.
+                let mut fall = false;
+                while i < arms.len() {
+                    let arm = &arms[i];
+                    let hit = fall || arm.patterns.iter().any(|p| {
+                        let pat = expand_word_to_string(p, state);
+                        match_pattern(&value, &pat)
+                    });
+                    if hit {
+                        last = execute_command_list(&arm.body, state);
+                        match arm.terminator {
+                            CaseTerminator::Break => return last,
+                            CaseTerminator::FallThrough => { fall = true; i += 1; }
+                            CaseTerminator::ContinueMatch => { fall = false; i += 1; }
                         }
+                    } else {
+                        i += 1;
                     }
                 }
-                0
+                last
             })
         }
         CompoundCommand::Select { var, words, body, redirects } => {
@@ -666,8 +798,14 @@ pub fn execute_compound(cmd: &CompoundCommand, state: &mut ShellState) -> i32 {
                 // Create two pipes for bidirectional communication
                 // Pipe 1: parent writes to child's stdin
                 // Pipe 2: parent reads from child's stdout
-                let (read_from_parent, write_to_child) = pipe().expect("pipe 1 failed");
-                let (read_from_child, write_to_parent) = pipe().expect("pipe 2 failed");
+                let (read_from_parent, write_to_child) = match pipe() {
+                    Ok(p) => p,
+                    Err(e) => { eprintln!("rsh: pipe failed: {}", e); return 1; }
+                };
+                let (read_from_child, write_to_parent) = match pipe() {
+                    Ok(p) => p,
+                    Err(e) => { eprintln!("rsh: pipe failed: {}", e); return 1; }
+                };
 
                 match unsafe { fork() } {
                     Ok(ForkResult::Child) => {
@@ -732,7 +870,21 @@ fn execute_command_list(cmds: &[CompleteCommand], state: &mut ShellState) -> i32
     let mut code = 0;
     for cmd in cmds {
         code = execute_complete_command(cmd, state);
+        if state.loop_break || state.loop_continue || state.return_requested {
+            return code;
+        }
+        if state.shell_opts.errexit && code != 0 {
+            return code;
+        }
     }
+    code
+}
+
+fn execute_condition(cmds: &[CompleteCommand], state: &mut ShellState) -> i32 {
+    let saved = state.shell_opts.errexit;
+    state.shell_opts.errexit = false;
+    let code = execute_command_list(cmds, state);
+    state.shell_opts.errexit = saved;
     code
 }
 
@@ -755,6 +907,28 @@ fn dup2_raw(oldfd: RawFd, newfd: RawFd) -> nix::Result<()> {
             _ => Ok(()),
         }
     }
+}
+
+/// Materialize here-doc / here-string content into a temp file and return a read
+/// fd positioned at the start. Avoids the pipe-buffer deadlock for large content.
+fn heredoc_fd(data: &str) -> Option<RawFd> {
+    use std::io::{Seek, SeekFrom};
+    let mut dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    dir.push(format!("rsh-heredoc-{}-{}", pid, nanos));
+
+    let mut file = OpenOptions::new()
+        .read(true).write(true).create_new(true)
+        .open(&dir).ok()?;
+    // Unlink immediately; the open fd keeps the file alive until closed.
+    std::fs::remove_file(&dir).ok();
+    file.write_all(data.as_bytes()).ok()?;
+    file.seek(SeekFrom::Start(0)).ok()?;
+    Some(file.into_raw_fd())
 }
 
 fn apply_one_redirect(kind: &RedirectKind, fd: RawFd, data: &str, _here_doc_opts: &Option<HereDocOptions>) {
@@ -781,17 +955,17 @@ fn apply_one_redirect(kind: &RedirectKind, fd: RawFd, data: &str, _here_doc_opts
             }
         }
         RedirectKind::HereString | RedirectKind::HereDoc => {
-            let (r, w) = pipe().expect("pipe");
-            let r_fd = r.into_raw_fd();
-            let w_fd = w.into_raw_fd();
-            // data already contains the here-doc content
-            unsafe { nix::libc::write(w_fd, data.as_ptr() as *const _, data.len()); }
-            close(w_fd).ok();
-            dup2_raw(r_fd, fd).ok();
-            close(r_fd).ok();
+            // Use a temp file rather than a pipe: a blocking write into a pipe with
+            // no reader deadlocks once the content exceeds the pipe buffer (~64KB).
+            if let Some(src) = heredoc_fd(data) {
+                dup2_raw(src, fd).ok();
+                close(src).ok();
+            }
         }
-        RedirectKind::DupOutput => {
-            if let Ok(target_fd) = data.parse::<RawFd>() {
+        RedirectKind::DupOutput | RedirectKind::DupInput => {
+            if data == "-" {
+                close(fd).ok();
+            } else if let Ok(target_fd) = data.parse::<RawFd>() {
                 dup2_raw(target_fd, fd).ok();
             }
         }
@@ -813,16 +987,15 @@ fn apply_one_redirect(kind: &RedirectKind, fd: RawFd, data: &str, _here_doc_opts
                 if src != 1 && src != 2 { close(src).ok(); }
             }
         }
-        _ => {}
     }
 }
 
 fn redirect_fd(redir: &Redirect) -> RawFd {
     match redir.kind {
-        RedirectKind::Output | RedirectKind::Append | RedirectKind::DupOutput => redir.fd.unwrap_or(1),
-        RedirectKind::OutputAll | RedirectKind::AppendAll => 1,  // Both stdout and stderr, but use 1 as marker
-        RedirectKind::Input | RedirectKind::HereString | RedirectKind::HereDoc => redir.fd.unwrap_or(0),
-        _ => redir.fd.unwrap_or(1),
+        RedirectKind::Output | RedirectKind::Append | RedirectKind::DupOutput
+        | RedirectKind::OutputAll | RedirectKind::AppendAll => redir.fd.unwrap_or(1),
+        RedirectKind::Input | RedirectKind::HereString | RedirectKind::HereDoc
+        | RedirectKind::DupInput => redir.fd.unwrap_or(0),
     }
 }
 
@@ -830,8 +1003,11 @@ fn setup_redirects(redirects: &[Redirect], state: &mut ShellState) -> Vec<SavedF
     let mut saved = Vec::new();
     for redir in redirects {
         let data = if let Some(here_doc_opts) = &redir.here_doc {
-            // For here-doc in setup phase, use content directly
-            here_doc_opts.content.clone()
+            if here_doc_opts.expand_vars {
+                expand_word_to_string(&crate::parser::parse_word_parts(&here_doc_opts.content), state)
+            } else {
+                here_doc_opts.content.clone()
+            }
         } else {
             expand_word_to_string(&redir.target, state)
         };
