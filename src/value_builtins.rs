@@ -83,6 +83,15 @@ pub static VALUE_BUILTINS: Lazy<HashMap<&'static str, ValueBuiltin>> = Lazy::new
     m.insert("default", vb_default);
     m.insert("transpose", vb_transpose);
     m.insert("shuffle", vb_shuffle);
+    // Phase 11a — more data utilities
+    m.insert("sort", vb_sort);
+    m.insert("to-csv", vb_to_csv);
+    m.insert("chunks", vb_chunks);
+    m.insert("window", vb_window);
+    m.insert("split-by", vb_split_by);
+    // Phase 11b — encoding
+    m.insert("encode", vb_encode);
+    m.insert("decode", vb_decode);
     m
 });
 
@@ -2293,4 +2302,278 @@ fn vb_shuffle(input: PipelineData, _args: &[String], _state: &mut ShellState) ->
         vs.swap(i, j);
     }
     Ok(PipelineData::Values(vs))
+}
+
+// ---------------------------------------------------------------------------
+// Phase 11a — sort / to-csv / chunks / window / split-by
+// ---------------------------------------------------------------------------
+
+fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    // Numeric comparison when both look like numbers.
+    if let (Some(x), Some(y)) = (a.as_f64(), b.as_f64()) {
+        return x.partial_cmp(&y).unwrap_or(Ordering::Equal);
+    }
+    // Boolean: false < true.
+    if let (Value::Bool(x), Value::Bool(y)) = (a, b) {
+        return x.cmp(y);
+    }
+    // Null sorts before everything else.
+    match (a, b) {
+        (Value::Null, Value::Null) => Ordering::Equal,
+        (Value::Null, _) => Ordering::Less,
+        (_, Value::Null) => Ordering::Greater,
+        _ => a.to_display_string().cmp(&b.to_display_string()),
+    }
+}
+
+/// `sort [-r|--reverse]` — sort the pipeline values. Use `sort-by <field>`
+/// for record-keyed sorting (already exists).
+fn vb_sort(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+    let reverse = args.iter().any(|a| a == "-r" || a == "--reverse");
+    let mut vs = input.into_values()?;
+    vs.sort_by(compare_values);
+    if reverse { vs.reverse(); }
+    Ok(PipelineData::Values(vs))
+}
+
+/// `to-csv` — serialize a list of records to CSV bytes. Column order is
+/// taken from the first record; later records contribute any new keys at
+/// the end.
+fn vb_to_csv(input: PipelineData, _args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+    let vs = input.into_values()?;
+    let mut cols: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for v in &vs {
+        if let Value::Record(rec) = v {
+            for k in rec.keys() {
+                if seen.insert(k.clone()) { cols.push(k.clone()); }
+            }
+        }
+    }
+    let escape = |s: &str| -> String {
+        // RFC 4180: wrap in quotes if value contains comma, quote, or newline.
+        if s.contains(',') || s.contains('"') || s.contains('\n') {
+            format!("\"{}\"", s.replace('"', "\"\""))
+        } else {
+            s.to_string()
+        }
+    };
+    let mut out = String::new();
+    out.push_str(&cols.iter().map(|c| escape(c)).collect::<Vec<_>>().join(","));
+    out.push('\n');
+    for v in &vs {
+        let row: Vec<String> = cols.iter().map(|c| {
+            let cell = v.get(c).map(|fv| fv.to_display_string()).unwrap_or_default();
+            escape(&cell)
+        }).collect();
+        out.push_str(&row.join(","));
+        out.push('\n');
+    }
+    Ok(PipelineData::Bytes(out.into_bytes()))
+}
+
+/// `chunks <size>` — split the pipeline list into fixed-size chunks. The
+/// last chunk may be shorter.
+fn vb_chunks(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+    let size: usize = args.first().and_then(|s| s.parse().ok()).unwrap_or(0);
+    if size == 0 { eprintln!("chunks: size must be a positive integer"); return Err(1); }
+    let vs = input.into_values()?;
+    let out: Vec<Value> = vs.chunks(size).map(|c| Value::List(c.to_vec())).collect();
+    Ok(PipelineData::Values(out))
+}
+
+/// `window <size> [--stride N]` — sliding window of `size` over the input.
+/// Default stride is 1. The last window is dropped if it would be short.
+fn vb_window(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+    let mut size: usize = 0;
+    let mut stride: usize = 1;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--stride" | "-s" => {
+                i += 1;
+                stride = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(1);
+            }
+            other => { size = other.parse().unwrap_or(size); }
+        }
+        i += 1;
+    }
+    if size == 0 { eprintln!("window: size must be a positive integer"); return Err(1); }
+    if stride == 0 { stride = 1; }
+    let vs = input.into_values()?;
+    let mut out = Vec::new();
+    let mut start = 0;
+    while start + size <= vs.len() {
+        out.push(Value::List(vs[start..start + size].to_vec()));
+        start += stride;
+    }
+    Ok(PipelineData::Values(out))
+}
+
+/// `split-by <field>` — group records by `field` value, producing a Record
+/// keyed by group values (vs. group-by which returns key/items records).
+/// Useful when downstream needs `$grouped.<key>` access.
+fn vb_split_by(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+    let field = match args.first() {
+        Some(f) => f,
+        None => { eprintln!("split-by: missing field"); return Err(1); }
+    };
+    let vs = input.into_values()?;
+    let mut groups: IndexMap<String, Vec<Value>> = IndexMap::new();
+    for v in vs {
+        let key = v.get(field).map(|fv| fv.to_display_string()).unwrap_or_default();
+        groups.entry(key).or_default().push(v);
+    }
+    let mut rec = IndexMap::new();
+    for (k, items) in groups {
+        rec.insert(k, Value::List(items));
+    }
+    Ok(PipelineData::Values(vec![Value::Record(rec)]))
+}
+
+// ---------------------------------------------------------------------------
+// Phase 11b — encode / decode (base64 / hex), hand-rolled, no extra deps
+// ---------------------------------------------------------------------------
+
+fn input_as_bytes(input: PipelineData) -> Vec<u8> {
+    match input {
+        PipelineData::Empty => Vec::new(),
+        PipelineData::Bytes(b) => {
+            // Strip one trailing newline so `echo foo | encode hex` doesn't
+            // include the implicit newline from echo. Matches the str-builtin
+            // convention adopted in Phase 9b.
+            if b.last() == Some(&b'\n') { b[..b.len() - 1].to_vec() } else { b }
+        }
+        PipelineData::Values(vs) => {
+            if vs.len() == 1 {
+                match &vs[0] {
+                    Value::String(s) => s.as_bytes().to_vec(),
+                    Value::Binary(b) => b.clone(),
+                    other => other.to_display_string().into_bytes(),
+                }
+            } else {
+                vs.iter().map(|v| v.to_display_string()).collect::<Vec<_>>().join("\n").into_bytes()
+            }
+        }
+    }
+}
+
+const B64_TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+fn b64_encode(input: &[u8]) -> String {
+    let mut out = String::with_capacity((input.len() + 2) / 3 * 4);
+    let mut chunks = input.chunks_exact(3);
+    for c in chunks.by_ref() {
+        let n = ((c[0] as u32) << 16) | ((c[1] as u32) << 8) | (c[2] as u32);
+        out.push(B64_TABLE[((n >> 18) & 0x3F) as usize] as char);
+        out.push(B64_TABLE[((n >> 12) & 0x3F) as usize] as char);
+        out.push(B64_TABLE[((n >> 6) & 0x3F) as usize] as char);
+        out.push(B64_TABLE[(n & 0x3F) as usize] as char);
+    }
+    let rem = chunks.remainder();
+    match rem.len() {
+        1 => {
+            let n = (rem[0] as u32) << 16;
+            out.push(B64_TABLE[((n >> 18) & 0x3F) as usize] as char);
+            out.push(B64_TABLE[((n >> 12) & 0x3F) as usize] as char);
+            out.push('=');
+            out.push('=');
+        }
+        2 => {
+            let n = ((rem[0] as u32) << 16) | ((rem[1] as u32) << 8);
+            out.push(B64_TABLE[((n >> 18) & 0x3F) as usize] as char);
+            out.push(B64_TABLE[((n >> 12) & 0x3F) as usize] as char);
+            out.push(B64_TABLE[((n >> 6) & 0x3F) as usize] as char);
+            out.push('=');
+        }
+        _ => {}
+    }
+    out
+}
+
+fn b64_decode(input: &str) -> Result<Vec<u8>, String> {
+    let mut lut = [255u8; 256];
+    for (i, &b) in B64_TABLE.iter().enumerate() { lut[b as usize] = i as u8; }
+    let clean: Vec<u8> = input.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+    // Strip padding chars; bit-accumulator naturally drops the partial byte.
+    let trimmed: &[u8] = clean.strip_suffix(b"==").or_else(|| clean.strip_suffix(b"=")).unwrap_or(&clean);
+    let mut out = Vec::with_capacity(trimmed.len() / 4 * 3);
+    let mut buf: u32 = 0;
+    let mut bits = 0;
+    for &b in trimmed {
+        let v = lut[b as usize];
+        if v == 255 { return Err(format!("invalid base64 char: {}", b as char)); }
+        buf = (buf << 6) | (v as u32);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((buf >> bits) & 0xFF) as u8);
+        }
+    }
+    Ok(out)
+}
+
+fn hex_encode(input: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(input.len() * 2);
+    for &b in input {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0xF) as usize] as char);
+    }
+    out
+}
+
+fn hex_decode(input: &str) -> Result<Vec<u8>, String> {
+    let clean: Vec<u8> = input.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+    if clean.len() % 2 != 0 { return Err("odd number of hex digits".into()); }
+    let from_hex = |b: u8| -> Result<u8, String> {
+        match b {
+            b'0'..=b'9' => Ok(b - b'0'),
+            b'a'..=b'f' => Ok(b - b'a' + 10),
+            b'A'..=b'F' => Ok(b - b'A' + 10),
+            _ => Err(format!("invalid hex char: {}", b as char)),
+        }
+    };
+    let mut out = Vec::with_capacity(clean.len() / 2);
+    for pair in clean.chunks_exact(2) {
+        out.push((from_hex(pair[0])? << 4) | from_hex(pair[1])?);
+    }
+    Ok(out)
+}
+
+/// `encode <base64|hex>` — encode pipeline bytes to a string.
+fn vb_encode(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+    let scheme = match args.first().map(|s| s.as_str()) {
+        Some(s) => s,
+        None => { eprintln!("encode: missing scheme (base64|hex)"); return Err(1); }
+    };
+    let bytes = input_as_bytes(input);
+    let s = match scheme {
+        "base64" | "b64" => b64_encode(&bytes),
+        "hex" => hex_encode(&bytes),
+        other => { eprintln!("encode: unknown scheme '{}'", other); return Err(1); }
+    };
+    Ok(PipelineData::Values(vec![Value::String(s)]))
+}
+
+/// `decode <base64|hex>` — decode a string into bytes. Output is a String
+/// when the result is valid UTF-8, otherwise Binary.
+fn vb_decode(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+    let scheme = match args.first().map(|s| s.as_str()) {
+        Some(s) => s,
+        None => { eprintln!("decode: missing scheme (base64|hex)"); return Err(1); }
+    };
+    let bytes = input_as_bytes(input);
+    let s = String::from_utf8_lossy(&bytes).into_owned();
+    let decoded = match scheme {
+        "base64" | "b64" => b64_decode(&s).map_err(|e| { eprintln!("decode: {}", e); 1 })?,
+        "hex" => hex_decode(&s).map_err(|e| { eprintln!("decode: {}", e); 1 })?,
+        other => { eprintln!("decode: unknown scheme '{}'", other); return Err(1); }
+    };
+    let v = match String::from_utf8(decoded.clone()) {
+        Ok(s) => Value::String(s),
+        Err(_) => Value::Binary(decoded),
+    };
+    Ok(PipelineData::Values(vec![v]))
 }
