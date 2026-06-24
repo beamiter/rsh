@@ -525,6 +525,15 @@ pub fn apply_closure(
         let v = args.get(i).cloned().unwrap_or(Value::Null);
         state.let_vars.insert(p.clone(), v);
     }
+    // `$in` is a nushell-style alias for the first positional arg —
+    // always available so bare-body closures like `each { $in * 2 }` work.
+    // Only auto-injected if not already declared as an explicit param.
+    if !state.let_vars.contains_key("in") {
+        state.let_vars.insert(
+            "in".to_string(),
+            args.first().cloned().unwrap_or(Value::Null),
+        );
+    }
 
     let result = (|| -> Result<Value, i32> {
         // Literal-value body shortcut: `{|r| 100}` / `{|r| "x"}` / `{|r| [1,2]}`

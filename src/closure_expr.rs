@@ -29,6 +29,7 @@ enum Tok {
     AndAnd, OrOr, Bang,
     LParen, RParen,
     LBrace, RBrace,
+    Comma, FatArrow,
 }
 
 fn tokenize(src: &str) -> Result<Vec<Tok>, String> {
@@ -49,6 +50,8 @@ fn tokenize(src: &str) -> Result<Vec<Tok>, String> {
             b'{' => { out.push(Tok::LBrace); i += 1; }
             b'}' => { out.push(Tok::RBrace); i += 1; }
             b'=' if i + 1 < bytes.len() && bytes[i+1] == b'=' => { out.push(Tok::Eq); i += 2; }
+            b'=' if i + 1 < bytes.len() && bytes[i+1] == b'>' => { out.push(Tok::FatArrow); i += 2; }
+            b',' => { out.push(Tok::Comma); i += 1; }
             b'!' if i + 1 < bytes.len() && bytes[i+1] == b'=' => { out.push(Tok::Ne); i += 2; }
             b'<' if i + 1 < bytes.len() && bytes[i+1] == b'=' => { out.push(Tok::Le); i += 2; }
             b'>' if i + 1 < bytes.len() && bytes[i+1] == b'=' => { out.push(Tok::Ge); i += 2; }
@@ -229,6 +232,7 @@ impl<'a> Parser<'a> {
                 "false" => Ok(Expr::Bool(false)),
                 "null" => Ok(Expr::Null),
                 "if" => self.parse_if_tail(),
+                "match" => self.parse_match_tail(),
                 _ => Err(format!("unknown identifier '{}'", name)),
             },
             Some(Tok::Var(name, path)) => Ok(Expr::Var(name, path)),
@@ -240,6 +244,54 @@ impl<'a> Parser<'a> {
                 }
             }
             other => Err(format!("unexpected token {:?}", other)),
+        }
+    }
+
+    /// `match` already consumed. Expects: <scrutinee> '{' (<pat> '=>' <expr>)(',' ...)* '}'
+    fn parse_match_tail(&mut self) -> Result<Expr, String> {
+        let scrut = self.parse_or()?;
+        match self.bump() {
+            Some(Tok::LBrace) => {}
+            other => return Err(format!("expected '{{' after match scrutinee, got {:?}", other)),
+        }
+        let mut arms = Vec::new();
+        loop {
+            // Allow trailing comma / empty body.
+            if matches!(self.peek(), Some(Tok::RBrace)) { self.bump(); break; }
+            let pat = self.parse_match_pat()?;
+            match self.bump() {
+                Some(Tok::FatArrow) => {}
+                other => return Err(format!("expected '=>' in match arm, got {:?}", other)),
+            }
+            let body = self.parse_or()?;
+            arms.push((pat, body));
+            match self.peek() {
+                Some(Tok::Comma) => { self.bump(); }
+                Some(Tok::RBrace) => { self.bump(); break; }
+                other => return Err(format!("expected ',' or '}}' between match arms, got {:?}", other)),
+            }
+        }
+        Ok(Expr::Match(Box::new(scrut), arms))
+    }
+
+    fn parse_match_pat(&mut self) -> Result<MatchPat, String> {
+        // `_` is a normal Ident — treat it as wildcard. Allow `-N` for negative literals.
+        let negate = if matches!(self.peek(), Some(Tok::Minus)) { self.bump(); true } else { false };
+        match self.bump() {
+            Some(Tok::Ident(s)) if s == "_" && !negate => Ok(MatchPat::Wildcard),
+            Some(Tok::Ident(s)) => match s.as_str() {
+                "true" => Ok(MatchPat::Lit(Value::Bool(true))),
+                "false" => Ok(MatchPat::Lit(Value::Bool(false))),
+                "null" => Ok(MatchPat::Lit(Value::Null)),
+                _ => Err(format!("match pattern must be literal or _, got {}", s)),
+            },
+            Some(Tok::Num(n, is_int)) => {
+                let n = if negate { -n } else { n };
+                if is_int { Ok(MatchPat::Lit(Value::Int(n as i64))) }
+                else { Ok(MatchPat::Lit(Value::Float(n))) }
+            }
+            Some(Tok::Str(s)) if !negate => Ok(MatchPat::Lit(Value::String(s))),
+            other => Err(format!("invalid match pattern: {:?}", other)),
         }
     }
 
@@ -297,6 +349,16 @@ enum Expr {
     Neg(Box<Expr>),
     Not(Box<Expr>),
     If(Box<Expr>, Box<Expr>, Box<Expr>),
+    /// `match <scrutinee> { <pat> => <arm>, ..., _ => <default> }`
+    /// Patterns are literal values (int/float/string/bool/null) or `_` wildcard.
+    /// First matching arm wins; falling off the end without a wildcard yields Null.
+    Match(Box<Expr>, Vec<(MatchPat, Expr)>),
+}
+
+#[derive(Debug, Clone)]
+enum MatchPat {
+    Wildcard,
+    Lit(Value),
 }
 
 /// Try to evaluate `src` as a closure-body expression against `vars`.
@@ -388,6 +450,17 @@ fn eval(e: &Expr, vars: &HashMap<String, Value>) -> Result<Value, String> {
         }
         Expr::If(c, t, e) => {
             if is_truthy(&eval(c, vars)?) { eval(t, vars) } else { eval(e, vars) }
+        }
+        Expr::Match(scrut, arms) => {
+            let sv = eval(scrut, vars)?;
+            for (pat, body) in arms {
+                let hit = match pat {
+                    MatchPat::Wildcard => true,
+                    MatchPat::Lit(v) => &sv == v,
+                };
+                if hit { return eval(body, vars); }
+            }
+            Ok(Value::Null)
         }
         Expr::Cmp(l, op, r) => {
             let lv = eval(l, vars)?;

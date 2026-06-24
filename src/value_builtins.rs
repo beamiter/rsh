@@ -92,6 +92,8 @@ pub static VALUE_BUILTINS: Lazy<HashMap<&'static str, ValueBuiltin>> = Lazy::new
     // Phase 11b — encoding
     m.insert("encode", vb_encode);
     m.insert("decode", vb_decode);
+    // Phase 12c — url parse/join
+    m.insert("url", vb_url);
     m
 });
 
@@ -163,10 +165,21 @@ fn vb_where(input: PipelineData, args: &[String], state: &mut ShellState) -> Res
 }
 
 fn vb_each(input: PipelineData, args: &[String], state: &mut ShellState) -> Result<PipelineData, i32> {
-    let closure = match lookup_closure(args.first(), state) {
+    // Split flags out from the closure argument: `each [-k|--keep-empty] {|x| ...}`.
+    // Without -k, closure results that are Null are dropped (matches nushell's
+    // default of treating Null as "skip this row").
+    let mut keep_empty = false;
+    let mut closure_arg: Option<&String> = None;
+    for a in args {
+        match a.as_str() {
+            "-k" | "--keep-empty" => keep_empty = true,
+            _ => { if closure_arg.is_none() { closure_arg = Some(a); } }
+        }
+    }
+    let closure = match lookup_closure(closure_arg, state) {
         Some(c) => c,
         None => {
-            eprintln!("Usage: each {{|x| ...}}");
+            eprintln!("Usage: each [-k|--keep-empty] {{|x| ...}}");
             return Err(1);
         }
     };
@@ -174,6 +187,7 @@ fn vb_each(input: PipelineData, args: &[String], state: &mut ShellState) -> Resu
     let mut out = Vec::with_capacity(vs.len());
     for v in vs {
         let r = crate::executor::apply_closure(&closure, std::slice::from_ref(&v), state)?;
+        if !keep_empty && matches!(r, Value::Null) { continue; }
         out.push(r);
     }
     Ok(PipelineData::Values(out))
@@ -1398,7 +1412,17 @@ fn resolve_cell_path<'a>(v: &'a Value, path: &[crate::parser::ast::PathSeg]) -> 
 
 fn vb_get(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
     use crate::parser::ast::PathSeg;
-    let path_str = match args.first() {
+    // `get [-i|--ignore-errors] <path>` — with -i, missing path returns Null
+    // instead of erroring (matches nushell's `get -i` / `get --optional`).
+    let mut ignore = false;
+    let mut path_arg: Option<&String> = None;
+    for a in args {
+        match a.as_str() {
+            "-i" | "--ignore-errors" | "--optional" => ignore = true,
+            _ => { if path_arg.is_none() { path_arg = Some(a); } }
+        }
+    }
+    let path_str = match path_arg {
         Some(p) => p,
         None => { eprintln!("get: missing cell-path"); return Err(1); }
     };
@@ -1411,12 +1435,18 @@ fn vb_get(input: PipelineData, args: &[String], _state: &mut ShellState) -> Resu
         let v = Value::List(vs);
         match resolve_cell_path(&v, &path) {
             Some(r) => Ok(PipelineData::Values(vec![r])),
-            None => { eprintln!("get: path '{}' not found", path_str); Err(1) }
+            None => {
+                if ignore { Ok(PipelineData::Values(vec![Value::Null])) }
+                else { eprintln!("get: path '{}' not found", path_str); Err(1) }
+            }
         }
     } else if vs.len() == 1 {
         match resolve_cell_path(&vs[0], &path) {
             Some(v) => Ok(PipelineData::Values(vec![v])),
-            None => { eprintln!("get: path '{}' not found", path_str); Err(1) }
+            None => {
+                if ignore { Ok(PipelineData::Values(vec![Value::Null])) }
+                else { eprintln!("get: path '{}' not found", path_str); Err(1) }
+            }
         }
     } else {
         let mut out = Vec::with_capacity(vs.len());
@@ -2576,4 +2606,181 @@ fn vb_decode(input: PipelineData, args: &[String], _state: &mut ShellState) -> R
         Err(_) => Value::Binary(decoded),
     };
     Ok(PipelineData::Values(vec![v]))
+}
+
+// ---------------------------------------------------------------------------
+// Phase 12c — url parse / url join
+// ---------------------------------------------------------------------------
+
+/// `url parse [<str>]` — split a URL into a Record with `scheme`, `username`,
+/// `password`, `host`, `port`, `path`, `query`, `fragment`, and `params`
+/// (parsed query as a Record). If no positional arg is given, reads the URL
+/// from pipeline input.
+///
+/// `url join <record>` — opposite: serialize a Record back to a URL string.
+/// Missing/empty fields are omitted (no `:port`, no `?`, no `#`).
+fn vb_url(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+    let sub = match args.first().map(|s| s.as_str()) {
+        Some(s) => s,
+        None => { eprintln!("url: missing subcommand (parse|join)"); return Err(1); }
+    };
+    let rest = &args[1..];
+    match sub {
+        "parse" => {
+            let s = if let Some(arg) = rest.first() {
+                arg.clone()
+            } else {
+                input_as_string(input)?.trim().to_string()
+            };
+            let rec = parse_url(&s);
+            Ok(PipelineData::Values(vec![Value::Record(rec)]))
+        }
+        "join" => {
+            let rec = if let Some(_arg) = rest.first() {
+                // Allow `url join <json-record-string>` for ergonomic CLI use.
+                let txt = rest[0].clone();
+                match serde_json::from_str::<serde_json::Value>(&txt) {
+                    Ok(j) => match Value::from_json(j) {
+                        Value::Record(r) => r,
+                        _ => { eprintln!("url join: argument must be a Record"); return Err(1); }
+                    },
+                    Err(_) => { eprintln!("url join: argument must be a JSON Record"); return Err(1); }
+                }
+            } else {
+                let vs = input.into_values()?;
+                match vs.into_iter().next() {
+                    Some(Value::Record(r)) => r,
+                    _ => { eprintln!("url join: pipeline input must be a Record"); return Err(1); }
+                }
+            };
+            let s = join_url(&rec);
+            Ok(PipelineData::Values(vec![Value::String(s)]))
+        }
+        other => { eprintln!("url: unknown subcommand '{}'", other); Err(1) }
+    }
+}
+
+fn parse_url(input: &str) -> IndexMap<String, Value> {
+    let mut rec: IndexMap<String, Value> = IndexMap::new();
+    let mut rest = input;
+
+    // scheme://
+    let scheme = if let Some(idx) = rest.find("://") {
+        let s = &rest[..idx];
+        rest = &rest[idx + 3..];
+        s.to_string()
+    } else { String::new() };
+
+    // fragment (split first so it's never confused with query)
+    let fragment = if let Some(idx) = rest.find('#') {
+        let f = rest[idx + 1..].to_string();
+        rest = &rest[..idx];
+        f
+    } else { String::new() };
+
+    // query
+    let query = if let Some(idx) = rest.find('?') {
+        let q = rest[idx + 1..].to_string();
+        rest = &rest[..idx];
+        q
+    } else { String::new() };
+
+    // path (everything from first '/')
+    let (authority, path) = if let Some(idx) = rest.find('/') {
+        (&rest[..idx], rest[idx..].to_string())
+    } else {
+        (rest, String::new())
+    };
+
+    // userinfo@host:port
+    let (userinfo, hostport) = if let Some(idx) = authority.rfind('@') {
+        (&authority[..idx], &authority[idx + 1..])
+    } else {
+        ("", authority)
+    };
+    let (username, password) = if userinfo.is_empty() {
+        (String::new(), String::new())
+    } else if let Some(idx) = userinfo.find(':') {
+        (userinfo[..idx].to_string(), userinfo[idx + 1..].to_string())
+    } else {
+        (userinfo.to_string(), String::new())
+    };
+    // host:port — handle IPv6 `[::1]:8080` as a special case.
+    let (host, port) = if let Some(stripped) = hostport.strip_prefix('[') {
+        if let Some(end) = stripped.find(']') {
+            let h = format!("[{}]", &stripped[..end]);
+            let after = &stripped[end + 1..];
+            let p = after.strip_prefix(':').unwrap_or("").to_string();
+            (h, p)
+        } else { (hostport.to_string(), String::new()) }
+    } else if let Some(idx) = hostport.rfind(':') {
+        (hostport[..idx].to_string(), hostport[idx + 1..].to_string())
+    } else {
+        (hostport.to_string(), String::new())
+    };
+
+    // params = parsed query
+    let mut params: IndexMap<String, Value> = IndexMap::new();
+    if !query.is_empty() {
+        for kv in query.split('&') {
+            if kv.is_empty() { continue; }
+            let (k, v) = match kv.find('=') {
+                Some(i) => (&kv[..i], &kv[i + 1..]),
+                None => (kv, ""),
+            };
+            params.insert(k.to_string(), Value::String(v.to_string()));
+        }
+    }
+
+    rec.insert("scheme".to_string(), Value::String(scheme));
+    rec.insert("username".to_string(), Value::String(username));
+    rec.insert("password".to_string(), Value::String(password));
+    rec.insert("host".to_string(), Value::String(host));
+    rec.insert("port".to_string(), Value::String(port));
+    rec.insert("path".to_string(), Value::String(path));
+    rec.insert("query".to_string(), Value::String(query));
+    rec.insert("fragment".to_string(), Value::String(fragment));
+    rec.insert("params".to_string(), Value::Record(params));
+    rec
+}
+
+fn join_url(rec: &IndexMap<String, Value>) -> String {
+    let get = |k: &str| -> String {
+        match rec.get(k) {
+            Some(Value::String(s)) => s.clone(),
+            Some(Value::Null) | None => String::new(),
+            Some(v) => v.to_display_string(),
+        }
+    };
+    let scheme = get("scheme");
+    let username = get("username");
+    let password = get("password");
+    let host = get("host");
+    let port = get("port");
+    let path = get("path");
+    let fragment = get("fragment");
+    // Prefer params (Record) when present, else fall back to literal query.
+    let query = match rec.get("params") {
+        Some(Value::Record(p)) if !p.is_empty() => {
+            p.iter()
+                .map(|(k, v)| format!("{}={}", k, v.to_display_string()))
+                .collect::<Vec<_>>()
+                .join("&")
+        }
+        _ => get("query"),
+    };
+
+    let mut out = String::new();
+    if !scheme.is_empty() { out.push_str(&scheme); out.push_str("://"); }
+    if !username.is_empty() {
+        out.push_str(&username);
+        if !password.is_empty() { out.push(':'); out.push_str(&password); }
+        out.push('@');
+    }
+    out.push_str(&host);
+    if !port.is_empty() { out.push(':'); out.push_str(&port); }
+    if !path.is_empty() { out.push_str(&path); }
+    if !query.is_empty() { out.push('?'); out.push_str(&query); }
+    if !fragment.is_empty() { out.push('#'); out.push_str(&fragment); }
+    out
 }
