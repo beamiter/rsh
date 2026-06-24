@@ -222,7 +222,15 @@ fn execute_value_pipeline(cmds: &[Command], state: &mut ShellState) -> i32 {
 
     // If our own stdin is a pipe (not a tty), the user is feeding bytes into
     // the first value-aware stage. Read them eagerly. (Phase 5a is non-streaming.)
-    let mut data = if atty::is(atty::Stream::Stdin) {
+    // Skip when the first command is a source (open / ls / ps) that ignores stdin.
+    let first_is_source = matches!(
+        cmds.first()
+            .and_then(|c| match c { Command::Simple(s) => s.words.first(), _ => None })
+            .and_then(|w| w.first())
+            .and_then(|p| match p { WordPart::Literal(s) => Some(s.as_str()), _ => None }),
+        Some("open" | "ls" | "ps")
+    );
+    let mut data = if first_is_source || atty::is(atty::Stream::Stdin) {
         PipelineData::Empty
     } else {
         let mut buf = Vec::new();
@@ -519,7 +527,32 @@ pub fn apply_closure(
     }
 
     let result = (|| -> Result<Value, i32> {
+        // Literal-value body shortcut: `{|r| 100}` / `{|r| "x"}` / `{|r| [1,2]}`
+        // — if the trimmed body parses as JSON, treat it as a constant value
+        // and skip the command interpreter (so `update col {|r| 100}` works).
+        let trimmed = closure.body_src.trim();
+        if !trimmed.is_empty() {
+            if let Ok(j) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                return Ok(Value::from_json(j));
+            }
+        }
         let parsed = crate::parser::parse(&closure.body_src).map_err(|_| 2_i32)?;
+        // Pure-variable-path body shortcut: `{|r| $r.a}` → return the typed
+        // value of that path, not "run $r.a as a command".
+        if parsed.len() == 1 {
+            let pipeline = &parsed[0].list.first;
+            if pipeline.commands.len() == 1 {
+                if let crate::parser::ast::Command::Simple(s) = &pipeline.commands[0] {
+                    if s.words.len() == 1 && s.assignments.is_empty() && s.redirects.is_empty() {
+                        if let [crate::parser::ast::WordPart::VariablePath { name, path }] = s.words[0].as_slice() {
+                            if let Some(base) = state.let_vars.get(name).cloned() {
+                                return Ok(crate::expand::resolve_path(&base, path).cloned().unwrap_or(Value::Null));
+                            }
+                        }
+                    }
+                }
+            }
+        }
         let mut last: Value = Value::Null;
         for complete in &parsed {
             // Try the value-aware pipeline path so the closure returns a Value

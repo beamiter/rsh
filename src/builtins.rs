@@ -146,7 +146,7 @@ pub fn run_builtin(name: &str, args: &[String], state: &mut ShellState) -> i32 {
         "avg" => crate::stream::builtin_avg(args),
         "min" => crate::stream::builtin_min(args),
         "max" => crate::stream::builtin_max(args),
-        "lines" => crate::stream::builtin_lines(args),
+        // `lines` is value-aware (Phase 6b) — falls through to `_` adapter.
         "stats" => crate::stream::builtin_stats(args),
         "trim" => crate::stream::builtin_trim(args),
         "reverse" => crate::stream::builtin_reverse(args),
@@ -190,7 +190,21 @@ fn run_value_builtin_in_fork(
     let input = if buf.is_empty() {
         PipelineData::Empty
     } else {
-        PipelineData::Bytes(buf)
+        // If stdin is a JSON array (i.e. previous fork-boundary stage was also
+        // value-aware), surface it as Values so per-element builtins work
+        // across the fork boundary the same as they do in-process.
+        let try_parse = std::str::from_utf8(&buf).ok().and_then(|s| {
+            let t = s.trim();
+            if t.starts_with('[') {
+                serde_json::from_str::<serde_json::Value>(t).ok()
+            } else { None }
+        });
+        match try_parse {
+            Some(serde_json::Value::Array(arr)) => {
+                PipelineData::Values(arr.into_iter().map(crate::value::Value::from_json).collect())
+            }
+            _ => PipelineData::Bytes(buf),
+        }
     };
     match vfn(input, args, state) {
         Ok(out) => {
@@ -200,8 +214,8 @@ fn run_value_builtin_in_fork(
                 PipelineData::Bytes(b) => sink.extend_from_slice(&b),
                 PipelineData::Values(ref vs) => {
                     // Scalar-friendly rendering: single non-record value prints raw
-                    // (so `count` outputs `4`, not `[4]`). Record lists render as
-                    // JSON arrays (downstream value-aware builtins can re-parse).
+                    // (so `count` outputs `4`, not `[4]`). Record/list output serializes
+                    // as JSON so downstream value-aware builtins can re-parse it.
                     if vs.len() == 1 && !vs[0].is_record() {
                         let _ = writeln!(sink, "{}", vs[0].to_display_string());
                     } else {
