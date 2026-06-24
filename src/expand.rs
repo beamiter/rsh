@@ -2,7 +2,8 @@
 /// substitution expansion.
 
 use crate::environment::ShellState;
-use crate::parser::ast::{Word, WordPart, ProcessSubKind};
+use crate::parser::ast::{Word, WordPart, ProcessSubKind, PathSeg, InterpPart};
+use crate::value::Value;
 
 /// Expand a Word (Vec<WordPart>) into a list of strings.
 /// Word splitting and globbing may produce multiple strings from one Word.
@@ -345,7 +346,87 @@ fn expand_part(part: &WordPart, state: &mut ShellState) -> String {
             expand_brace_range(start, end, step.as_deref()).join(" ")
         }
         WordPart::ProcessSub(cmd, kind) => expand_process_sub(cmd, kind, state),
+        WordPart::VariablePath { name, path } => expand_variable_path(name, path, state),
+        WordPart::Interpolated(parts) => expand_interpolated(parts, state),
+        WordPart::Closure { params, body_src } => {
+            // Stash a fresh ClosureData (snapshotting let_vars) and return a
+            // sentinel string. Closure-aware builtins (each/where) look the
+            // closure back up via `state.inline_closures`.
+            use crate::value::ClosureData;
+            use std::sync::Arc;
+            let data = Arc::new(ClosureData {
+                params: params.clone(),
+                body_src: body_src.clone(),
+                captured: state.let_vars.clone(),
+            });
+            state.inline_closures.push(data);
+            format!("\x01rsh-closure:{}\x02", state.inline_closures.len() - 1)
+        }
     }
+}
+
+/// Render `.field[3].other` etc. as a literal string — used when no typed
+/// Value backs the variable (preserves bash `$name.txt` behavior).
+fn render_path_as_literal(path: &[PathSeg]) -> String {
+    let mut out = String::new();
+    for seg in path {
+        match seg {
+            PathSeg::Field(f) => { out.push('.'); out.push_str(f); }
+            PathSeg::Index(i) => { out.push('['); out.push_str(&i.to_string()); out.push(']'); }
+        }
+    }
+    out
+}
+
+/// Walk a path into a Value. Returns None if any segment doesn't exist.
+/// Negative indices count from the end (nushell-style).
+pub fn resolve_path<'a>(v: &'a Value, path: &[PathSeg]) -> Option<&'a Value> {
+    let mut cur = v;
+    for seg in path {
+        cur = match (cur, seg) {
+            (Value::Record(r), PathSeg::Field(name)) => r.get(name)?,
+            (Value::List(items), PathSeg::Index(i)) => {
+                let len = items.len() as i64;
+                let idx = if *i < 0 { len + *i } else { *i };
+                if idx < 0 || idx >= len { return None; }
+                &items[idx as usize]
+            }
+            (Value::Record(r), PathSeg::Index(i)) => {
+                // Numeric index into a record selects the Nth entry (insertion order).
+                let len = r.len() as i64;
+                let idx = if *i < 0 { len + *i } else { *i };
+                if idx < 0 || idx >= len { return None; }
+                let (_, v) = r.get_index(idx as usize)?;
+                v
+            }
+            _ => return None,
+        };
+    }
+    Some(cur)
+}
+
+fn expand_variable_path(name: &str, path: &[PathSeg], state: &mut ShellState) -> String {
+    if let Some(v) = state.let_vars.get(name) {
+        if let Some(found) = resolve_path(v, path) {
+            return found.to_display_string();
+        }
+        // Path didn't resolve into the typed value — fall through to literal
+        // rendering so the user sees something useful rather than an empty string.
+    }
+    let mut s = expand_variable(name, state);
+    s.push_str(&render_path_as_literal(path));
+    s
+}
+
+fn expand_interpolated(parts: &[InterpPart], state: &mut ShellState) -> String {
+    let mut out = String::new();
+    for p in parts {
+        match p {
+            InterpPart::Lit(s) => out.push_str(s),
+            InterpPart::Expr(w) => out.push_str(&expand_word_to_string(w, state)),
+        }
+    }
+    out
 }
 
 fn expand_variable(name: &str, state: &mut ShellState) -> String {
@@ -583,7 +664,14 @@ fn expand_parameter(name: &str, state: &mut ShellState) -> String {
             _ => {}
         }
     }
-    state.get_var(name).unwrap_or("").to_string()
+    if let Some(v) = state.get_var(name) {
+        return v.to_string();
+    }
+    // Phase 5a: fall back to typed let-bindings.
+    if let Some(v) = state.let_vars.get(name) {
+        return v.to_display_string();
+    }
+    String::new()
 }
 
 /// Index of the first #, %, or / that acts as a parameter-expansion operator

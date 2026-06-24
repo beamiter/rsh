@@ -21,6 +21,7 @@ mod job;
 mod keybindings;
 mod osc;
 mod parser;
+mod pipeline_data;
 mod probe;
 mod prompt;
 pub mod session;
@@ -29,6 +30,8 @@ mod signal;
 mod stream;
 mod structured;
 mod suggest;
+mod value;
+mod value_builtins;
 mod zjump;
 
 use crossterm::terminal;

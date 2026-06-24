@@ -8,6 +8,12 @@ pub enum WordPart {
     SingleQuoted(String),
     DoubleQuoted(Vec<WordPart>),
     Variable(String),
+    /// `$name.field[0].other` — variable with dotted/indexed path access into a typed Value.
+    VariablePath { name: String, path: Vec<PathSeg> },
+    /// `$"...($expr)..."` — nushell-style interpolated string. Parts concatenate at expand time.
+    Interpolated(Vec<InterpPart>),
+    /// `{|p1 p2| body}` — closure literal. Body is kept as raw source and re-parsed at apply time.
+    Closure { params: Vec<String>, body_src: String },
     CommandSub(String),
     Glob(String),
     Tilde(String),
@@ -15,6 +21,18 @@ pub enum WordPart {
     BraceRange { start: String, end: String, step: Option<String> },
     Arithmetic(String),
     ProcessSub(String, ProcessSubKind),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum PathSeg {
+    Field(String),
+    Index(i64),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum InterpPart {
+    Lit(String),
+    Expr(Word),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

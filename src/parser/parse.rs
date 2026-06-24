@@ -312,7 +312,18 @@ impl<'a> Parser<'a> {
                     "while" => self.parse_while(),
                     "until" => self.parse_until(),
                     "case" => self.parse_case(),
-                    "select" => self.parse_select(),
+                    "select" => {
+                        // Phase 5a: `select` is also a value-aware projection
+                        // builtin (nushell-style). Only treat it as the bash
+                        // compound `select var in ...; do ...; done` when the
+                        // very next token is a Word that doesn't look like a
+                        // pipe argument and is followed by `in`/`do`.
+                        if self.looks_like_select_compound() {
+                            self.parse_select()
+                        } else {
+                            self.parse_simple_command()
+                        }
+                    }
                     _ => self.parse_simple_command(),
                 }
             }
@@ -547,6 +558,52 @@ impl<'a> Parser<'a> {
         self.expect_keyword("esac")?;
         let redirects = self.parse_optional_redirects()?;
         Ok(Command::Compound(CompoundCommand::Case { word, arms, redirects }))
+    }
+
+    /// Heuristic: is the current `select` token followed by `var in ...; do`?
+    /// If not, the user means our value-aware projection builtin.
+    fn looks_like_select_compound(&mut self) -> bool {
+        // We're sitting on Word("select"). Look at the next two tokens by
+        // saving lexer state, then restoring.
+        let pos_before = self.lexer.pos();
+        let cur_save = self.current.clone();
+        let peek_save = self.peeked.clone();
+        let mut found = false;
+        // peek the token after `select`
+        let next = self.peek().clone();
+        if let Token::Word(w) = &next {
+            // bash select var must be a plain identifier (no flags, no dots).
+            if !w.is_empty()
+                && w.chars().next().map(|c| c.is_alphabetic() || c == '_').unwrap_or(false)
+                && w.chars().all(|c| c.is_alphanumeric() || c == '_')
+            {
+                // Now peek one further: tentatively advance past `select` and the var.
+                let saved_current = self.current.clone();
+                let saved_peeked = self.peeked.clone();
+                self.advance(); // consume select
+                self.advance(); // consume var
+                // skip newlines / semicolons
+                while matches!(self.current.token, Token::Newline | Token::Semi) {
+                    self.advance();
+                }
+                if let Token::Word(kw) = &self.current.token {
+                    if kw == "in" || kw == "do" {
+                        found = true;
+                    }
+                }
+                // restore
+                self.current = saved_current;
+                self.peeked = saved_peeked;
+                self.lexer.set_pos(pos_before);
+            }
+        }
+        // restore on the negative branches too (peek() doesn't consume, but be safe)
+        self.current = cur_save;
+        self.peeked = peek_save;
+        if !found {
+            self.lexer.set_pos(pos_before);
+        }
+        found
     }
 
     fn parse_select(&mut self) -> Result<Command, ParseError> {
@@ -1028,7 +1085,157 @@ fn parse_assignment(w: &str, parser: &mut Parser) -> Result<Assignment, ParseErr
 }
 
 /// Parse a raw word string into WordPart components.
+/// Crude heuristic to keep `let u = {"name":"bob"}` from being eaten by bash
+/// brace expansion: if the contents include a `"` or an unquoted `:`, treat
+/// the `{...}` as an opaque literal. Bash brace expansion never legitimately
+/// contains a `"`, and `:` only appears in parameter substitution which is
+/// inside `${...}`, not `{...}`.
+fn looks_like_json_object(content: &str) -> bool {
+    content.contains('"') || content.contains(':')
+}
+
+/// Detect `{|p1 p2 ...| body}` and split into (params, body_src).
+/// Returns None if `raw` is not a closure literal.
+fn try_parse_closure(raw: &str) -> Option<WordPart> {
+    let bytes = raw.as_bytes();
+    if bytes.len() < 4 || !raw.starts_with("{|") || !raw.ends_with('}') {
+        return None;
+    }
+    let inner = &raw[2..raw.len() - 1]; // strip {| and }
+    // Find the closing `|` for the params section. It's the first `|` at depth 0
+    // (we already consumed the opening one), respecting nested quotes/braces.
+    let mut depth: i32 = 0;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut split: Option<usize> = None;
+    let mut prev_escape = false;
+    for (i, c) in inner.char_indices() {
+        if prev_escape { prev_escape = false; continue; }
+        if c == '\\' { prev_escape = true; continue; }
+        if !in_double && c == '\'' { in_single = !in_single; continue; }
+        if !in_single && c == '"' { in_double = !in_double; continue; }
+        if in_single || in_double { continue; }
+        match c {
+            '{' => depth += 1,
+            '}' => depth -= 1,
+            '|' if depth == 0 => { split = Some(i); break; }
+            _ => {}
+        }
+    }
+    let split = split?;
+    let params_str = &inner[..split];
+    let body_src = inner[split + 1..].trim().to_string();
+    let params: Vec<String> = params_str
+        .split_whitespace()
+        .map(|s| s.trim_start_matches('$').to_string())
+        .collect();
+    Some(WordPart::Closure { params, body_src })
+}
+
+/// After a `$name`, try to consume a chain of `.field` / `[N]` segments
+/// (nushell-style path access). Returns the empty vec if nothing matches.
+/// Only consumes characters that look like a path: `.` must be followed by
+/// an alphanumeric or `_`; `[` must contain digits (optionally `-`) and `]`.
+/// Otherwise we leave the chars alone so bash-style `$name.txt` keeps working.
+fn try_read_path(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Vec<PathSeg> {
+    let mut path = Vec::new();
+    loop {
+        match chars.peek() {
+            Some(&'.') => {
+                let mut probe = chars.clone();
+                probe.next();
+                let ok = matches!(probe.peek(), Some(&c) if c.is_alphanumeric() || c == '_');
+                if !ok { break; }
+                chars.next();
+                let mut field = String::new();
+                while let Some(&c) = chars.peek() {
+                    if c.is_alphanumeric() || c == '_' {
+                        field.push(c);
+                        chars.next();
+                    } else { break; }
+                }
+                if !field.is_empty() && field.chars().all(|c| c.is_ascii_digit()) {
+                    if let Ok(n) = field.parse::<i64>() {
+                        path.push(PathSeg::Index(n));
+                        continue;
+                    }
+                }
+                path.push(PathSeg::Field(field));
+            }
+            Some(&'[') => {
+                let mut probe = chars.clone();
+                probe.next();
+                let neg = probe.peek() == Some(&'-');
+                if neg { probe.next(); }
+                let mut idx = String::new();
+                let mut closed = false;
+                while let Some(&c) = probe.peek() {
+                    if c == ']' { closed = true; break; }
+                    if c.is_ascii_digit() { idx.push(c); probe.next(); } else { break; }
+                }
+                if !closed || idx.is_empty() { break; }
+                chars.next();
+                if neg { chars.next(); }
+                for _ in 0..idx.len() { chars.next(); }
+                chars.next();
+                let n: i64 = idx.parse().unwrap_or(0);
+                path.push(PathSeg::Index(if neg { -n } else { n }));
+            }
+            _ => break,
+        }
+    }
+    path
+}
+
+/// Read body of a `$"...($expr)..."` interpolated string. Caller has already
+/// consumed the opening `$"`. Stops at the closing `"`.
+fn read_interpolated(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Vec<InterpPart> {
+    let mut parts = Vec::new();
+    let mut lit = String::new();
+    while let Some(&c) = chars.peek() {
+        match c {
+            '"' => { chars.next(); break; }
+            '\\' => {
+                chars.next();
+                match chars.next() {
+                    Some(c2 @ ('\\' | '"' | '(' | '$')) => lit.push(c2),
+                    Some('n') => lit.push('\n'),
+                    Some('t') => lit.push('\t'),
+                    Some('r') => lit.push('\r'),
+                    Some(other) => { lit.push('\\'); lit.push(other); }
+                    None => lit.push('\\'),
+                }
+            }
+            '(' => {
+                if !lit.is_empty() {
+                    parts.push(InterpPart::Lit(std::mem::take(&mut lit)));
+                }
+                chars.next();
+                let mut body = String::new();
+                let mut depth = 1;
+                while let Some(&c2) = chars.peek() {
+                    chars.next();
+                    if c2 == '(' { depth += 1; body.push(c2); continue; }
+                    if c2 == ')' { depth -= 1; if depth == 0 { break; } body.push(c2); continue; }
+                    body.push(c2);
+                }
+                parts.push(InterpPart::Expr(parse_word_parts(&body)));
+            }
+            _ => { lit.push(c); chars.next(); }
+        }
+    }
+    if !lit.is_empty() {
+        parts.push(InterpPart::Lit(lit));
+    }
+    parts
+}
+
 pub fn parse_word_parts(raw: &str) -> Word {
+    // Closure literal `{|p1 p2| body}` — lexer hands us the entire thing as one
+    // word. Decompose into params + body_src.
+    if let Some(closure) = try_parse_closure(raw) {
+        return vec![closure];
+    }
     let mut parts = Vec::new();
     let mut chars = raw.chars().peekable();
     let mut literal = String::new();
@@ -1153,6 +1360,11 @@ pub fn parse_word_parts(raw: &str) -> Word {
                         }
                         parts.push(WordPart::Variable(var));
                     }
+                    Some(&'"') => {
+                        chars.next();
+                        let interp = read_interpolated(&mut chars);
+                        parts.push(WordPart::Interpolated(interp));
+                    }
                     Some(&c2) if c2.is_alphanumeric() || c2 == '_' || c2 == '?' || c2 == '$' || c2 == '!' || c2 == '#' || c2 == '@' || c2 == '*' => {
                         let mut var = String::new();
                         if "?$!#@*".contains(c2) {
@@ -1168,7 +1380,12 @@ pub fn parse_word_parts(raw: &str) -> Word {
                                 }
                             }
                         }
-                        parts.push(WordPart::Variable(var));
+                        let path = try_read_path(&mut chars);
+                        if path.is_empty() {
+                            parts.push(WordPart::Variable(var));
+                        } else {
+                            parts.push(WordPart::VariablePath { name: var, path });
+                        }
                     }
                     _ => {
                         literal.push('$');
@@ -1281,14 +1498,14 @@ pub fn parse_word_parts(raw: &str) -> Word {
                 // Check if it's a range: start..end[..step]
                 if let Some(range) = parse_brace_range(&content) {
                     parts.push(range);
-                } else if content.contains(',') {
+                } else if content.contains(',') && !looks_like_json_object(&content) {
                     // Comma-separated brace expansion: {a,b,c}
                     let items: Vec<Vec<WordPart>> = content.split(',')
                         .map(|s| parse_word_parts(s))
                         .collect();
                     parts.push(WordPart::BraceExpansion(items));
                 } else {
-                    // Not a valid brace expansion - treat as literal
+                    // Not a valid brace expansion (or it's a JSON object) — keep literal.
                     literal.push('{');
                     literal.push_str(&content);
                     literal.push('}');
@@ -1364,7 +1581,12 @@ fn parse_word_parts_inner(input: &str) -> Vec<WordPart> {
                             }
                         }
                     }
-                    parts.push(WordPart::Variable(var));
+                    let path = try_read_path(&mut chars);
+                    if path.is_empty() {
+                        parts.push(WordPart::Variable(var));
+                    } else {
+                        parts.push(WordPart::VariablePath { name: var, path });
+                    }
                 }
                 Some(&'{') => {
                     chars.next();

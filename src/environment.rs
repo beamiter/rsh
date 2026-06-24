@@ -151,6 +151,14 @@ pub struct ShellState {
     pub spec_registry: crate::completion_spec::SpecRegistry,
     /// Workflow registry (Phase 4: parameterized command templates)
     pub workflow_registry: crate::workflows::WorkflowRegistry,
+    /// Typed let-bindings (Phase 5a foundation; populated by `let` in 5b).
+    pub let_vars: HashMap<String, crate::value::Value>,
+    /// Phase 5b: closure literals (`{|x|...}`) seen as command arguments are
+    /// stashed here and referenced via a sentinel string returned by expansion.
+    /// Cleared at the start of each top-level command so it does not grow.
+    pub inline_closures: Vec<std::sync::Arc<crate::value::ClosureData>>,
+    /// Number of fork() calls executed for pipelines (test instrumentation).
+    pub fork_count: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl ShellState {
@@ -205,6 +213,9 @@ impl ShellState {
             cached_git_branch: None,
             spec_registry: crate::completion_spec::SpecRegistry::new(),
             workflow_registry: crate::workflows::WorkflowRegistry::new(),
+            let_vars: HashMap::new(),
+            inline_closures: Vec::new(),
+            fork_count: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 

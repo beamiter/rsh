@@ -133,6 +133,8 @@ fn fire_err_trap(state: &mut ShellState) {
 pub fn execute_complete_command(cmd: &CompleteCommand, state: &mut ShellState) -> i32 {
     // Sweep up any finished process-substitution children (non-blocking).
     state.reap_procsubs();
+    // Phase 5b: drop inline-closure stash from the prior top-level command.
+    state.inline_closures.clear();
     if cmd.background {
         // Fork for background execution
         match unsafe { fork() } {
@@ -187,11 +189,95 @@ fn execute_and_or(list: &AndOrList, state: &mut ShellState) -> i32 {
     code
 }
 
+/// True if `cmd` is a `Simple` command whose head literal names a value-aware
+/// builtin AND has no redirects / assignments. Conservative: any expansion
+/// in the command name disqualifies (we don't want to side-effect expansion).
+fn is_value_aware_command(cmd: &Command) -> bool {
+    let simple = match cmd {
+        Command::Simple(s) => s,
+        _ => return false,
+    };
+    if !simple.redirects.is_empty() || !simple.assignments.is_empty() {
+        return false;
+    }
+    let first = match simple.words.first() {
+        Some(w) => w,
+        None => return false,
+    };
+    // Only accept the trivial case: a single literal word part.
+    if first.len() != 1 {
+        return false;
+    }
+    let name = match &first[0] {
+        WordPart::Literal(s) => s.as_str(),
+        _ => return false,
+    };
+    crate::value_builtins::is_value_aware_in_pipeline(name)
+}
+
+/// Run a pipeline composed entirely of value-aware builtins in-process.
+fn execute_value_pipeline(cmds: &[Command], state: &mut ShellState) -> i32 {
+    use crate::pipeline_data::PipelineData;
+    use std::io::Read;
+
+    // If our own stdin is a pipe (not a tty), the user is feeding bytes into
+    // the first value-aware stage. Read them eagerly. (Phase 5a is non-streaming.)
+    let mut data = if atty::is(atty::Stream::Stdin) {
+        PipelineData::Empty
+    } else {
+        let mut buf = Vec::new();
+        let _ = std::io::stdin().lock().read_to_end(&mut buf);
+        if buf.is_empty() { PipelineData::Empty } else { PipelineData::Bytes(buf) }
+    };
+    for (i, cmd) in cmds.iter().enumerate() {
+        let simple = match cmd {
+            Command::Simple(s) => s,
+            _ => unreachable!("is_value_aware_command gate"),
+        };
+        // Expand the args (the head is known to be a literal, so expand_words is fine).
+        let expanded = expand_words(&simple.words, state);
+        if expanded.is_empty() {
+            continue;
+        }
+        let name = &expanded[0];
+        let args = &expanded[1..];
+        let f = match crate::value_builtins::VALUE_BUILTINS.get(name.as_str()) {
+            Some(f) => *f,
+            None => {
+                eprintln!("rsh: {}: not value-aware (shouldn't happen)", name);
+                return 1;
+            }
+        };
+        match f(data, args, state) {
+            Ok(out) => data = out,
+            Err(code) => return code,
+        }
+        // Last command should print to stdout
+        if i == cmds.len() - 1 {
+            if let Err(e) = data.write_to_stdout() {
+                eprintln!("rsh: {}", e);
+                return 1;
+            }
+            data = PipelineData::Empty;
+        }
+    }
+    0
+}
+
 fn execute_pipeline(pipeline: &Pipeline, state: &mut ShellState) -> i32 {
     let cmds = &pipeline.commands;
 
     if cmds.len() == 1 {
         let code = execute_command(&cmds[0], state);
+        state.pipestatus = vec![code];
+        state.set_array("PIPESTATUS", vec![code.to_string()]);
+        return if pipeline.negated { if code == 0 { 1 } else { 0 } } else { code };
+    }
+
+    // Phase 5a: if every command is a value-aware builtin with no redirects /
+    // assignments / etc., run the whole pipeline in-process without forking.
+    if cmds.iter().all(|c| is_value_aware_command(c)) {
+        let code = execute_value_pipeline(cmds, state);
         state.pipestatus = vec![code];
         state.set_array("PIPESTATUS", vec![code.to_string()]);
         return if pipeline.negated { if code == 0 { 1 } else { 0 } } else { code };
@@ -217,6 +303,7 @@ fn execute_pipeline(pipeline: &Pipeline, state: &mut ShellState) -> i32 {
             (None, None)
         };
 
+        state.fork_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         match unsafe { fork() } {
             Ok(ForkResult::Child) => {
                 signal::reset_child_signals();
@@ -340,6 +427,147 @@ fn execute_assignment(assign: &Assignment, state: &mut ShellState) {
     }
 }
 
+/// `let NAME = ...` form: `=` must be the entire third word (a bare literal).
+/// Bash arithmetic `let "x = 1+2"` quotes the assignment into one word.
+fn is_typed_let(words: &[Word]) -> bool {
+    if words.len() < 4 { return false; }
+    let head_is_let = matches!(words[0].as_slice(), [WordPart::Literal(s)] if s == "let");
+    let eq_is_bare = matches!(words[2].as_slice(), [WordPart::Literal(s)] if s == "=");
+    head_is_let && eq_is_bare && is_simple_ident(&words[1])
+}
+
+fn is_simple_ident(w: &Word) -> bool {
+    match w.as_slice() {
+        [WordPart::Literal(s)] => !s.is_empty()
+            && s.chars().next().map(|c| c.is_alphabetic() || c == '_').unwrap_or(false)
+            && s.chars().all(|c| c.is_alphanumeric() || c == '_'),
+        _ => false,
+    }
+}
+
+fn execute_typed_let(words: &[Word], state: &mut ShellState) -> i32 {
+    use crate::value::{Value, ClosureData};
+    use std::sync::Arc;
+
+    let name = match &words[1][0] {
+        WordPart::Literal(s) => s.clone(),
+        _ => return 1,
+    };
+    let rhs = &words[3..];
+    let value = build_let_value(rhs, state);
+    state.let_vars.insert(name, value);
+    return 0;
+
+    // unused suppressed; type imports above
+    #[allow(dead_code)]
+    fn _refs(_: Value, _: Arc<ClosureData>) {}
+}
+
+fn build_let_value(rhs: &[Word], state: &mut ShellState) -> crate::value::Value {
+    use crate::value::{Value, ClosureData};
+    use std::sync::Arc;
+
+    // Single closure literal — bind with captured snapshot.
+    if rhs.len() == 1 && rhs[0].len() == 1 {
+        if let WordPart::Closure { params, body_src } = &rhs[0][0] {
+            return Value::Closure(Arc::new(ClosureData {
+                params: params.clone(),
+                body_src: body_src.clone(),
+                captured: state.let_vars.clone(),
+            }));
+        }
+    }
+    // Otherwise expand & sniff. Pure-literal RHS (no expansion) goes through
+    // JSON; expanded text falls back to JSON if it parses, else String.
+    let joined: String = rhs.iter()
+        .map(|w| expand_word_to_string(w, state))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let trimmed = joined.trim();
+    if trimmed.is_empty() {
+        return Value::Null;
+    }
+    if let Ok(j) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        return Value::from_json(j);
+    }
+    Value::String(trimmed.to_string())
+}
+
+/// Apply a closure to a positional argument list, returning the body's value.
+/// Establishes a fresh let_vars scope = captured ∪ params, runs the body via
+/// the parser/executor, and returns the closure's "result Value".
+///
+/// Result extraction: closures whose body is a single value-aware pipeline
+/// already produce a `PipelineData::Values(...)` we can collect. For the
+/// general case (single expression like `$x.age -gt 30`), we re-parse the body
+/// and run it through `execute_value_pipeline`-compatible path; if that's not
+/// available, we capture stdout as a string Value.
+pub fn apply_closure(
+    closure: &crate::value::ClosureData,
+    args: &[crate::value::Value],
+    state: &mut ShellState,
+) -> Result<crate::value::Value, i32> {
+    use crate::pipeline_data::PipelineData;
+    use crate::value::Value;
+
+    // Snapshot let_vars, install captured + bound params for the call.
+    let saved = std::mem::take(&mut state.let_vars);
+    state.let_vars = closure.captured.clone();
+    for (i, p) in closure.params.iter().enumerate() {
+        let v = args.get(i).cloned().unwrap_or(Value::Null);
+        state.let_vars.insert(p.clone(), v);
+    }
+
+    let result = (|| -> Result<Value, i32> {
+        let parsed = crate::parser::parse(&closure.body_src).map_err(|_| 2_i32)?;
+        let mut last: Value = Value::Null;
+        for complete in &parsed {
+            // Try the value-aware pipeline path so the closure returns a Value
+            // instead of writing to stdout. If the body's first pipeline isn't
+            // all-value-aware, fall back to running it for its exit status and
+            // returning Bool(exit==0).
+            let pipeline = &complete.list.first;
+            if !pipeline.commands.is_empty()
+                && pipeline.commands.iter().all(is_value_aware_command)
+            {
+                // The body's pipeline starts with the first argument as input,
+                // so `each {|x| select name}` projects from `x`.
+                let mut data = match args.first() {
+                    Some(v) => PipelineData::Values(vec![v.clone()]),
+                    None => PipelineData::Empty,
+                };
+                for cmd in &pipeline.commands {
+                    let simple = match cmd {
+                        crate::parser::ast::Command::Simple(s) => s,
+                        _ => unreachable!(),
+                    };
+                    let expanded = expand_words(&simple.words, state);
+                    if expanded.is_empty() { continue; }
+                    let name = &expanded[0];
+                    let extra_args = &expanded[1..];
+                    let f = crate::value_builtins::VALUE_BUILTINS.get(name.as_str())
+                        .ok_or(2_i32)?;
+                    data = f(data, extra_args, state)?;
+                }
+                last = match data {
+                    PipelineData::Values(mut vs) if vs.len() == 1 => vs.remove(0),
+                    PipelineData::Values(vs) => Value::List(vs),
+                    PipelineData::Bytes(b) => Value::String(String::from_utf8_lossy(&b).to_string()),
+                    PipelineData::Empty => Value::Null,
+                };
+            } else {
+                // Fall back: run as a normal command (e.g. `test ...` style).
+                let code = execute_complete_command(complete, state);
+                last = Value::Bool(code == 0);
+            }
+        }
+        Ok(last)
+    })();
+
+    state.let_vars = saved;
+    result
+}
+
 fn execute_simple(cmd: &SimpleCommand, state: &mut ShellState) -> i32 {
     execute_simple_with_mode(cmd, state, true)
 }
@@ -356,6 +584,14 @@ fn execute_simple_with_mode(cmd: &SimpleCommand, state: &mut ShellState, fork_ex
             execute_assignment(assign, state);
         }
         return 0;
+    }
+
+    // Phase 5b: nushell-style `let NAME = EXPR`.
+    // Disambiguated from bash arithmetic `let "x = 1+2"` by requiring `=` as a
+    // separate, bare word (no quoting). We access raw WordParts here so a
+    // closure literal `{|x|...}` reaches build_value_from_words intact.
+    if is_typed_let(&cmd.words) {
+        return execute_typed_let(&cmd.words, state);
     }
 
     // Expand words

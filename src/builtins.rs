@@ -30,7 +30,7 @@ pub const BUILTIN_NAMES: &[&str] = &[
 ];
 
 pub fn is_builtin(name: &str) -> bool {
-    BUILTIN_NAMES.contains(&name)
+    BUILTIN_NAMES.contains(&name) || crate::value_builtins::is_value_aware(name)
 }
 
 pub fn run_builtin(name: &str, args: &[String], state: &mut ShellState) -> i32 {
@@ -137,18 +137,10 @@ pub fn run_builtin(name: &str, args: &[String], state: &mut ShellState) -> i32 {
         "disown" => builtin_disown(args, state),
         "wait" => builtin_wait(args, state),
         "shopt" => builtin_shopt(args, state),
-        "from-json" => builtin_from_json(),
-        "to-json" => builtin_to_json(),
-        "to-table" => builtin_to_table(),
-        "where" => builtin_where(args),
-        "sort-by" => builtin_sort_by(args),
-        "select" => builtin_select(args),
+        // Value-aware builtins: routed through the unified adapter at the
+        // catch-all arm so single-stage AND mixed-pipeline use the same code.
+        // Listed in BUILTIN_NAMES + VALUE_BUILTINS; falls through to `_`.
         "bookmark" => builtin_bookmark(args, state),
-        "from-csv" => builtin_from_csv(),
-        "group-by" => builtin_group_by(args),
-        "unique" => builtin_unique(args),
-        "count" => builtin_count(),
-        "math" => builtin_math(args),
         // Stream processing commands
         "sum" => crate::stream::builtin_sum(args),
         "avg" => crate::stream::builtin_avg(args),
@@ -167,12 +159,60 @@ pub fn run_builtin(name: &str, args: &[String], state: &mut ShellState) -> i32 {
         // Data processing commands
         "filter" => crate::data::builtin_filter(args),
         "map" => crate::data::builtin_map(args),
-        "group-by" => crate::data::builtin_group_by(args, state),
-        "select" => crate::data::builtin_select(args),
+        // `group-by` and `select` are value-aware in Phase 5a — fall through.
         "uniq" => crate::data::builtin_uniq(args),
         "shuffle" => crate::data::builtin_shuffle(args),
         "dedupe" => crate::data::builtin_dedupe(args),
-        _ => { eprintln!("rsh: {}: builtin not yet implemented", name); 1 }
+        _ => {
+            // Phase 5a: fork-path adapter for value-aware builtins.
+            // Reads stdin as bytes, runs the value-aware fn, writes JSON bytes
+            // to stdout. Used when a value-aware builtin runs inside a forked
+            // pipeline child (mixed with non-value-aware commands).
+            if let Some(vfn) = crate::value_builtins::VALUE_BUILTINS.get(name) {
+                return run_value_builtin_in_fork(*vfn, args, state);
+            }
+            eprintln!("rsh: {}: builtin not yet implemented", name); 1
+        }
+    }
+}
+
+fn run_value_builtin_in_fork(
+    vfn: crate::value_builtins::ValueBuiltin,
+    args: &[String],
+    state: &mut ShellState,
+) -> i32 {
+    use crate::pipeline_data::PipelineData;
+    use std::io::{Read, Write};
+    let mut buf = Vec::new();
+    if !atty::is(atty::Stream::Stdin) {
+        let _ = std::io::stdin().lock().read_to_end(&mut buf);
+    }
+    let input = if buf.is_empty() {
+        PipelineData::Empty
+    } else {
+        PipelineData::Bytes(buf)
+    };
+    match vfn(input, args, state) {
+        Ok(out) => {
+            let mut sink: Vec<u8> = Vec::new();
+            match out {
+                PipelineData::Empty => {}
+                PipelineData::Bytes(b) => sink.extend_from_slice(&b),
+                PipelineData::Values(ref vs) => {
+                    // Scalar-friendly rendering: single non-record value prints raw
+                    // (so `count` outputs `4`, not `[4]`). Record lists render as
+                    // JSON arrays (downstream value-aware builtins can re-parse).
+                    if vs.len() == 1 && !vs[0].is_record() {
+                        let _ = writeln!(sink, "{}", vs[0].to_display_string());
+                    } else {
+                        sink.extend_from_slice(&PipelineData::Values(vs.clone()).into_bytes());
+                    }
+                }
+            }
+            let _ = std::io::stdout().lock().write_all(&sink);
+            0
+        }
+        Err(c) => c,
     }
 }
 

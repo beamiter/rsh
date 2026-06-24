@@ -133,6 +133,33 @@ impl<'a> Lexer<'a> {
 
     fn read_word(&mut self) -> String {
         let mut word = String::new();
+        // Closure literal `{|params| body}` — read greedily until matching `}`
+        // so word splitting on whitespace inside the body does not corrupt it.
+        if self.peek_char() == Some('{') && self.peek_char_at(1) == Some('|') {
+            self.next_char(); // {
+            self.next_char(); // |
+            word.push('{');
+            word.push('|');
+            let mut depth: i32 = 1;
+            let mut in_single = false;
+            let mut in_double = false;
+            while let Some(c) = self.next_char() {
+                word.push(c);
+                if c == '\\' {
+                    if let Some(nc) = self.next_char() { word.push(nc); }
+                    continue;
+                }
+                if !in_double && c == '\'' { in_single = !in_single; continue; }
+                if !in_single && c == '"' { in_double = !in_double; continue; }
+                if in_single || in_double { continue; }
+                if c == '{' { depth += 1; }
+                else if c == '}' {
+                    depth -= 1;
+                    if depth == 0 { break; }
+                }
+            }
+            return word;
+        }
         loop {
             match self.peek_char() {
                 None => break,

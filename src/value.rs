@@ -1,0 +1,286 @@
+/// Typed pipeline values (nushell-style).
+///
+/// Phase 5a: foundation for in-process structured pipelines.
+/// `Closure` is declared but only populated in Phase 5b.
+
+use indexmap::IndexMap;
+use serde_json::{Value as JsonValue, Number};
+use std::collections::HashMap;
+use std::fmt;
+use std::sync::Arc;
+
+#[derive(Debug, Clone)]
+pub enum Value {
+    Null,
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    String(String),
+    List(Vec<Value>),
+    Record(IndexMap<String, Value>),
+    Binary(Vec<u8>),
+    Closure(Arc<ClosureData>),
+}
+
+/// Closure payload. `captured` is a by-value snapshot of let_vars taken at
+/// definition time so the closure is a pure value (no aliasing surprises).
+#[derive(Debug, Clone)]
+pub struct ClosureData {
+    pub params: Vec<String>,
+    pub body_src: String,
+    pub captured: HashMap<String, Value>,
+}
+
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Value::Null, Value::Null) => true,
+            (Value::Bool(a), Value::Bool(b)) => a == b,
+            (Value::Int(a), Value::Int(b)) => a == b,
+            (Value::Float(a), Value::Float(b)) => a == b,
+            (Value::Int(a), Value::Float(b)) | (Value::Float(b), Value::Int(a)) => (*a as f64) == *b,
+            (Value::String(a), Value::String(b)) => a == b,
+            (Value::List(a), Value::List(b)) => a == b,
+            (Value::Record(a), Value::Record(b)) => {
+                a.len() == b.len()
+                    && a.iter().zip(b.iter()).all(|((ka, va), (kb, vb))| ka == kb && va == vb)
+            }
+            (Value::Binary(a), Value::Binary(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Value {
+    /// Best-effort string projection for comparison/display.
+    pub fn to_display_string(&self) -> String {
+        match self {
+            Value::Null => String::new(),
+            Value::Bool(b) => b.to_string(),
+            Value::Int(i) => i.to_string(),
+            Value::Float(f) => {
+                if f.fract() == 0.0 && f.abs() < 1e16 {
+                    format!("{}", *f as i64)
+                } else {
+                    f.to_string()
+                }
+            }
+            Value::String(s) => s.clone(),
+            Value::List(items) => {
+                let inner: Vec<String> = items.iter().map(|v| v.to_display_string()).collect();
+                format!("[{}]", inner.join(", "))
+            }
+            Value::Record(map) => {
+                let inner: Vec<String> =
+                    map.iter().map(|(k, v)| format!("{}: {}", k, v.to_display_string())).collect();
+                format!("{{{}}}", inner.join(", "))
+            }
+            Value::Binary(b) => format!("<{} bytes>", b.len()),
+            Value::Closure(_) => "<closure>".to_string(),
+        }
+    }
+
+    /// Try to coerce to f64 for numeric comparisons / math.
+    pub fn as_f64(&self) -> Option<f64> {
+        match self {
+            Value::Int(i) => Some(*i as f64),
+            Value::Float(f) => Some(*f),
+            Value::String(s) => s.parse::<f64>().ok(),
+            Value::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
+            _ => None,
+        }
+    }
+
+    pub fn is_record(&self) -> bool {
+        matches!(self, Value::Record(_))
+    }
+
+    pub fn get(&self, key: &str) -> Option<&Value> {
+        match self {
+            Value::Record(map) => map.get(key),
+            _ => None,
+        }
+    }
+
+    /// Convert from `serde_json::Value` (boundary adapter for the fork path).
+    pub fn from_json(j: JsonValue) -> Value {
+        match j {
+            JsonValue::Null => Value::Null,
+            JsonValue::Bool(b) => Value::Bool(b),
+            JsonValue::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    Value::Int(i)
+                } else if let Some(f) = n.as_f64() {
+                    Value::Float(f)
+                } else {
+                    Value::String(n.to_string())
+                }
+            }
+            JsonValue::String(s) => Value::String(s),
+            JsonValue::Array(arr) => Value::List(arr.into_iter().map(Value::from_json).collect()),
+            JsonValue::Object(obj) => {
+                let mut map = IndexMap::with_capacity(obj.len());
+                for (k, v) in obj {
+                    map.insert(k, Value::from_json(v));
+                }
+                Value::Record(map)
+            }
+        }
+    }
+
+    /// Lossy round-trip to JSON. Binary→base64-ish, Closure→Null.
+    pub fn to_json(&self) -> JsonValue {
+        match self {
+            Value::Null => JsonValue::Null,
+            Value::Bool(b) => JsonValue::Bool(*b),
+            Value::Int(i) => JsonValue::Number((*i).into()),
+            Value::Float(f) => Number::from_f64(*f).map(JsonValue::Number).unwrap_or(JsonValue::Null),
+            Value::String(s) => JsonValue::String(s.clone()),
+            Value::List(items) => JsonValue::Array(items.iter().map(|v| v.to_json()).collect()),
+            Value::Record(map) => {
+                let mut obj = serde_json::Map::with_capacity(map.len());
+                for (k, v) in map {
+                    obj.insert(k.clone(), v.to_json());
+                }
+                JsonValue::Object(obj)
+            }
+            Value::Binary(b) => JsonValue::String(format!("<binary {} bytes>", b.len())),
+            Value::Closure(_) => JsonValue::Null,
+        }
+    }
+}
+
+impl fmt::Display for Value {
+    /// "Show" form for top-level pipeline output.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Value::List(items) if items.iter().all(|v| v.is_record()) && !items.is_empty() => {
+                f.write_str(&render_table(items))
+            }
+            Value::Record(map) => {
+                for (k, v) in map {
+                    writeln!(f, "{}: {}", k, v.to_display_string())?;
+                }
+                Ok(())
+            }
+            Value::List(items) => {
+                for item in items {
+                    writeln!(f, "{}", item.to_display_string())?;
+                }
+                Ok(())
+            }
+            _ => f.write_str(&self.to_display_string()),
+        }
+    }
+}
+
+/// Render a list of Records as an aligned table.
+/// Moved from `structured.rs::to_table` and rewritten for `Value`.
+pub fn render_table(records: &[Value]) -> String {
+    if records.is_empty() {
+        return String::new();
+    }
+
+    let mut columns: Vec<String> = Vec::new();
+    for rec in records {
+        if let Value::Record(map) = rec {
+            for key in map.keys() {
+                if !columns.iter().any(|c| c == key) {
+                    columns.push(key.clone());
+                }
+            }
+        }
+    }
+    if columns.is_empty() {
+        return String::new();
+    }
+
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    rows.push(columns.clone());
+    for rec in records {
+        let row: Vec<String> = columns
+            .iter()
+            .map(|col| rec.get(col).map(|v| v.to_display_string()).unwrap_or_default())
+            .collect();
+        rows.push(row);
+    }
+
+    let mut widths: Vec<usize> = columns.iter().map(|c| c.len()).collect();
+    for row in &rows[1..] {
+        for (i, cell) in row.iter().enumerate() {
+            if i < widths.len() {
+                widths[i] = widths[i].max(cell.len());
+            }
+        }
+    }
+
+    let mut out = String::new();
+    for (ri, row) in rows.iter().enumerate() {
+        for (i, cell) in row.iter().enumerate() {
+            if i > 0 {
+                out.push_str("  ");
+            }
+            let w = widths.get(i).copied().unwrap_or(0);
+            out.push_str(&format!("{:<width$}", cell, width = w));
+        }
+        out.push('\n');
+        if ri == 0 {
+            for (i, w) in widths.iter().enumerate() {
+                if i > 0 {
+                    out.push_str("  ");
+                }
+                out.push_str(&"-".repeat(*w));
+            }
+            out.push('\n');
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn json_round_trip_preserves_order() {
+        let src = r#"{"b":1,"a":2,"c":3}"#;
+        let j: JsonValue = serde_json::from_str(src).unwrap();
+        let v = Value::from_json(j);
+        if let Value::Record(map) = &v {
+            let keys: Vec<&String> = map.keys().collect();
+            assert_eq!(keys, vec!["b", "a", "c"]);
+        } else {
+            panic!("expected record");
+        }
+        let back = v.to_json();
+        assert_eq!(serde_json::to_string(&back).unwrap(), src);
+    }
+
+    #[test]
+    fn display_record_list_renders_table() {
+        let r1 = {
+            let mut m = IndexMap::new();
+            m.insert("a".to_string(), Value::Int(1));
+            m.insert("b".to_string(), Value::String("xx".to_string()));
+            Value::Record(m)
+        };
+        let r2 = {
+            let mut m = IndexMap::new();
+            m.insert("a".to_string(), Value::Int(22));
+            m.insert("b".to_string(), Value::String("y".to_string()));
+            Value::Record(m)
+        };
+        let s = format!("{}", Value::List(vec![r1, r2]));
+        assert!(s.contains("a "));
+        assert!(s.contains("22"));
+    }
+
+    #[test]
+    fn as_f64_coercions() {
+        assert_eq!(Value::Int(5).as_f64(), Some(5.0));
+        assert_eq!(Value::Float(2.5).as_f64(), Some(2.5));
+        assert_eq!(Value::String("3.14".to_string()).as_f64(), Some(3.14));
+        assert_eq!(Value::Bool(true).as_f64(), Some(1.0));
+        assert_eq!(Value::Null.as_f64(), None);
+    }
+}
