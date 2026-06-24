@@ -553,6 +553,13 @@ pub fn apply_closure(
                 }
             }
         }
+        // Expression body shortcut: `{|a, b| $a + $b}`, `{|r| $r.age > 30}`,
+        // etc. The mini-evaluator returns Ok(None) for anything that isn't a
+        // pure expression, so this falls through to the command interpreter
+        // for shell-shaped bodies.
+        if let Ok(Some(v)) = crate::closure_expr::try_eval(&closure.body_src, &state.let_vars) {
+            return Ok(v);
+        }
         let mut last: Value = Value::Null;
         for complete in &parsed {
             // Try the value-aware pipeline path so the closure returns a Value

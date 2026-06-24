@@ -1126,7 +1126,8 @@ fn try_parse_closure(raw: &str) -> Option<WordPart> {
     let params_str = &inner[..split];
     let body_src = inner[split + 1..].trim().to_string();
     let params: Vec<String> = params_str
-        .split_whitespace()
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .filter(|s| !s.is_empty())
         .map(|s| s.trim_start_matches('$').to_string())
         .collect();
     Some(WordPart::Closure { params, body_src })

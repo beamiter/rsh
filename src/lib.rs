@@ -3,6 +3,7 @@
 pub mod ai;
 pub mod bookmarks;
 pub mod builtins;
+pub mod closure_expr;
 pub mod completer;
 pub mod completion_spec;
 pub mod config;

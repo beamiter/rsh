@@ -3,6 +3,7 @@
 mod ai;
 mod bookmarks;
 mod builtins;
+mod closure_expr;
 mod completer;
 mod completion_spec;
 mod config;
