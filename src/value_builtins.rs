@@ -94,6 +94,17 @@ pub static VALUE_BUILTINS: Lazy<HashMap<&'static str, ValueBuiltin>> = Lazy::new
     m.insert("decode", vb_decode);
     // Phase 12c — url parse/join
     m.insert("url", vb_url);
+    // Phase 13a — list utilities
+    m.insert("prepend", vb_prepend);
+    m.insert("append", vb_append);
+    m.insert("drop", vb_drop);
+    m.insert("headers", vb_headers);
+    // Phase 13b — analytics + string distance
+    m.insert("histogram", vb_histogram);
+    // Phase 13c — char / ansi / fill
+    m.insert("char", vb_char);
+    m.insert("ansi", vb_ansi);
+    m.insert("fill", vb_fill);
     m
 });
 
@@ -1316,6 +1327,10 @@ fn vb_str(input: PipelineData, args: &[String], _state: &mut ShellState) -> Resu
                 if sub == "pad-left" { format!("{}{}", pad, s) } else { format!("{}{}", s, pad) }
             }
             "reverse" => s.chars().rev().collect(),
+            "distance" => {
+                let other = rest.first().map(|x| x.as_str()).unwrap_or("");
+                return Ok(levenshtein(s, other).to_string());
+            }
             _ => { eprintln!("str: unknown subcommand '{}'", sub); return Err(1); }
         })
     };
@@ -1323,7 +1338,7 @@ fn vb_str(input: PipelineData, args: &[String], _state: &mut ShellState) -> Resu
     let coerce = |r: String| -> Value {
         if let Some(rest_s) = r.strip_prefix("__rsh_split__") {
             Value::List(rest_s.split('\x1f').map(|p| Value::String(p.to_string())).collect())
-        } else if sub == "length" || sub == "index-of" {
+        } else if matches!(sub, "length" | "index-of" | "distance") {
             Value::Int(r.parse().unwrap_or(0))
         } else if matches!(sub, "contains" | "starts-with" | "ends-with") {
             Value::Bool(r == "true")
@@ -2783,4 +2798,260 @@ fn join_url(rec: &IndexMap<String, Value>) -> String {
     if !query.is_empty() { out.push('?'); out.push_str(&query); }
     if !fragment.is_empty() { out.push('#'); out.push_str(&fragment); }
     out
+}
+
+// ---------------------------------------------------------------------------
+// Phase 13a — list utilities (prepend, append, drop, headers)
+// ---------------------------------------------------------------------------
+
+/// `prepend <val>` — push a single value to the front of the pipeline list.
+/// `<val>` is coerced via `coerce_string_to_value` (int / float / bool / null /
+/// string), or accepted as a JSON literal for structured values.
+fn vb_prepend(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+    let v = arg_to_value(args)?;
+    let mut vs = input.into_values()?;
+    vs.insert(0, v);
+    Ok(PipelineData::Values(vs))
+}
+
+/// `append <val>` — push a single value to the back of the pipeline list.
+fn vb_append(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+    let v = arg_to_value(args)?;
+    let mut vs = input.into_values()?;
+    vs.push(v);
+    Ok(PipelineData::Values(vs))
+}
+
+fn arg_to_value(args: &[String]) -> Result<Value, i32> {
+    let a = match args.first() {
+        Some(a) => a,
+        None => { eprintln!("expected a value argument"); return Err(1); }
+    };
+    // Try JSON first (so `[1,2,3]` / `{"a":1}` work); fall back to coercion.
+    if let Ok(j) = serde_json::from_str::<serde_json::Value>(a) {
+        return Ok(Value::from_json(j));
+    }
+    Ok(coerce_string_to_value(a))
+}
+
+/// `drop [n]` — drop the last `n` rows (default 1). Complementary to `last n`.
+fn vb_drop(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+    let n: usize = args.first().and_then(|s| s.parse().ok()).unwrap_or(1);
+    let mut vs = input.into_values()?;
+    let keep = vs.len().saturating_sub(n);
+    vs.truncate(keep);
+    Ok(PipelineData::Values(vs))
+}
+
+/// `headers` — interpret a list-of-lists as a table with the first row as
+/// column headers, producing a list of records. Trailing rows that are shorter
+/// than the header row get Null in the missing columns.
+fn vb_headers(input: PipelineData, _args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+    let vs = input.into_values()?;
+    if vs.is_empty() { return Ok(PipelineData::Values(vec![])); }
+    let header_row = match &vs[0] {
+        Value::List(xs) => xs.iter().map(|v| v.to_display_string()).collect::<Vec<_>>(),
+        _ => { eprintln!("headers: first row must be a list of column names"); return Err(1); }
+    };
+    let mut out = Vec::with_capacity(vs.len().saturating_sub(1));
+    for row in vs.into_iter().skip(1) {
+        let cells: Vec<Value> = match row {
+            Value::List(xs) => xs,
+            other => vec![other],
+        };
+        let mut rec: IndexMap<String, Value> = IndexMap::new();
+        for (i, name) in header_row.iter().enumerate() {
+            rec.insert(name.clone(), cells.get(i).cloned().unwrap_or(Value::Null));
+        }
+        out.push(Value::Record(rec));
+    }
+    Ok(PipelineData::Values(out))
+}
+
+// ---------------------------------------------------------------------------
+// Phase 13b — histogram + Levenshtein
+// ---------------------------------------------------------------------------
+
+/// `histogram [field]` — like `unique -c` but adds a `freq` ratio and a
+/// rendered ASCII `bar`. With `field`, counts grouped by `<row>.<field>`.
+fn vb_histogram(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+    let field = args.first().cloned();
+    let vs = input.into_values()?;
+    let total = vs.len();
+    if total == 0 { return Ok(PipelineData::Values(vec![])); }
+    let mut buckets: IndexMap<String, (Value, usize)> = IndexMap::new();
+    for v in vs {
+        let key_val = match &field {
+            Some(f) => v.get(f).cloned().unwrap_or(Value::Null),
+            None => v.clone(),
+        };
+        let key = key_val.to_display_string();
+        let entry = buckets.entry(key).or_insert((key_val, 0));
+        entry.1 += 1;
+    }
+    let mut rows: Vec<(Value, usize)> = buckets.into_iter().map(|(_, v)| v).collect();
+    rows.sort_by(|a, b| b.1.cmp(&a.1));
+    let max = rows.iter().map(|r| r.1).max().unwrap_or(1).max(1);
+    let out: Vec<Value> = rows
+        .into_iter()
+        .map(|(val, count)| {
+            let freq = count as f64 / total as f64;
+            let bar_len = ((count as f64 / max as f64) * 30.0).round() as usize;
+            let bar: String = std::iter::repeat('*').take(bar_len).collect();
+            let mut rec: IndexMap<String, Value> = IndexMap::new();
+            rec.insert("value".to_string(), val);
+            rec.insert("count".to_string(), Value::Int(count as i64));
+            rec.insert("freq".to_string(), Value::Float(freq));
+            rec.insert("bar".to_string(), Value::String(bar));
+            Value::Record(rec)
+        })
+        .collect();
+    Ok(PipelineData::Values(out))
+}
+
+/// Classic Levenshtein distance, char-level (no allocation per cell beyond the
+/// two rolling rows). Used by `str distance`.
+fn levenshtein(a: &str, b: &str) -> usize {
+    let av: Vec<char> = a.chars().collect();
+    let bv: Vec<char> = b.chars().collect();
+    if av.is_empty() { return bv.len(); }
+    if bv.is_empty() { return av.len(); }
+    let mut prev: Vec<usize> = (0..=bv.len()).collect();
+    let mut cur: Vec<usize> = vec![0; bv.len() + 1];
+    for i in 1..=av.len() {
+        cur[0] = i;
+        for j in 1..=bv.len() {
+            let cost = if av[i - 1] == bv[j - 1] { 0 } else { 1 };
+            cur[j] = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[bv.len()]
+}
+
+// ---------------------------------------------------------------------------
+// Phase 13c — char / ansi / fill
+// ---------------------------------------------------------------------------
+
+/// `char <name>` — emit a single character or short escape sequence by name.
+/// Aligns with nushell's `char` for common cases.
+fn vb_char(_input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+    let name = match args.first() {
+        Some(s) => s.as_str(),
+        None => { eprintln!("char: missing name"); return Err(1); }
+    };
+    let s = match name {
+        "newline" | "nl" | "lf" => "\n".to_string(),
+        "tab" => "\t".to_string(),
+        "cr" => "\r".to_string(),
+        "crlf" => "\r\n".to_string(),
+        "space" | "sp" => " ".to_string(),
+        "null" | "nul" => "\0".to_string(),
+        "esc" | "escape" => "\x1b".to_string(),
+        "bel" => "\x07".to_string(),
+        "backspace" | "bs" => "\x08".to_string(),
+        // Hex codepoint: `char 0x41` → "A". Also accepts plain `41` if it
+        // parses as hex but not decimal-only — keep it strict for safety.
+        s if s.starts_with("0x") || s.starts_with("0X") => {
+            match u32::from_str_radix(&s[2..], 16).ok().and_then(char::from_u32) {
+                Some(c) => c.to_string(),
+                None => { eprintln!("char: bad hex codepoint '{}'", s); return Err(1); }
+            }
+        }
+        // Single-char passthrough.
+        s if s.chars().count() == 1 => s.to_string(),
+        other => { eprintln!("char: unknown name '{}'", other); return Err(1); }
+    };
+    Ok(PipelineData::Values(vec![Value::String(s)]))
+}
+
+/// `ansi <code>` — emit an ANSI escape sequence. Names cover the common
+/// colors plus `reset`. Use `ansi 0` for plain reset.
+fn vb_ansi(_input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+    let name = match args.first() {
+        Some(s) => s.as_str(),
+        None => { eprintln!("ansi: missing color/code"); return Err(1); }
+    };
+    let code = match name {
+        "reset" | "rst" => "0",
+        "bold" => "1",
+        "dim" => "2",
+        "italic" => "3",
+        "underline" | "u" => "4",
+        "black" => "30", "red" | "r" => "31", "green" | "g" => "32",
+        "yellow" | "y" => "33", "blue" | "b" => "34", "magenta" | "m" | "purple" => "35",
+        "cyan" | "c" => "36", "white" | "w" => "37",
+        "bg_black" => "40", "bg_red" => "41", "bg_green" => "42",
+        "bg_yellow" => "43", "bg_blue" => "44", "bg_magenta" => "45",
+        "bg_cyan" => "46", "bg_white" => "47",
+        // Numeric passthrough: `ansi 91` → bright red.
+        s if s.bytes().all(|b| b.is_ascii_digit() || b == b';') => s,
+        other => { eprintln!("ansi: unknown code '{}'", other); return Err(1); }
+    };
+    Ok(PipelineData::Values(vec![Value::String(format!("\x1b[{}m", code))]))
+}
+
+/// `fill -c <char> -w <width> [-a left|right|center]` — pad each input value
+/// to `width` using `char` (default space). Alignment defaults to `left`
+/// (pad on the right, matches nushell).
+fn vb_fill(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+    let mut ch = ' ';
+    let mut width: usize = 0;
+    let mut align = "left".to_string();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-c" | "--character" => {
+                if let Some(v) = args.get(i + 1) {
+                    ch = v.chars().next().unwrap_or(' '); i += 2;
+                } else { i += 1; }
+            }
+            "-w" | "--width" => {
+                if let Some(v) = args.get(i + 1) {
+                    width = v.parse().unwrap_or(0); i += 2;
+                } else { i += 1; }
+            }
+            "-a" | "--alignment" => {
+                if let Some(v) = args.get(i + 1) { align = v.clone(); i += 2; }
+                else { i += 1; }
+            }
+            _ => i += 1,
+        }
+    }
+    let pad_one = |s: &str| -> String {
+        let n = s.chars().count();
+        if n >= width { return s.to_string(); }
+        let need = width - n;
+        match align.as_str() {
+            "right" | "r" => {
+                let pad: String = std::iter::repeat(ch).take(need).collect();
+                format!("{}{}", pad, s)
+            }
+            "center" | "c" => {
+                let l = need / 2;
+                let r = need - l;
+                let lp: String = std::iter::repeat(ch).take(l).collect();
+                let rp: String = std::iter::repeat(ch).take(r).collect();
+                format!("{}{}{}", lp, s, rp)
+            }
+            _ => {
+                let pad: String = std::iter::repeat(ch).take(need).collect();
+                format!("{}{}", s, pad)
+            }
+        }
+    };
+    match input {
+        PipelineData::Empty => Ok(PipelineData::Empty),
+        PipelineData::Bytes(b) => {
+            let s = String::from_utf8_lossy(&b);
+            let trimmed = s.strip_suffix('\n').unwrap_or(&s);
+            Ok(PipelineData::Values(vec![Value::String(pad_one(trimmed))]))
+        }
+        PipelineData::Values(vs) => {
+            let out: Vec<Value> = vs.into_iter()
+                .map(|v| Value::String(pad_one(&v.to_display_string())))
+                .collect();
+            Ok(PipelineData::Values(out))
+        }
+    }
 }
