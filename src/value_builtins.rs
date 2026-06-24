@@ -79,6 +79,10 @@ pub static VALUE_BUILTINS: Lazy<HashMap<&'static str, ValueBuiltin>> = Lazy::new
     m.insert("format", vb_format);
     // Phase 9c — do (execute closure inline)
     m.insert("do", vb_do);
+    // Phase 10c — table utilities
+    m.insert("default", vb_default);
+    m.insert("transpose", vb_transpose);
+    m.insert("shuffle", vb_shuffle);
     m
 });
 
@@ -227,8 +231,45 @@ fn vb_group_by(input: PipelineData, args: &[String], _state: &mut ShellState) ->
 }
 
 fn vb_unique(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
-    let field = args.first().map(|s| s.as_str());
+    // `unique [-c|--count] [field]`. With -c the output is a list of
+    // {value, count} records sorted by descending count.
+    let mut count_mode = false;
+    let mut field: Option<&str> = None;
+    for a in args {
+        match a.as_str() {
+            "-c" | "--count" => count_mode = true,
+            _ => field = Some(a.as_str()),
+        }
+    }
     let vs = input.into_values()?;
+    if count_mode {
+        let mut order: Vec<String> = Vec::new();
+        let mut counts: std::collections::HashMap<String, (Value, i64)> = std::collections::HashMap::new();
+        for v in vs {
+            let key = match field {
+                Some(f) => v.get(f).map(|fv| fv.to_display_string()).unwrap_or_default(),
+                None => v.to_display_string(),
+            };
+            let entry = counts.entry(key.clone()).or_insert_with(|| {
+                order.push(key.clone());
+                (v.clone(), 0)
+            });
+            entry.1 += 1;
+        }
+        let mut rows: Vec<Value> = order.into_iter().map(|k| {
+            let (val, n) = counts.remove(&k).unwrap();
+            let mut rec = IndexMap::new();
+            rec.insert("value".to_string(), val);
+            rec.insert("count".to_string(), Value::Int(n));
+            Value::Record(rec)
+        }).collect();
+        rows.sort_by(|a, b| {
+            let ac = a.get("count").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let bc = b.get("count").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            bc.partial_cmp(&ac).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        return Ok(PipelineData::Values(rows));
+    }
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
     for v in vs {
@@ -250,13 +291,49 @@ fn vb_count(input: PipelineData, _args: &[String], _state: &mut ShellState) -> R
 
 fn vb_math(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
     if args.is_empty() {
-        eprintln!("Usage: math <sum|avg|min|max|stddev> [field]");
+        eprintln!("Usage: math <op> [field]  (aggregations: sum|avg|min|max|stddev|median|product;  per-element: abs|ceil|floor|round|sqrt|log|log2|log10)");
         return Err(1);
     }
-    let op = &args[0];
+    let op = args[0].as_str();
     let field = args.get(1);
+
+    // Per-element scalar operations: map over the input rather than aggregate.
+    let elementwise = matches!(op, "abs" | "ceil" | "floor" | "round" | "sqrt" | "log" | "log2" | "log10");
+    if elementwise {
+        let apply = |x: f64| -> f64 {
+            match op {
+                "abs" => x.abs(),
+                "ceil" => x.ceil(),
+                "floor" => x.floor(),
+                "round" => x.round(),
+                "sqrt" => x.sqrt(),
+                "log" => x.ln(),
+                "log2" => x.log2(),
+                "log10" => x.log10(),
+                _ => x,
+            }
+        };
+        let to_value = |x: f64| -> Value {
+            if x.fract() == 0.0 && x.is_finite() && x.abs() < 1e16 {
+                Value::Int(x as i64)
+            } else {
+                Value::Float(x)
+            }
+        };
+        let vs = input.into_values()?;
+        let mut out = Vec::with_capacity(vs.len());
+        for v in vs {
+            if let Some(x) = v.as_f64() {
+                out.push(to_value(apply(x)));
+            } else {
+                out.push(v);
+            }
+        }
+        return Ok(PipelineData::Values(out));
+    }
+
     let vs = input.into_values()?;
-    // Two modes: `math sum field` (extract field from records) OR
+    // Aggregations: `math sum field` (extract field from records) OR
     // `math sum` (pipeline is a list of numbers).
     let nums: Vec<f64> = if let Some(f) = field {
         vs.iter().filter_map(|v| v.get(f).and_then(|fv| fv.as_f64())).collect()
@@ -267,22 +344,33 @@ fn vb_math(input: PipelineData, args: &[String], _state: &mut ShellState) -> Res
         eprintln!("math: no numeric values");
         return Err(1);
     }
-    let r = match op.as_str() {
+    let r = match op {
         "sum" => nums.iter().sum::<f64>(),
         "avg" | "mean" => nums.iter().sum::<f64>() / nums.len() as f64,
         "min" => nums.iter().copied().fold(f64::INFINITY, f64::min),
         "max" => nums.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+        "product" => nums.iter().product::<f64>(),
+        "median" => {
+            let mut sorted = nums.clone();
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let n = sorted.len();
+            if n % 2 == 0 { (sorted[n/2 - 1] + sorted[n/2]) / 2.0 } else { sorted[n/2] }
+        }
         "stddev" | "std" => {
             let mean = nums.iter().sum::<f64>() / nums.len() as f64;
             let var = nums.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / nums.len() as f64;
             var.sqrt()
+        }
+        "variance" | "var" => {
+            let mean = nums.iter().sum::<f64>() / nums.len() as f64;
+            nums.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / nums.len() as f64
         }
         _ => {
             eprintln!("math: unknown op '{}'", op);
             return Err(1);
         }
     };
-    let out = if r.fract() == 0.0 && r.abs() < 1e16 {
+    let out = if r.fract() == 0.0 && r.is_finite() && r.abs() < 1e16 {
         Value::Int(r as i64)
     } else {
         Value::Float(r)
@@ -1044,17 +1132,39 @@ fn vb_split(input: PipelineData, args: &[String], _state: &mut ShellState) -> Re
 }
 
 fn vb_parse(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
-    let pat = match args.first() {
-        Some(p) => p,
+    // `parse [-r|--regex] <pattern>`. With -r the pattern is a raw regex with
+    // named captures; without -r the pattern uses `{field}` templates.
+    let mut use_regex = false;
+    let mut positional: Vec<&String> = Vec::new();
+    for a in args {
+        match a.as_str() {
+            "-r" | "--regex" => use_regex = true,
+            _ => positional.push(a),
+        }
+    }
+    let pat = match positional.first() {
+        Some(p) => *p,
         None => {
-            eprintln!("parse: missing template");
+            eprintln!("parse: missing pattern");
             return Err(1);
         }
     };
-    // Translate "{name1} text {name2}" into a regex with named captures.
-    let (rx, names) = match template_to_regex(pat) {
-        Ok(p) => p,
-        Err(e) => { eprintln!("parse: bad template: {}", e); return Err(1); }
+    let (rx, names) = if use_regex {
+        let rx = match regex::Regex::new(pat) {
+            Ok(r) => r,
+            Err(e) => { eprintln!("parse: bad regex: {}", e); return Err(1); }
+        };
+        let names: Vec<String> = rx
+            .capture_names()
+            .enumerate()
+            .filter_map(|(i, n)| n.map(|s| s.to_string()).or_else(|| if i > 0 { Some(format!("capture{}", i)) } else { None }))
+            .collect();
+        (rx, names)
+    } else {
+        match template_to_regex(pat) {
+            Ok(p) => p,
+            Err(e) => { eprintln!("parse: bad template: {}", e); return Err(1); }
+        }
     };
     let lines: Vec<String> = match input {
         PipelineData::Empty => Vec::new(),
@@ -1065,8 +1175,14 @@ fn vb_parse(input: PipelineData, args: &[String], _state: &mut ShellState) -> Re
     for line in &lines {
         if let Some(caps) = rx.captures(line) {
             let mut rec = IndexMap::new();
-            for name in &names {
-                let val = caps.name(name).map(|m| m.as_str().to_string()).unwrap_or_default();
+            for (i, name) in names.iter().enumerate() {
+                // Prefer named-capture lookup; fall back to positional index for
+                // anonymous capture groups produced by `-r` mode.
+                let val = caps
+                    .name(name)
+                    .or_else(|| caps.get(i + 1))
+                    .map(|m| m.as_str().to_string())
+                    .unwrap_or_default();
                 rec.insert(name.clone(), Value::String(val));
             }
             out.push(Value::Record(rec));
@@ -1121,8 +1237,37 @@ fn vb_str(input: PipelineData, args: &[String], _state: &mut ShellState) -> Resu
                 return Ok(s.contains(needle).to_string());
             }
             "replace" => {
-                if rest.len() < 2 { eprintln!("str replace: need <from> <to>"); return Err(1); }
-                s.replace(&rest[0], &rest[1])
+                // Optional flags: `-r`/`--regex` for regex mode, `-a`/`--all`
+                // for replace-all (default is first occurrence only in regex
+                // mode; literal `replace` always replaces all to preserve
+                // backwards compatibility).
+                let mut use_regex = false;
+                let mut all = false;
+                let mut positional: Vec<&String> = Vec::new();
+                for a in rest {
+                    match a.as_str() {
+                        "-r" | "--regex" => use_regex = true,
+                        "-a" | "--all" => all = true,
+                        _ => positional.push(a),
+                    }
+                }
+                if positional.len() < 2 {
+                    eprintln!("str replace: need <from> <to>");
+                    return Err(1);
+                }
+                if use_regex {
+                    let rx = match regex::Regex::new(positional[0]) {
+                        Ok(r) => r,
+                        Err(e) => { eprintln!("str replace: bad regex: {}", e); return Err(1); }
+                    };
+                    if all {
+                        rx.replace_all(s, positional[1].as_str()).into_owned()
+                    } else {
+                        rx.replace(s, positional[1].as_str()).into_owned()
+                    }
+                } else {
+                    s.replace(positional[0].as_str(), positional[1].as_str())
+                }
             }
             "split" => {
                 let sep = rest.first().map(|x| x.as_str()).unwrap_or(" ");
@@ -2046,4 +2191,106 @@ fn vb_do(input: PipelineData, args: &[String], state: &mut ShellState) -> Result
         other => PipelineData::Values(vec![other]),
     };
     Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// Phase 10c — table utilities
+// ---------------------------------------------------------------------------
+
+/// `default <value> [field]` — replace Null with `value`. With `field`, only
+/// touch that field on Record inputs; without it, apply to each pipeline
+/// value (scalar replacement).
+fn vb_default(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+    let default_str = match args.first() {
+        Some(s) => s.clone(),
+        None => { eprintln!("default: missing value"); return Err(1); }
+    };
+    let field = args.get(1).cloned();
+    let default_val = coerce_string_to_value(&default_str);
+    let vs = input.into_values()?;
+    let mut out = Vec::with_capacity(vs.len());
+    for v in vs {
+        let new_v = match (&field, v) {
+            (Some(f), Value::Record(mut rec)) => {
+                let is_missing = rec.get(f).map(|x| matches!(x, Value::Null)).unwrap_or(true);
+                if is_missing { rec.insert(f.clone(), default_val.clone()); }
+                Value::Record(rec)
+            }
+            (None, Value::Null) => default_val.clone(),
+            (_, other) => other,
+        };
+        out.push(new_v);
+    }
+    Ok(PipelineData::Values(out))
+}
+
+fn coerce_string_to_value(s: &str) -> Value {
+    if let Ok(i) = s.parse::<i64>() { return Value::Int(i); }
+    if let Ok(f) = s.parse::<f64>() { return Value::Float(f); }
+    match s {
+        "true" => Value::Bool(true),
+        "false" => Value::Bool(false),
+        "null" => Value::Null,
+        _ => Value::String(s.to_string()),
+    }
+}
+
+/// `transpose` — flip rows/columns. Input: list of records → list of
+/// {column, row1, row2, ...} records. With positional names, those replace
+/// the default "column"/"row0"/"row1"/... labels.
+fn vb_transpose(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+    let vs = input.into_values()?;
+    // Collect column order from the first record; later records contribute
+    // missing keys at the end.
+    let mut cols: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for v in &vs {
+        if let Value::Record(rec) = v {
+            for k in rec.keys() {
+                if seen.insert(k.clone()) { cols.push(k.clone()); }
+            }
+        }
+    }
+    if cols.is_empty() {
+        return Ok(PipelineData::Values(Vec::new()));
+    }
+    let header_label = args.first().cloned().unwrap_or_else(|| "column".to_string());
+    let n_rows = vs.len();
+    let row_labels: Vec<String> = (0..n_rows)
+        .map(|i| args.get(i + 1).cloned().unwrap_or_else(|| format!("row{}", i)))
+        .collect();
+    let mut out = Vec::with_capacity(cols.len());
+    for c in &cols {
+        let mut rec = IndexMap::new();
+        rec.insert(header_label.clone(), Value::String(c.clone()));
+        for (i, v) in vs.iter().enumerate() {
+            let cell = v.get(c).cloned().unwrap_or(Value::Null);
+            rec.insert(row_labels[i].clone(), cell);
+        }
+        out.push(Value::Record(rec));
+    }
+    Ok(PipelineData::Values(out))
+}
+
+/// `shuffle` — random permutation of the input list.
+fn vb_shuffle(input: PipelineData, _args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+    let mut vs = input.into_values()?;
+    // Lightweight Fisher–Yates with a hash-of-time seed; no external rand
+    // dep needed for what is essentially a convenience tool.
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let seed = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0) as u64;
+    let mut state = seed ^ 0x9E3779B97F4A7C15u64;
+    let mut next = || -> u64 {
+        // xorshift64
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let n = vs.len();
+    for i in (1..n).rev() {
+        let j = (next() as usize) % (i + 1);
+        vs.swap(i, j);
+    }
+    Ok(PipelineData::Values(vs))
 }

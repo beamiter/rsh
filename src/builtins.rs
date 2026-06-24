@@ -149,7 +149,7 @@ pub fn run_builtin(name: &str, args: &[String], state: &mut ShellState) -> i32 {
         // `lines` is value-aware (Phase 6b) — falls through to `_` adapter.
         "stats" => crate::stream::builtin_stats(args),
         "trim" => crate::stream::builtin_trim(args),
-        "reverse" => crate::stream::builtin_reverse(args),
+        // `reverse` is value-aware (Phase 5a) — fall through to adapter.
         "upper" => crate::stream::builtin_upper(args),
         "lower" => crate::stream::builtin_lower(args),
         // Debug commands
@@ -161,7 +161,7 @@ pub fn run_builtin(name: &str, args: &[String], state: &mut ShellState) -> i32 {
         "map" => crate::data::builtin_map(args),
         // `group-by` and `select` are value-aware in Phase 5a — fall through.
         "uniq" => crate::data::builtin_uniq(args),
-        "shuffle" => crate::data::builtin_shuffle(args),
+        // `shuffle` is value-aware (Phase 10c) — fall through to adapter.
         "dedupe" => crate::data::builtin_dedupe(args),
         _ => {
             // Phase 5a: fork-path adapter for value-aware builtins.
