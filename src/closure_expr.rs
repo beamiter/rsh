@@ -28,6 +28,7 @@ enum Tok {
     Eq, Ne, Lt, Gt, Le, Ge,
     AndAnd, OrOr, Bang,
     LParen, RParen,
+    LBrace, RBrace,
 }
 
 fn tokenize(src: &str) -> Result<Vec<Tok>, String> {
@@ -45,6 +46,8 @@ fn tokenize(src: &str) -> Result<Vec<Tok>, String> {
             b'%' => { out.push(Tok::Percent); i += 1; }
             b'(' => { out.push(Tok::LParen); i += 1; }
             b')' => { out.push(Tok::RParen); i += 1; }
+            b'{' => { out.push(Tok::LBrace); i += 1; }
+            b'}' => { out.push(Tok::RBrace); i += 1; }
             b'=' if i + 1 < bytes.len() && bytes[i+1] == b'=' => { out.push(Tok::Eq); i += 2; }
             b'!' if i + 1 < bytes.len() && bytes[i+1] == b'=' => { out.push(Tok::Ne); i += 2; }
             b'<' if i + 1 < bytes.len() && bytes[i+1] == b'=' => { out.push(Tok::Le); i += 2; }
@@ -225,6 +228,7 @@ impl<'a> Parser<'a> {
                 "true" => Ok(Expr::Bool(true)),
                 "false" => Ok(Expr::Bool(false)),
                 "null" => Ok(Expr::Null),
+                "if" => self.parse_if_tail(),
                 _ => Err(format!("unknown identifier '{}'", name)),
             },
             Some(Tok::Var(name, path)) => Ok(Expr::Var(name, path)),
@@ -237,6 +241,43 @@ impl<'a> Parser<'a> {
             }
             other => Err(format!("unexpected token {:?}", other)),
         }
+    }
+
+    /// `if` already consumed. Expects: <cond> '{' <then> '}' 'else' '{' <else> '}'
+    /// where <else> can also start with `if` (chained).
+    fn parse_if_tail(&mut self) -> Result<Expr, String> {
+        let cond = self.parse_or()?;
+        match self.bump() {
+            Some(Tok::LBrace) => {}
+            _ => return Err("expected '{' after if condition".to_string()),
+        }
+        let then = self.parse_or()?;
+        match self.bump() {
+            Some(Tok::RBrace) => {}
+            _ => return Err("expected '}' after if branch".to_string()),
+        }
+        match self.bump() {
+            Some(Tok::Ident(ref s)) if s == "else" => {}
+            other => return Err(format!("expected 'else', got {:?}", other)),
+        }
+        // Allow `else if`
+        let else_e = match self.peek() {
+            Some(Tok::Ident(s)) if s == "if" => {
+                self.bump();
+                self.parse_if_tail()?
+            }
+            Some(Tok::LBrace) => {
+                self.bump();
+                let e = self.parse_or()?;
+                match self.bump() {
+                    Some(Tok::RBrace) => {}
+                    _ => return Err("expected '}' after else branch".to_string()),
+                }
+                e
+            }
+            _ => return Err("expected '{' or 'if' after else".to_string()),
+        };
+        Ok(Expr::If(Box::new(cond), Box::new(then), Box::new(else_e)))
     }
 }
 
@@ -255,6 +296,7 @@ enum Expr {
     Or(Box<Expr>, Box<Expr>),
     Neg(Box<Expr>),
     Not(Box<Expr>),
+    If(Box<Expr>, Box<Expr>, Box<Expr>),
 }
 
 /// Try to evaluate `src` as a closure-body expression against `vars`.
@@ -343,6 +385,9 @@ fn eval(e: &Expr, vars: &HashMap<String, Value>) -> Result<Value, String> {
             let va = eval(a, vars)?;
             if is_truthy(&va) { return Ok(Value::Bool(true)); }
             Ok(Value::Bool(is_truthy(&eval(b, vars)?)))
+        }
+        Expr::If(c, t, e) => {
+            if is_truthy(&eval(c, vars)?) { eval(t, vars) } else { eval(e, vars) }
         }
         Expr::Cmp(l, op, r) => {
             let lv = eval(l, vars)?;

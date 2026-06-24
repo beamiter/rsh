@@ -75,6 +75,10 @@ pub static VALUE_BUILTINS: Lazy<HashMap<&'static str, ValueBuiltin>> = Lazy::new
     // Phase 7d — path / date
     m.insert("path", vb_path);
     m.insert("date", vb_date);
+    // Phase 9b — format template
+    m.insert("format", vb_format);
+    // Phase 9c — do (execute closure inline)
+    m.insert("do", vb_do);
     m
 });
 
@@ -1124,43 +1128,54 @@ fn vb_str(input: PipelineData, args: &[String], _state: &mut ShellState) -> Resu
                 let sep = rest.first().map(|x| x.as_str()).unwrap_or(" ");
                 return Ok(format!("__rsh_split__{}", s.split(sep).collect::<Vec<_>>().join("\x1f")));
             }
+            "starts-with" => {
+                let p = rest.first().map(|x| x.as_str()).unwrap_or("");
+                return Ok(s.starts_with(p).to_string());
+            }
+            "ends-with" => {
+                let p = rest.first().map(|x| x.as_str()).unwrap_or("");
+                return Ok(s.ends_with(p).to_string());
+            }
+            "index-of" => {
+                let needle = rest.first().map(|x| x.as_str()).unwrap_or("");
+                return Ok(s.find(needle).map(|i| i as i64).unwrap_or(-1).to_string());
+            }
+            "pad-left" | "pad-right" => {
+                let width: usize = rest.first().and_then(|x| x.parse().ok()).unwrap_or(0);
+                let ch = rest.get(1).and_then(|x| x.chars().next()).unwrap_or(' ');
+                let need = width.saturating_sub(s.chars().count());
+                let pad: String = std::iter::repeat(ch).take(need).collect();
+                if sub == "pad-left" { format!("{}{}", pad, s) } else { format!("{}{}", s, pad) }
+            }
+            "reverse" => s.chars().rev().collect(),
             _ => { eprintln!("str: unknown subcommand '{}'", sub); return Err(1); }
         })
     };
     // Apply per-Value. For Bytes, treat as single string.
-    let convert = |v: Value| -> Result<Value, i32> {
-        match v {
-            Value::String(s) => {
-                let r = map_str(&s)?;
-                if let Some(rest_s) = r.strip_prefix("__rsh_split__") {
-                    Ok(Value::List(rest_s.split('\x1f').map(|p| Value::String(p.to_string())).collect()))
-                } else if sub == "length" {
-                    Ok(Value::Int(r.parse().unwrap_or(0)))
-                } else if sub == "contains" {
-                    Ok(Value::Bool(r == "true"))
-                } else {
-                    Ok(Value::String(r))
-                }
-            }
-            other => {
-                let s = other.to_display_string();
-                let r = map_str(&s)?;
-                if let Some(rest_s) = r.strip_prefix("__rsh_split__") {
-                    Ok(Value::List(rest_s.split('\x1f').map(|p| Value::String(p.to_string())).collect()))
-                } else if sub == "length" {
-                    Ok(Value::Int(r.parse().unwrap_or(0)))
-                } else if sub == "contains" {
-                    Ok(Value::Bool(r == "true"))
-                } else {
-                    Ok(Value::String(r))
-                }
-            }
+    let coerce = |r: String| -> Value {
+        if let Some(rest_s) = r.strip_prefix("__rsh_split__") {
+            Value::List(rest_s.split('\x1f').map(|p| Value::String(p.to_string())).collect())
+        } else if sub == "length" || sub == "index-of" {
+            Value::Int(r.parse().unwrap_or(0))
+        } else if matches!(sub, "contains" | "starts-with" | "ends-with") {
+            Value::Bool(r == "true")
+        } else {
+            Value::String(r)
         }
+    };
+    let convert = |v: Value| -> Result<Value, i32> {
+        let s = match v { Value::String(s) => s, other => other.to_display_string() };
+        Ok(coerce(map_str(&s)?))
     };
     match input {
         PipelineData::Empty => Ok(PipelineData::Empty),
         PipelineData::Bytes(b) => {
-            let v = Value::String(String::from_utf8_lossy(&b).into_owned());
+            // Bytes from upstream commands typically carry a trailing newline
+            // (`echo foo` → "foo\n"). Strip it so `str length`/`str ends-with`
+            // line up with nushell semantics.
+            let s = String::from_utf8_lossy(&b);
+            let trimmed = s.strip_suffix('\n').unwrap_or(&s).to_string();
+            let v = Value::String(trimmed);
             Ok(PipelineData::Values(vec![convert(v)?]))
         }
         PipelineData::Values(vs) => {
@@ -1945,4 +1960,90 @@ fn epoch_to_ymdhms(secs: i64) -> (i32, u32, u32, u32, u32, u32) {
     let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
     let y = (if m <= 2 { y + 1 } else { y }) as i32;
     (y, m, d, h, mi, se)
+}
+
+// ---------------------------------------------------------------------------
+// Phase 9b — format template
+// ---------------------------------------------------------------------------
+
+/// `format "{name}: {age}"` — for each record, replace each `{field}` token
+/// (with optional dotted/indexed path) with that field's display value.
+/// For a non-record value, `{}` (or `{$it}`) refers to the value itself.
+fn vb_format(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+    let tmpl = match args.first() {
+        Some(s) => s.clone(),
+        None => { eprintln!("format: missing template"); return Err(1); }
+    };
+    let vs = input.into_values()?;
+    let render = |v: &Value| -> String {
+        let mut out = String::with_capacity(tmpl.len());
+        let bytes = tmpl.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'{' {
+                let mut j = i + 1;
+                while j < bytes.len() && bytes[j] != b'}' { j += 1; }
+                if j >= bytes.len() {
+                    out.push('{');
+                    i += 1;
+                    continue;
+                }
+                let key = std::str::from_utf8(&bytes[i+1..j]).unwrap_or("");
+                if key.is_empty() || key == "$it" {
+                    out.push_str(&v.to_display_string());
+                } else {
+                    let path = parse_cell_path(key.trim_start_matches('$'));
+                    let r = resolve_cell_path(v, &path).unwrap_or(Value::Null);
+                    out.push_str(&r.to_display_string());
+                }
+                i = j + 1;
+            } else {
+                out.push(bytes[i] as char);
+                i += 1;
+            }
+        }
+        out
+    };
+    let out: Vec<Value> = vs.iter().map(|v| Value::String(render(v))).collect();
+    Ok(PipelineData::Values(out))
+}
+
+// ---------------------------------------------------------------------------
+// Phase 9c — do (execute closure inline)
+// ---------------------------------------------------------------------------
+
+fn vb_do(input: PipelineData, args: &[String], state: &mut ShellState) -> Result<PipelineData, i32> {
+    let closure = match lookup_closure(args.first(), state) {
+        Some(c) => c,
+        None => { eprintln!("do: missing closure argument"); return Err(1); }
+    };
+    // Closure positional args come from args[1..]. If no extra args are given
+    // and the pipeline has input, pass the input as a single value.
+    let mut call_args: Vec<Value> = args.iter().skip(1).map(|s| Value::String(s.clone())).collect();
+    if call_args.is_empty() {
+        match input {
+            PipelineData::Empty => {}
+            PipelineData::Bytes(b) => {
+                let s = String::from_utf8_lossy(&b).trim_end_matches('\n').to_string();
+                if !s.is_empty() {
+                    call_args.push(Value::String(s));
+                }
+            }
+            PipelineData::Values(mut vs) => {
+                if vs.len() == 1 {
+                    call_args.push(vs.remove(0));
+                } else if !vs.is_empty() {
+                    call_args.push(Value::List(vs));
+                }
+            }
+        }
+    }
+    let result = crate::executor::apply_closure(&closure, &call_args, state)?;
+    // Spread List results into pipeline values so downstream stages see them
+    // element-wise (matches nushell's auto-spread).
+    let out = match result {
+        Value::List(vs) => PipelineData::Values(vs),
+        other => PipelineData::Values(vec![other]),
+    };
+    Ok(out)
 }

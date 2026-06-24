@@ -536,6 +536,14 @@ pub fn apply_closure(
                 return Ok(Value::from_json(j));
             }
         }
+        // Expression body shortcut: `{|a, b| $a + $b}`, `{|r| if $r.x > 5 { ... } else { ... }}`,
+        // etc. Runs BEFORE shell parse so the body can use syntax (like `if {}
+        // else {}`) that wouldn't parse as a shell command. The evaluator
+        // returns Ok(None) for anything that isn't a pure expression, so this
+        // falls through to the shell parser for command-shaped bodies.
+        if let Ok(Some(v)) = crate::closure_expr::try_eval(&closure.body_src, &state.let_vars) {
+            return Ok(v);
+        }
         let parsed = crate::parser::parse(&closure.body_src).map_err(|_| 2_i32)?;
         // Pure-variable-path body shortcut: `{|r| $r.a}` → return the typed
         // value of that path, not "run $r.a as a command".
@@ -552,13 +560,6 @@ pub fn apply_closure(
                     }
                 }
             }
-        }
-        // Expression body shortcut: `{|a, b| $a + $b}`, `{|r| $r.age > 30}`,
-        // etc. The mini-evaluator returns Ok(None) for anything that isn't a
-        // pure expression, so this falls through to the command interpreter
-        // for shell-shaped bodies.
-        if let Ok(Some(v)) = crate::closure_expr::try_eval(&closure.body_src, &state.let_vars) {
-            return Ok(v);
         }
         let mut last: Value = Value::Null;
         for complete in &parsed {

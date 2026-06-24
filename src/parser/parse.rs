@@ -243,7 +243,14 @@ impl<'a> Parser<'a> {
         Ok(Redirect { fd, kind, target, here_doc: here_doc_opt })
     }
 
-    fn is_command_start(&self) -> bool {
+    fn is_command_start(&mut self) -> bool {
+        let is_do = matches!(&self.current.token, Token::Word(w) if w == "do");
+        if is_do {
+            let is_closure = matches!(self.peek(), Token::Word(nw) if nw.starts_with("{|"));
+            if is_closure {
+                return true;
+            }
+        }
         match &self.current.token {
             Token::Word(w) => !is_list_terminator(w),
             Token::LParen | Token::LBrace => true,
