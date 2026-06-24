@@ -53,6 +53,28 @@ pub static VALUE_BUILTINS: Lazy<HashMap<&'static str, ValueBuiltin>> = Lazy::new
     m.insert("flatten", vb_flatten);
     m.insert("into", vb_into);
     m.insert("range", vb_range);
+    // Phase 7a — iteration combinators
+    m.insert("reduce", vb_reduce);
+    m.insert("take", vb_take);
+    m.insert("skip", vb_skip);
+    m.insert("enumerate", vb_enumerate);
+    m.insert("zip", vb_zip);
+    // Phase 7b — record/table shaping
+    m.insert("columns", vb_columns);
+    m.insert("values", vb_values);
+    m.insert("rename", vb_rename);
+    m.insert("move", vb_move);
+    m.insert("merge", vb_merge);
+    m.insert("upsert", vb_upsert);
+    m.insert("compact", vb_compact);
+    // Phase 7c — predicates / reflection
+    m.insert("any", vb_any);
+    m.insert("all", vb_all);
+    m.insert("is-empty", vb_is_empty);
+    m.insert("describe", vb_describe);
+    // Phase 7d — path / date
+    m.insert("path", vb_path);
+    m.insert("date", vb_date);
     m
 });
 
@@ -1429,4 +1451,498 @@ fn vb_range(_input: PipelineData, args: &[String], _state: &mut ShellState) -> R
     let end = if inclusive { hi + 1 } else { hi };
     let out: Vec<Value> = (lo..end).map(Value::Int).collect();
     Ok(PipelineData::Values(out))
+}
+
+// ---------------------------------------------------------------------------
+// Phase 7a — iteration combinators
+// ---------------------------------------------------------------------------
+
+fn vb_reduce(input: PipelineData, args: &[String], state: &mut ShellState) -> Result<PipelineData, i32> {
+    // Forms: `reduce {|acc, it| ...}` (no init; first element is acc)
+    //        `reduce -i <init> {|acc, it| ...}` (with literal initial value)
+    let (init, closure_arg) = if args.first().map(|s| s.as_str()) == Some("-i") {
+        if args.len() < 3 {
+            eprintln!("reduce: usage `reduce [-i <init>] {{|acc, it| ...}}`");
+            return Err(1);
+        }
+        (Some(parse_literal_value(&args[1])), Some(&args[2]))
+    } else {
+        (None, args.first())
+    };
+    let closure = match lookup_closure(closure_arg, state) {
+        Some(c) => c,
+        None => { eprintln!("reduce: missing closure"); return Err(1); }
+    };
+    let vs = input.into_values()?;
+    let mut iter = vs.into_iter();
+    let mut acc = match init {
+        Some(v) => v,
+        None => match iter.next() {
+            Some(v) => v,
+            None => return Ok(PipelineData::Values(vec![Value::Null])),
+        },
+    };
+    for it in iter {
+        acc = crate::executor::apply_closure(&closure, &[acc, it], state)?;
+    }
+    Ok(PipelineData::Values(vec![acc]))
+}
+
+fn vb_take(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+    let n: usize = args.first().and_then(|s| s.parse().ok()).unwrap_or(1);
+    let mut vs = input.into_values()?;
+    vs.truncate(n);
+    Ok(PipelineData::Values(vs))
+}
+
+fn vb_skip(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+    let n: usize = args.first().and_then(|s| s.parse().ok()).unwrap_or(1);
+    let vs = input.into_values()?;
+    Ok(PipelineData::Values(vs.into_iter().skip(n).collect()))
+}
+
+fn vb_enumerate(input: PipelineData, _args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+    let vs = input.into_values()?;
+    let out: Vec<Value> = vs.into_iter().enumerate().map(|(i, item)| {
+        let mut r = IndexMap::new();
+        r.insert("index".to_string(), Value::Int(i as i64));
+        r.insert("item".to_string(), item);
+        Value::Record(r)
+    }).collect();
+    Ok(PipelineData::Values(out))
+}
+
+fn vb_zip(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+    // `zip <json-list>` — pair pipeline values with values from a literal JSON list.
+    let other_arg = match args.first() {
+        Some(s) => s,
+        None => { eprintln!("zip: missing other list (JSON literal)"); return Err(1); }
+    };
+    let other: Vec<Value> = match serde_json::from_str::<serde_json::Value>(other_arg) {
+        Ok(serde_json::Value::Array(arr)) => arr.into_iter().map(Value::from_json).collect(),
+        _ => { eprintln!("zip: argument must be a JSON list"); return Err(1); }
+    };
+    let vs = input.into_values()?;
+    let out: Vec<Value> = vs.into_iter().zip(other.into_iter())
+        .map(|(a, b)| Value::List(vec![a, b]))
+        .collect();
+    Ok(PipelineData::Values(out))
+}
+
+// ---------------------------------------------------------------------------
+// Phase 7b — record/table shaping
+// ---------------------------------------------------------------------------
+
+fn vb_columns(input: PipelineData, _args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+    let vs = input.into_values()?;
+    // Use first record (or only value) as the column source.
+    let first = vs.into_iter().next().unwrap_or(Value::Null);
+    let cols: Vec<Value> = match first {
+        Value::Record(m) => m.into_iter().map(|(k, _)| Value::String(k)).collect(),
+        _ => Vec::new(),
+    };
+    Ok(PipelineData::Values(cols))
+}
+
+fn vb_values(input: PipelineData, _args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+    let vs = input.into_values()?;
+    let first = vs.into_iter().next().unwrap_or(Value::Null);
+    let out: Vec<Value> = match first {
+        Value::Record(m) => m.into_iter().map(|(_, v)| v).collect(),
+        Value::List(xs) => xs,
+        other => vec![other],
+    };
+    Ok(PipelineData::Values(out))
+}
+
+fn vb_rename(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+    if args.len() < 2 {
+        eprintln!("rename: usage `rename <old> <new>`");
+        return Err(1);
+    }
+    let old = &args[0];
+    let new = &args[1];
+    let vs = input.into_values()?;
+    let out: Vec<Value> = vs.into_iter().map(|v| match v {
+        Value::Record(m) => {
+            let mut nm = IndexMap::new();
+            for (k, val) in m {
+                if &k == old { nm.insert(new.clone(), val); }
+                else { nm.insert(k, val); }
+            }
+            Value::Record(nm)
+        }
+        other => other,
+    }).collect();
+    Ok(PipelineData::Values(out))
+}
+
+fn vb_move(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+    // `move <col> --before <other>` or `move <col> --after <other>`
+    if args.len() < 3 {
+        eprintln!("move: usage `move <col> --before|--after <other>`");
+        return Err(1);
+    }
+    let col = &args[0];
+    let mode = &args[1];
+    let anchor = &args[2];
+    let before = match mode.as_str() {
+        "--before" => true,
+        "--after" => false,
+        _ => { eprintln!("move: expected --before or --after"); return Err(1); }
+    };
+    let vs = input.into_values()?;
+    let out: Vec<Value> = vs.into_iter().map(|v| match v {
+        Value::Record(mut m) => {
+            let val = match m.shift_remove(col) {
+                Some(v) => v,
+                None => return Value::Record(m),
+            };
+            let mut nm = IndexMap::new();
+            let mut inserted = false;
+            for (k, v) in m {
+                if !inserted && &k == anchor && before {
+                    nm.insert(col.clone(), val.clone());
+                    inserted = true;
+                }
+                let is_anchor = &k == anchor;
+                nm.insert(k, v);
+                if !inserted && is_anchor && !before {
+                    nm.insert(col.clone(), val.clone());
+                    inserted = true;
+                }
+            }
+            if !inserted { nm.insert(col.clone(), val); }
+            Value::Record(nm)
+        }
+        other => other,
+    }).collect();
+    Ok(PipelineData::Values(out))
+}
+
+fn vb_merge(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+    // `merge <json-record-or-table>` — per-row merge for table inputs;
+    // for a single record input, merge the literal record into it.
+    let other_arg = match args.first() {
+        Some(s) => s,
+        None => { eprintln!("merge: missing other (JSON record or table)"); return Err(1); }
+    };
+    let other_json: serde_json::Value = match serde_json::from_str(other_arg) {
+        Ok(v) => v,
+        Err(_) => { eprintln!("merge: argument must be JSON"); return Err(1); }
+    };
+    let vs = input.into_values()?;
+    let merge_one = |a: Value, b: &Value| -> Value {
+        match (a, b) {
+            (Value::Record(mut ma), Value::Record(mb)) => {
+                for (k, v) in mb { ma.insert(k.clone(), v.clone()); }
+                Value::Record(ma)
+            }
+            (a, _) => a,
+        }
+    };
+    let out: Vec<Value> = match other_json {
+        serde_json::Value::Array(arr) => {
+            let others: Vec<Value> = arr.into_iter().map(Value::from_json).collect();
+            vs.into_iter().zip(others.into_iter())
+                .map(|(a, b)| merge_one(a, &b))
+                .collect()
+        }
+        other => {
+            let bv = Value::from_json(other);
+            vs.into_iter().map(|a| merge_one(a, &bv)).collect()
+        }
+    };
+    Ok(PipelineData::Values(out))
+}
+
+fn vb_upsert(input: PipelineData, args: &[String], state: &mut ShellState) -> Result<PipelineData, i32> {
+    if args.len() < 2 {
+        eprintln!("upsert: usage `upsert <col> <value-or-closure>`");
+        return Err(1);
+    }
+    let col = &args[0];
+    let new_arg = &args[1];
+    let closure = lookup_closure(Some(new_arg), state);
+    let vs = input.into_values()?;
+    let mut out = Vec::with_capacity(vs.len());
+    for v in vs {
+        let upserted = if let Value::Record(mut r) = v {
+            let new_val = if let Some(ref c) = closure {
+                let row = Value::Record(r.clone());
+                crate::executor::apply_closure(c, std::slice::from_ref(&row), state)?
+            } else {
+                parse_literal_value(new_arg)
+            };
+            r.insert(col.clone(), new_val);
+            Value::Record(r)
+        } else { v };
+        out.push(upserted);
+    }
+    Ok(PipelineData::Values(out))
+}
+
+fn vb_compact(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+    // Without args: drop records containing any Null value, and drop Null elements
+    // from lists. With column args: drop records where any named column is Null/missing.
+    let vs = input.into_values()?;
+    let out: Vec<Value> = vs.into_iter().filter(|v| match v {
+        Value::Null => false,
+        Value::Record(m) => {
+            if args.is_empty() {
+                m.values().all(|x| !matches!(x, Value::Null))
+            } else {
+                args.iter().all(|c| matches!(m.get(c), Some(x) if !matches!(x, Value::Null)))
+            }
+        }
+        _ => true,
+    }).collect();
+    Ok(PipelineData::Values(out))
+}
+
+// ---------------------------------------------------------------------------
+// Phase 7c — predicates / reflection
+// ---------------------------------------------------------------------------
+
+fn vb_any(input: PipelineData, args: &[String], state: &mut ShellState) -> Result<PipelineData, i32> {
+    let closure = match lookup_closure(args.first(), state) {
+        Some(c) => c,
+        None => { eprintln!("any: usage `any {{|r| ...}}`"); return Err(1); }
+    };
+    let vs = input.into_values()?;
+    for v in vs {
+        let r = crate::executor::apply_closure(&closure, std::slice::from_ref(&v), state)?;
+        if is_truthy(&r) {
+            return Ok(PipelineData::Values(vec![Value::Bool(true)]));
+        }
+    }
+    Ok(PipelineData::Values(vec![Value::Bool(false)]))
+}
+
+fn vb_all(input: PipelineData, args: &[String], state: &mut ShellState) -> Result<PipelineData, i32> {
+    let closure = match lookup_closure(args.first(), state) {
+        Some(c) => c,
+        None => { eprintln!("all: usage `all {{|r| ...}}`"); return Err(1); }
+    };
+    let vs = input.into_values()?;
+    for v in vs {
+        let r = crate::executor::apply_closure(&closure, std::slice::from_ref(&v), state)?;
+        if !is_truthy(&r) {
+            return Ok(PipelineData::Values(vec![Value::Bool(false)]));
+        }
+    }
+    Ok(PipelineData::Values(vec![Value::Bool(true)]))
+}
+
+fn vb_is_empty(input: PipelineData, _args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+    let vs = input.into_values()?;
+    let empty = match vs.as_slice() {
+        [] => true,
+        [v] => match v {
+            Value::Null => true,
+            Value::String(s) => s.is_empty(),
+            Value::List(x) => x.is_empty(),
+            Value::Record(m) => m.is_empty(),
+            Value::Binary(b) => b.is_empty(),
+            _ => false,
+        },
+        _ => false,
+    };
+    Ok(PipelineData::Values(vec![Value::Bool(empty)]))
+}
+
+fn vb_describe(input: PipelineData, _args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+    let vs = input.into_values()?;
+    // The pipeline model unwraps top-level JSON arrays into multiple Values, so
+    // `[{"a":1}]` and `{"a":1}` both arrive here as `[Record]`. Disambiguate by
+    // size: multi-value pipelines are list/table; single-value reports its own
+    // type; empty is "nothing".
+    let name = if vs.is_empty() {
+        "nothing".to_string()
+    } else if vs.iter().all(|x| matches!(x, Value::Record(_))) {
+        "table".to_string()
+    } else if vs.len() == 1 {
+        match &vs[0] {
+            Value::Null => "nothing",
+            Value::Bool(_) => "bool",
+            Value::Int(_) => "int",
+            Value::Float(_) => "float",
+            Value::String(_) => "string",
+            Value::Binary(_) => "binary",
+            Value::Closure(_) => "closure",
+            Value::List(items) => {
+                if !items.is_empty() && items.iter().all(|x| matches!(x, Value::Record(_))) {
+                    "table"
+                } else {
+                    "list"
+                }
+            }
+            Value::Record(_) => "record",
+        }.to_string()
+    } else {
+        "list".to_string()
+    };
+    Ok(PipelineData::Values(vec![Value::String(name)]))
+}
+
+// ---------------------------------------------------------------------------
+// Phase 7d — path / date
+// ---------------------------------------------------------------------------
+
+fn vb_path(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+    let sub = match args.first().map(|s| s.as_str()) {
+        Some(s) => s,
+        None => { eprintln!("path: usage `path <join|basename|dirname|parse|exists> ...`"); return Err(1); }
+    };
+    let rest = &args[1..];
+    // Helper: derive the input string(s) — either from rest args or from pipeline.
+    let from_input_or_args = |input: PipelineData, fallback: &[String]| -> Result<Vec<String>, i32> {
+        if !fallback.is_empty() {
+            return Ok(fallback.iter().cloned().collect());
+        }
+        let vs = input.into_values()?;
+        Ok(vs.into_iter().map(|v| v.to_display_string()).collect())
+    };
+    match sub {
+        "join" => {
+            // `path join a b c` → "a/b/c"
+            let pieces: Vec<String> = if !rest.is_empty() {
+                rest.iter().cloned().collect()
+            } else {
+                let vs = input.into_values()?;
+                vs.into_iter().map(|v| v.to_display_string()).collect()
+            };
+            let mut p = std::path::PathBuf::new();
+            for piece in &pieces { p.push(piece); }
+            Ok(PipelineData::Values(vec![Value::String(p.to_string_lossy().to_string())]))
+        }
+        "basename" => {
+            let inputs = from_input_or_args(input, rest)?;
+            let out: Vec<Value> = inputs.into_iter().map(|s| {
+                let p = std::path::Path::new(&s);
+                Value::String(p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default())
+            }).collect();
+            if out.len() == 1 { Ok(PipelineData::Values(out)) } else { Ok(PipelineData::Values(out)) }
+        }
+        "dirname" => {
+            let inputs = from_input_or_args(input, rest)?;
+            let out: Vec<Value> = inputs.into_iter().map(|s| {
+                let p = std::path::Path::new(&s);
+                Value::String(p.parent().map(|n| n.to_string_lossy().to_string()).unwrap_or_default())
+            }).collect();
+            Ok(PipelineData::Values(out))
+        }
+        "exists" => {
+            let inputs = from_input_or_args(input, rest)?;
+            let out: Vec<Value> = inputs.into_iter()
+                .map(|s| Value::Bool(std::path::Path::new(&s).exists()))
+                .collect();
+            Ok(PipelineData::Values(out))
+        }
+        "parse" => {
+            let inputs = from_input_or_args(input, rest)?;
+            let out: Vec<Value> = inputs.into_iter().map(|s| {
+                let p = std::path::Path::new(&s);
+                let mut r = IndexMap::new();
+                r.insert("parent".to_string(),
+                    Value::String(p.parent().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()));
+                r.insert("stem".to_string(),
+                    Value::String(p.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()));
+                r.insert("extension".to_string(),
+                    Value::String(p.extension().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()));
+                Value::Record(r)
+            }).collect();
+            Ok(PipelineData::Values(out))
+        }
+        _ => { eprintln!("path: unknown subcommand '{}'", sub); Err(1) }
+    }
+}
+
+fn vb_date(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+    let sub = match args.first().map(|s| s.as_str()) {
+        Some(s) => s,
+        None => { eprintln!("date: usage `date now | date format <fmt>`"); return Err(1); }
+    };
+    match sub {
+        "now" => {
+            // RFC3339 timestamp of "now" (UTC), no external chrono dependency.
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|_| 1_i32)?;
+            let secs = now.as_secs() as i64;
+            let nanos = now.subsec_nanos();
+            Ok(PipelineData::Values(vec![Value::String(format_rfc3339(secs, nanos))]))
+        }
+        "format" => {
+            // `date format <fmt>` — accepts a few simple specifiers on UTC now or
+            // on the input string (which must be an integer epoch second).
+            let fmt = args.get(1).map(|s| s.as_str()).unwrap_or("%Y-%m-%d %H:%M:%S");
+            // Determine the source seconds: pipeline if non-empty, else now.
+            let inputs = input.into_values().unwrap_or_default();
+            let secs_list: Vec<i64> = if inputs.is_empty() {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH).map_err(|_| 1_i32)?;
+                vec![now.as_secs() as i64]
+            } else {
+                inputs.iter().filter_map(|v| match v {
+                    Value::Int(i) => Some(*i),
+                    Value::String(s) => s.parse().ok(),
+                    _ => None,
+                }).collect()
+            };
+            let out: Vec<Value> = secs_list.into_iter()
+                .map(|s| Value::String(format_date(s, fmt)))
+                .collect();
+            Ok(PipelineData::Values(out))
+        }
+        _ => { eprintln!("date: unknown subcommand '{}'", sub); Err(1) }
+    }
+}
+
+// Format seconds-since-epoch as RFC3339 (UTC), no external deps.
+fn format_rfc3339(secs: i64, nanos: u32) -> String {
+    let (y, mo, d, h, mi, se) = epoch_to_ymdhms(secs);
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:09}Z", y, mo, d, h, mi, se, nanos)
+}
+
+fn format_date(secs: i64, fmt: &str) -> String {
+    let (y, mo, d, h, mi, se) = epoch_to_ymdhms(secs);
+    let mut out = String::with_capacity(fmt.len());
+    let mut chars = fmt.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            match chars.next() {
+                Some('Y') => out.push_str(&format!("{:04}", y)),
+                Some('m') => out.push_str(&format!("{:02}", mo)),
+                Some('d') => out.push_str(&format!("{:02}", d)),
+                Some('H') => out.push_str(&format!("{:02}", h)),
+                Some('M') => out.push_str(&format!("{:02}", mi)),
+                Some('S') => out.push_str(&format!("{:02}", se)),
+                Some('%') => out.push('%'),
+                Some(other) => { out.push('%'); out.push(other); }
+                None => out.push('%'),
+            }
+        } else { out.push(c); }
+    }
+    out
+}
+
+// Civil-from-days algorithm (Howard Hinnant). secs is UTC seconds since epoch.
+fn epoch_to_ymdhms(secs: i64) -> (i32, u32, u32, u32, u32, u32) {
+    let days = secs.div_euclid(86_400);
+    let secs_of_day = secs.rem_euclid(86_400);
+    let h = (secs_of_day / 3600) as u32;
+    let mi = ((secs_of_day % 3600) / 60) as u32;
+    let se = (secs_of_day % 60) as u32;
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
+    let y = (if m <= 2 { y + 1 } else { y }) as i32;
+    (y, m, d, h, mi, se)
 }
