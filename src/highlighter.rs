@@ -37,7 +37,17 @@ pub fn highlight(buffer: &str, state: &mut ShellState) -> Vec<StyledSpan> {
         let span = match &spanned.token {
             Token::Word(w) if is_command_pos => {
                 let raw = strip_quotes(w);
-                if is_builtin_cmd(&raw) || state.command_in_path(&raw) || state.aliases.contains_key(&raw) || state.functions.contains_key(&raw) {
+                // Phase 14d: signed value-aware builtins (try/where/each/etc.)
+                // are valid commands even though they aren't in the bash-style
+                // BUILTIN_NAMES list, and aren't on PATH. Highlight them
+                // identically to other builtins so the prompt no longer
+                // marks `try`, `each`, `error` etc. red.
+                let is_signed = crate::signature::SIGNATURES.contains_key(raw.as_str());
+                let is_user_fn = state.user_signatures.contains_key(&raw)
+                    || state.user_typed_fns.contains_key(&raw);
+                if is_builtin_cmd(&raw) || is_signed || is_user_fn || state.command_in_path(&raw)
+                    || state.aliases.contains_key(&raw) || state.functions.contains_key(&raw)
+                {
                     StyledSpan { text, fg: Some(Color::Green), bold: true, underline: false }
                 } else if raw.contains('/') {
                     // Looks like a path — show as valid (skip stat on every keystroke)

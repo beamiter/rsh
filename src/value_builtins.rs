@@ -16,6 +16,7 @@ pub type ValueBuiltin = fn(PipelineData, &[String], &mut ShellState) -> Result<P
 pub static VALUE_BUILTINS: Lazy<HashMap<&'static str, ValueBuiltin>> = Lazy::new(|| {
     let mut m: HashMap<&'static str, ValueBuiltin> = HashMap::new();
     m.insert("from-json", vb_from_json);
+    m.insert("from-ndjson", vb_from_ndjson);
     m.insert("to-json", vb_to_json);
     m.insert("to-table", vb_to_table);
     m.insert("where", vb_where);
@@ -105,6 +106,13 @@ pub static VALUE_BUILTINS: Lazy<HashMap<&'static str, ValueBuiltin>> = Lazy::new
     m.insert("char", vb_char);
     m.insert("ansi", vb_ansi);
     m.insert("fill", vb_fill);
+    // Phase 14a — structured errors + try/catch
+    m.insert("try", vb_try);
+    m.insert("error", vb_error);
+    // Phase 14b — signatures / help
+    m.insert("help", vb_help);
+    // Phase 15c — typed user functions
+    m.insert("def", vb_def);
     m
 });
 
@@ -134,6 +142,33 @@ fn is_context_only(name: &str) -> bool {
 fn vb_from_json(input: PipelineData, _args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
     let vs = input.into_values()?;
     Ok(PipelineData::Values(vs))
+}
+
+/// Phase 15b — streaming NDJSON parser. Parses one JSON value per line
+/// lazily, so `from-ndjson big.jsonl | take 5 | ...` doesn't need to
+/// touch every line of the file.
+fn vb_from_ndjson(input: PipelineData, _args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+    let bytes: Vec<u8> = match input {
+        PipelineData::Empty => Vec::new(),
+        PipelineData::Bytes(b) => b,
+        PipelineData::Values(vs) => vs.iter().map(|v| v.to_display_string()).collect::<Vec<_>>().join("\n").into_bytes(),
+        PipelineData::Stream(it) => it.map(|v| v.to_display_string()).collect::<Vec<_>>().join("\n").into_bytes(),
+    };
+    let s = String::from_utf8_lossy(&bytes).into_owned();
+    // Owned String → owned iterator (deferred parse, line-by-line).
+    let it = s.into_bytes();
+    let s = unsafe { String::from_utf8_unchecked(it) };
+    // Split now (cheap) and parse lazily.
+    let lines: Vec<String> = s.lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.to_string())
+        .collect();
+    let iter = lines.into_iter().filter_map(|line| {
+        serde_json::from_str::<serde_json::Value>(&line)
+            .ok()
+            .map(Value::from_json)
+    });
+    Ok(PipelineData::Stream(Box::new(iter)))
 }
 
 fn vb_to_json(input: PipelineData, _args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
@@ -416,7 +451,7 @@ fn vb_from_csv(input: PipelineData, _args: &[String], _state: &mut ShellState) -
     let bytes = match input {
         PipelineData::Empty => Vec::new(),
         PipelineData::Bytes(b) => b,
-        PipelineData::Values(_) => {
+        PipelineData::Values(_) | PipelineData::Stream(_) => {
             eprintln!("from-csv: expected text input");
             return Err(1);
         }
@@ -458,6 +493,10 @@ fn vb_length(input: PipelineData, _args: &[String], _state: &mut ShellState) -> 
 
 fn vb_first(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
     let n: usize = args.first().and_then(|s| s.parse().ok()).unwrap_or(1);
+    if input.is_stream() {
+        let vs: Vec<Value> = input.into_value_iter()?.take(n).collect();
+        return Ok(PipelineData::Values(vs));
+    }
     let mut vs = input.into_values()?;
     vs.truncate(n);
     Ok(PipelineData::Values(vs))
@@ -484,7 +523,7 @@ fn vb_from_yaml(input: PipelineData, _args: &[String], _state: &mut ShellState) 
     let bytes = match input {
         PipelineData::Empty => Vec::new(),
         PipelineData::Bytes(b) => b,
-        PipelineData::Values(_) => {
+        PipelineData::Values(_) | PipelineData::Stream(_) => {
             eprintln!("from-yaml: expected text input");
             return Err(1);
         }
@@ -521,7 +560,7 @@ fn vb_from_toml(input: PipelineData, _args: &[String], _state: &mut ShellState) 
     let bytes = match input {
         PipelineData::Empty => Vec::new(),
         PipelineData::Bytes(b) => b,
-        PipelineData::Values(_) => {
+        PipelineData::Values(_) | PipelineData::Stream(_) => {
             eprintln!("from-toml: expected text input");
             return Err(1);
         }
@@ -556,7 +595,7 @@ fn vb_from_xml(input: PipelineData, _args: &[String], _state: &mut ShellState) -
     let bytes = match input {
         PipelineData::Empty => Vec::new(),
         PipelineData::Bytes(b) => b,
-        PipelineData::Values(_) => {
+        PipelineData::Values(_) | PipelineData::Stream(_) => {
             eprintln!("from-xml: expected text input");
             return Err(1);
         }
@@ -1043,6 +1082,15 @@ fn vb_save(input: PipelineData, args: &[String], state: &mut ShellState) -> Resu
                 }
                 PipelineData::Bytes(s.into_bytes())
             }
+            PipelineData::Stream(it) => {
+                let vs: Vec<_> = it.collect();
+                let mut s = String::new();
+                for (i, v) in vs.iter().enumerate() {
+                    if i > 0 { s.push('\n'); }
+                    s.push_str(&v.to_display_string());
+                }
+                PipelineData::Bytes(s.into_bytes())
+            }
         },
     };
     let bytes = match bytes_data {
@@ -1074,6 +1122,10 @@ fn vb_save(input: PipelineData, args: &[String], state: &mut ShellState) -> Resu
 // ---------------------------------------------------------------------------
 
 fn input_as_string(input: PipelineData) -> Result<String, i32> {
+    let input = match input {
+        PipelineData::Stream(it) => PipelineData::Values(it.collect()),
+        other => other,
+    };
     match input {
         PipelineData::Empty => Ok(String::new()),
         PipelineData::Bytes(b) => Ok(String::from_utf8_lossy(&b).into_owned()),
@@ -1088,6 +1140,7 @@ fn input_as_string(input: PipelineData) -> Result<String, i32> {
             }
             Ok(s)
         }
+        PipelineData::Stream(_) => unreachable!("normalized above"),
     }
 }
 
@@ -1120,8 +1173,11 @@ fn vb_split(input: PipelineData, args: &[String], _state: &mut ShellState) -> Re
             return Err(1);
         }
     };
+    let input = match input {
+        PipelineData::Stream(it) => PipelineData::Values(it.collect()),
+        other => other,
+    };
     if sub == "row" {
-        // String/Bytes → split by sep into List[String]; List[String] → per-element split (flatten).
         match input {
             PipelineData::Empty => Ok(PipelineData::Values(Vec::new())),
             PipelineData::Bytes(b) => {
@@ -1138,6 +1194,7 @@ fn vb_split(input: PipelineData, args: &[String], _state: &mut ShellState) -> Re
                 }
                 Ok(PipelineData::Values(out))
             }
+            PipelineData::Stream(_) => unreachable!("normalized above"),
         }
     } else {
         // split column SEP NAME...
@@ -1161,6 +1218,7 @@ fn vb_split(input: PipelineData, args: &[String], _state: &mut ShellState) -> Re
                 let out: Vec<Value> = vs.iter().map(|v| process(&v.to_display_string())).collect();
                 Ok(PipelineData::Values(out))
             }
+            PipelineData::Stream(_) => unreachable!("normalized above"),
         }
     }
 }
@@ -1204,6 +1262,7 @@ fn vb_parse(input: PipelineData, args: &[String], _state: &mut ShellState) -> Re
         PipelineData::Empty => Vec::new(),
         PipelineData::Bytes(b) => String::from_utf8_lossy(&b).lines().map(|s| s.to_string()).collect(),
         PipelineData::Values(vs) => vs.iter().map(|v| v.to_display_string()).collect(),
+        PipelineData::Stream(it) => it.map(|v| v.to_display_string()).collect(),
     };
     let mut out = Vec::new();
     for line in &lines {
@@ -1366,6 +1425,11 @@ fn vb_str(input: PipelineData, args: &[String], _state: &mut ShellState) -> Resu
             for v in vs { out.push(convert(v)?); }
             Ok(PipelineData::Values(out))
         }
+        PipelineData::Stream(it) => {
+            let mut out = Vec::new();
+            for v in it { out.push(convert(v)?); }
+            Ok(PipelineData::Values(out))
+        }
     }
 }
 
@@ -1446,13 +1510,33 @@ fn vb_get(input: PipelineData, args: &[String], _state: &mut ShellState) -> Resu
     // Path that begins with an Index treats the pipeline as a List(vs); other
     // paths drill into a single Value or project a column from each row.
     let starts_with_index = matches!(path.first(), Some(PathSeg::Index(_)));
+    let suggest_field = |state: &mut ShellState, vs: &[Value]| {
+        // Use only the first key in the path for the suggestion — that's the
+        // most useful signal when the user typo'd a top-level field.
+        let first_key = path.iter().find_map(|seg| match seg {
+            PathSeg::Field(s) => Some(s.as_str()),
+            _ => None,
+        });
+        if let Some(typed) = first_key {
+            let keys = record_keys_from_input(vs);
+            if let Some(sug) = closest_match(typed, keys.iter().map(|s| s.as_str())) {
+                let msg = format!("get: path '{}' not found, did you mean '{}'?", path_str, sug);
+                eprintln!("{}", msg);
+                state.set_error(msg, 1);
+                return;
+            }
+        }
+        let msg = format!("get: path '{}' not found", path_str);
+        eprintln!("{}", msg);
+        state.set_error(msg, 1);
+    };
     if starts_with_index {
-        let v = Value::List(vs);
+        let v = Value::List(vs.clone());
         match resolve_cell_path(&v, &path) {
             Some(r) => Ok(PipelineData::Values(vec![r])),
             None => {
                 if ignore { Ok(PipelineData::Values(vec![Value::Null])) }
-                else { eprintln!("get: path '{}' not found", path_str); Err(1) }
+                else { suggest_field(_state, &vs); Err(1) }
             }
         }
     } else if vs.len() == 1 {
@@ -1460,7 +1544,7 @@ fn vb_get(input: PipelineData, args: &[String], _state: &mut ShellState) -> Resu
             Some(v) => Ok(PipelineData::Values(vec![v])),
             None => {
                 if ignore { Ok(PipelineData::Values(vec![Value::Null])) }
-                else { eprintln!("get: path '{}' not found", path_str); Err(1) }
+                else { suggest_field(_state, &vs); Err(1) }
             }
         }
     } else {
@@ -1663,8 +1747,10 @@ fn vb_range(_input: PipelineData, args: &[String], _state: &mut ShellState) -> R
         _ => { eprintln!("range: bounds must be integers"); return Err(1); }
     };
     let end = if inclusive { hi + 1 } else { hi };
-    let out: Vec<Value> = (lo..end).map(Value::Int).collect();
-    Ok(PipelineData::Values(out))
+    // Phase 15b: return a lazy stream so `range 1..10_000_000 | take 5`
+    // doesn't have to materialize 10M ints first.
+    let it = (lo..end).map(Value::Int);
+    Ok(PipelineData::Stream(Box::new(it)))
 }
 
 // ---------------------------------------------------------------------------
@@ -1704,6 +1790,12 @@ fn vb_reduce(input: PipelineData, args: &[String], state: &mut ShellState) -> Re
 
 fn vb_take(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
     let n: usize = args.first().and_then(|s| s.parse().ok()).unwrap_or(1);
+    // Phase 15b: short-circuit on Stream — pull only N items.
+    if input.is_stream() {
+        let it = input.into_value_iter()?.take(n);
+        let vs: Vec<Value> = it.collect();
+        return Ok(PipelineData::Values(vs));
+    }
     let mut vs = input.into_values()?;
     vs.truncate(n);
     Ok(PipelineData::Values(vs))
@@ -2235,6 +2327,14 @@ fn vb_do(input: PipelineData, args: &[String], state: &mut ShellState) -> Result
                     call_args.push(Value::List(vs));
                 }
             }
+            PipelineData::Stream(it) => {
+                let mut vs: Vec<Value> = it.collect();
+                if vs.len() == 1 {
+                    call_args.push(vs.remove(0));
+                } else if !vs.is_empty() {
+                    call_args.push(Value::List(vs));
+                }
+            }
         }
     }
     let result = crate::executor::apply_closure(&closure, &call_args, state)?;
@@ -2278,7 +2378,7 @@ fn vb_default(input: PipelineData, args: &[String], _state: &mut ShellState) -> 
     Ok(PipelineData::Values(out))
 }
 
-fn coerce_string_to_value(s: &str) -> Value {
+pub fn coerce_string_to_value(s: &str) -> Value {
     if let Ok(i) = s.parse::<i64>() { return Value::Int(i); }
     if let Ok(f) = s.parse::<f64>() { return Value::Float(f); }
     match s {
@@ -2482,6 +2582,10 @@ fn vb_split_by(input: PipelineData, args: &[String], _state: &mut ShellState) ->
 // ---------------------------------------------------------------------------
 
 fn input_as_bytes(input: PipelineData) -> Vec<u8> {
+    let input = match input {
+        PipelineData::Stream(it) => PipelineData::Values(it.collect()),
+        other => other,
+    };
     match input {
         PipelineData::Empty => Vec::new(),
         PipelineData::Bytes(b) => {
@@ -2490,6 +2594,7 @@ fn input_as_bytes(input: PipelineData) -> Vec<u8> {
             // convention adopted in Phase 9b.
             if b.last() == Some(&b'\n') { b[..b.len() - 1].to_vec() } else { b }
         }
+        PipelineData::Stream(_) => unreachable!("normalized above"),
         PipelineData::Values(vs) => {
             if vs.len() == 1 {
                 match &vs[0] {
@@ -2911,6 +3016,41 @@ fn vb_histogram(input: PipelineData, args: &[String], _state: &mut ShellState) -
 
 /// Classic Levenshtein distance, char-level (no allocation per cell beyond the
 /// two rolling rows). Used by `str distance`.
+/// Phase 15d: return the best did-you-mean candidate (edit distance ≤ 2 and
+/// strictly smaller than the typed length) from a list of names.
+pub fn closest_match<'a, I>(typed: &str, candidates: I) -> Option<String>
+where I: IntoIterator<Item = &'a str>
+{
+    let mut best: Option<(String, usize)> = None;
+    for c in candidates {
+        if c.is_empty() { continue; }
+        let d = levenshtein(typed, c);
+        if d == 0 || d > 2 || d >= typed.len() { continue; }
+        match &best {
+            Some((_, bd)) if d < *bd => best = Some((c.to_string(), d)),
+            None => best = Some((c.to_string(), d)),
+            _ => {}
+        }
+    }
+    best.map(|(s, _)| s)
+}
+
+/// Collect candidate field/column names from a typical pipeline-input value
+/// (single record, list of records, or single list-element record).
+fn record_keys_from_input(vs: &[Value]) -> Vec<String> {
+    let mut keys: Vec<String> = Vec::new();
+    for v in vs {
+        if let Value::Record(r) = v {
+            for k in r.keys() {
+                if !keys.iter().any(|x| x == k) {
+                    keys.push(k.clone());
+                }
+            }
+        }
+    }
+    keys
+}
+
 fn levenshtein(a: &str, b: &str) -> usize {
     let av: Vec<char> = a.chars().collect();
     let bv: Vec<char> = b.chars().collect();
@@ -3053,5 +3193,243 @@ fn vb_fill(input: PipelineData, args: &[String], _state: &mut ShellState) -> Res
                 .collect();
             Ok(PipelineData::Values(out))
         }
+        PipelineData::Stream(it) => {
+            let out: Vec<Value> = it
+                .map(|v| Value::String(pad_one(&v.to_display_string())))
+                .collect();
+            Ok(PipelineData::Values(out))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 14a — structured errors + try/catch
+// ---------------------------------------------------------------------------
+
+/// Convert a pipeline input to a single Value for closure-arg passing.
+/// Mirrors the convention used by `vb_do`: single value passes through,
+/// multiple are wrapped in a List, bytes become a trimmed string.
+fn input_to_value(input: PipelineData) -> Value {
+    match input {
+        PipelineData::Empty => Value::Null,
+        PipelineData::Bytes(b) => {
+            let s = String::from_utf8_lossy(&b);
+            Value::String(s.trim_end_matches('\n').to_string())
+        }
+        PipelineData::Values(mut vs) => {
+            if vs.is_empty() { Value::Null }
+            else if vs.len() == 1 { vs.remove(0) }
+            else { Value::List(vs) }
+        }
+        PipelineData::Stream(it) => {
+            let mut vs: Vec<Value> = it.collect();
+            if vs.is_empty() { Value::Null }
+            else if vs.len() == 1 { vs.remove(0) }
+            else { Value::List(vs) }
+        }
+    }
+}
+
+/// Wrap a closure-result Value back into PipelineData. List results are spread
+/// so downstream stages iterate over them (matches nushell's auto-spread).
+fn value_to_pipeline(v: Value) -> PipelineData {
+    match v {
+        Value::Null => PipelineData::Values(vec![Value::Null]),
+        Value::List(vs) => PipelineData::Values(vs),
+        other => PipelineData::Values(vec![other]),
+    }
+}
+
+/// `try {|in| ... } [catch {|e| ... }]`
+///
+/// Runs the first closure with the pipeline input as its single positional
+/// argument. On success, returns the closure's value. On error, consumes
+/// `state.last_error` (or synthesizes a generic record if none was set) and
+/// either invokes the catch closure with it, or — if no catch — returns Null.
+fn vb_try(input: PipelineData, args: &[String], state: &mut ShellState) -> Result<PipelineData, i32> {
+    let try_closure = match lookup_closure(args.first(), state) {
+        Some(c) => c,
+        None => {
+            eprintln!("Usage: try {{|in| ...}} [catch {{|e| ...}}]");
+            return Err(1);
+        }
+    };
+    let catch_closure = if args.len() >= 3 && args[1] == "catch" {
+        match lookup_closure(args.get(2), state) {
+            Some(c) => Some(c),
+            None => {
+                eprintln!("try: `catch` requires a closure argument");
+                return Err(1);
+            }
+        }
+    } else {
+        None
+    };
+
+    let in_val = input_to_value(input);
+    let call_args: Vec<Value> = if matches!(in_val, Value::Null) { Vec::new() } else { vec![in_val] };
+
+    // Clear any stale error so the try block starts from a known state.
+    state.last_error = None;
+    let saved_exit = state.last_exit_code;
+
+    match crate::executor::apply_closure(&try_closure, &call_args, state) {
+        Ok(v) => {
+            state.last_error = None;
+            Ok(value_to_pipeline(v))
+        }
+        Err(code) => {
+            let err_rec = state.take_error().unwrap_or_else(|| {
+                let mut rec = indexmap::IndexMap::new();
+                rec.insert("msg".to_string(), Value::String(format!("exit code {}", code)));
+                rec.insert("code".to_string(), Value::Int(code as i64));
+                Value::Record(rec)
+            });
+            // Errors inside `try` are recovered: don't poison the outer exit code.
+            state.last_exit_code = saved_exit;
+            match catch_closure {
+                Some(c) => {
+                    let r = crate::executor::apply_closure(&c, &[err_rec], state)?;
+                    Ok(value_to_pipeline(r))
+                }
+                None => Ok(PipelineData::Values(vec![Value::Null])),
+            }
+        }
+    }
+}
+
+/// `error make <msg>` — raise a structured error with the given message.
+/// The error is stored in `state.last_error` so an enclosing `try` can catch
+/// it; the builtin itself returns Err(1) to interrupt the pipeline.
+fn vb_error(_input: PipelineData, args: &[String], state: &mut ShellState) -> Result<PipelineData, i32> {
+    if args.first().map(|s| s.as_str()) != Some("make") {
+        eprintln!("Usage: error make <msg>");
+        return Err(1);
+    }
+    let msg = args.get(1).cloned().unwrap_or_else(|| "error".to_string());
+    state.set_error(msg, 1);
+    Err(1)
+}
+
+// ---------------------------------------------------------------------------
+// Phase 15c — typed user functions: `def NAME [a:int b:string ...] { ... }`
+// ---------------------------------------------------------------------------
+
+/// `def NAME [PARAM[:TYPE] ...] { |params| body }`
+///
+/// Registers a typed user function. The closure body is stored verbatim and
+/// invoked through `apply_closure`. The parameter list is captured as a
+/// `RuntimeSignature` so calls validate arity, `help NAME` works, completion
+/// surfaces it, and the highlighter recognises it as a known command.
+fn vb_def(_input: PipelineData, args: &[String], state: &mut ShellState) -> Result<PipelineData, i32> {
+    if args.is_empty() {
+        eprintln!("Usage: def NAME [params...] {{ |params| body }}");
+        return Err(1);
+    }
+    let name = args[0].clone();
+    if name.is_empty() {
+        eprintln!("def: function name must be non-empty");
+        return Err(1);
+    }
+
+    // The closure is the last argument (sentinel). Everything between
+    // the name and that closure is a parameter declaration.
+    let last_idx = args.len() - 1;
+    let closure = match lookup_closure(args.get(last_idx), state) {
+        Some(c) => c,
+        None => {
+            eprintln!("def {}: expected a closure body as the last argument", name);
+            return Err(1);
+        }
+    };
+
+    let mut params: Vec<crate::signature::RuntimeParam> = Vec::new();
+    for raw in &args[1..last_idx] {
+        // Allow trailing commas / brackets in param lists, mostly for ergonomic
+        // forms like `def f [a:int, b:string] { ... }`. We strip cosmetic chars.
+        let cleaned = raw.trim_matches(|c: char| c == ',' || c == '[' || c == ']');
+        if cleaned.is_empty() {
+            continue;
+        }
+        match crate::signature::parse_def_param(cleaned) {
+            Some(p) => params.push(p),
+            None => {
+                eprintln!("def {}: malformed param `{}`", name, raw);
+                return Err(1);
+            }
+        }
+    }
+
+    let sig = crate::signature::RuntimeSignature {
+        name: name.clone(),
+        params,
+        desc: String::new(),
+    };
+    state.user_signatures.insert(name.clone(), sig);
+    state.user_typed_fns.insert(name, closure);
+    Ok(PipelineData::Empty)
+}
+
+// ---------------------------------------------------------------------------
+// Phase 14b — `help <cmd>` (signature-driven)
+// ---------------------------------------------------------------------------
+
+/// `help <cmd>` — print the human-readable signature, or with `-r` return
+/// the signature as a Record so it can flow through a pipeline.
+fn vb_help(_input: PipelineData, args: &[String], state: &mut ShellState) -> Result<PipelineData, i32> {
+    let mut as_record = false;
+    let mut cmd: Option<&str> = None;
+    for a in args {
+        match a.as_str() {
+            "-r" | "--record" => as_record = true,
+            other => { if cmd.is_none() { cmd = Some(other); } }
+        }
+    }
+    let name = match cmd {
+        Some(n) => n,
+        None => {
+            // No command given — list every signed command (one per line),
+            // including any user-defined functions registered via `def`.
+            let mut names: Vec<String> = crate::signature::SIGNATURES.keys()
+                .map(|s| s.to_string())
+                .chain(state.user_signatures.keys().cloned())
+                .collect();
+            names.sort();
+            names.dedup();
+            let out: Vec<Value> = names.into_iter().map(Value::String).collect();
+            return Ok(PipelineData::Values(out));
+        }
+    };
+    // User signatures shadow static ones — `def` lets users redefine semantics.
+    if let Some(rsig) = state.user_signatures.get(name) {
+        if as_record {
+            let mut rec = indexmap::IndexMap::new();
+            rec.insert("name".to_string(), Value::String(rsig.name.clone()));
+            rec.insert("desc".to_string(), Value::String(rsig.desc.clone()));
+            rec.insert("user_defined".to_string(), Value::Bool(true));
+            let params: Vec<Value> = rsig.params.iter().map(|p| {
+                let mut r = indexmap::IndexMap::new();
+                r.insert("name".to_string(), Value::String(p.name.clone()));
+                r.insert("type".to_string(), Value::String(p.kind.render()));
+                r.insert("optional".to_string(), Value::Bool(p.optional));
+                r.insert("rest".to_string(), Value::Bool(p.rest));
+                Value::Record(r)
+            }).collect();
+            rec.insert("params".to_string(), Value::List(params));
+            return Ok(PipelineData::Values(vec![Value::Record(rec)]));
+        }
+        return Ok(PipelineData::Bytes(rsig.render_help().into_bytes()));
+    }
+    let sig = match crate::signature::SIGNATURES.get(name) {
+        Some(s) => s,
+        None => {
+            state.set_error(format!("no signature for `{}`", name), 1);
+            return Err(1);
+        }
+    };
+    if as_record {
+        Ok(PipelineData::Values(vec![sig.to_record()]))
+    } else {
+        Ok(PipelineData::Bytes(sig.render_help().into_bytes()))
     }
 }

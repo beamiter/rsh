@@ -480,6 +480,44 @@ fn subcommand_completions(cmd: &str, prefix: &str, buf: &str, word_start: usize)
                 ("vet", "Report issues"),
                 ("work", "Workspace mode"),
             ],
+            // Phase 14d: signature-driven first-arg completion for
+            // `help <cmd>` — list every signed value-aware builtin.
+            "help" => {
+                let mut names: Vec<&'static str> =
+                    crate::signature::SIGNATURES.keys().copied().collect();
+                names.sort_unstable();
+                let completions: Vec<Completion> = names
+                    .into_iter()
+                    .filter(|n| n.starts_with(prefix))
+                    .map(|n| {
+                        let sig = crate::signature::SIGNATURES.get(n).unwrap();
+                        Completion {
+                            text: n.to_string(),
+                            display: n.to_string(),
+                            description: Some(sig.desc.to_string()),
+                            kind: CompletionKind::Subcommand,
+                            is_dir: false,
+                        }
+                    })
+                    .collect();
+                return Some(completions);
+            }
+            // `error <subcmd>` — currently just `make`.
+            "error" => {
+                let subs = [("make", "Raise a structured error with a message")];
+                let completions: Vec<Completion> = subs
+                    .iter()
+                    .filter(|(n, _)| n.starts_with(prefix))
+                    .map(|(n, d)| Completion {
+                        text: n.to_string(),
+                        display: n.to_string(),
+                        description: Some(d.to_string()),
+                        kind: CompletionKind::Subcommand,
+                        is_dir: false,
+                    })
+                    .collect();
+                return Some(completions);
+            }
             _ => return None,
         };
 
@@ -1005,6 +1043,20 @@ fn complete_command(prefix: &str, state: &mut ShellState) -> Vec<Completion> {
         });
     }
 
+    // Phase 14d: surface signed value-aware builtins (try/each/where/...).
+    // Description carries the input → output signature so users can pick the
+    // right command by type from the completion list.
+    for (name, sig) in crate::signature::SIGNATURES.iter() {
+        let desc = format!("{} → {}", sig.input.render(), sig.output.render());
+        completions.push(Completion {
+            text: (*name).to_string(),
+            display: (*name).to_string(),
+            description: Some(desc),
+            kind: CompletionKind::Builtin,
+            is_dir: false,
+        });
+    }
+
     // Collect aliases
     for name in state.aliases.keys() {
         completions.push(Completion {
@@ -1022,6 +1074,34 @@ fn complete_command(prefix: &str, state: &mut ShellState) -> Vec<Completion> {
             text: name.clone(),
             display: name.clone(),
             description: Some("function".to_string()),
+            kind: CompletionKind::Function,
+            is_dir: false,
+        });
+    }
+
+    // Phase 15c: typed user functions registered via `def`. Description shows
+    // the parameter sketch (e.g. "a:int b:string") so completions are useful.
+    for (name, sig) in state.user_signatures.iter() {
+        let desc = if sig.params.is_empty() {
+            "user-defined".to_string()
+        } else {
+            sig.params.iter()
+                .map(|p| format!("{}{}{}",
+                    p.name,
+                    if p.optional { "?" } else if p.rest { "..." } else { "" },
+                    if matches!(p.kind, crate::signature::Type::Any) {
+                        String::new()
+                    } else {
+                        format!(":{}", p.kind.render())
+                    }
+                ))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        completions.push(Completion {
+            text: name.clone(),
+            display: name.clone(),
+            description: Some(desc),
             kind: CompletionKind::Function,
             is_dir: false,
         });

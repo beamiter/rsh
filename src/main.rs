@@ -28,6 +28,7 @@ mod prompt;
 pub mod session;
 mod shell;
 mod signal;
+mod signature;
 mod stream;
 mod structured;
 mod suggest;

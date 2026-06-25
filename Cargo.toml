@@ -32,6 +32,10 @@ tempfile = "3"
 name = "bench_core"
 harness = false
 
+[[bench]]
+name = "bench_value"
+harness = false
+
 [profile.release]
 opt-level = 3
 lto = true

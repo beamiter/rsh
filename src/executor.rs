@@ -22,28 +22,39 @@ fn shell_error(msg: &str) {
     }
 }
 
-fn suggest_command(cmd: &str, state: &mut ShellState) -> Option<String> {
+pub fn suggest_command(cmd: &str, state: &mut ShellState) -> Option<String> {
     let mut best: Option<(String, usize)> = None;
+    let consider = |best: &mut Option<(String, usize)>, candidate: &str| {
+        let dist = edit_distance(cmd, candidate);
+        if dist == 0 || dist > 2 || dist >= cmd.len() {
+            return;
+        }
+        match best {
+            Some((_, d)) if dist < *d => *best = Some((candidate.to_string(), dist)),
+            None => *best = Some((candidate.to_string(), dist)),
+            _ => {}
+        }
+    };
     let cache = state.path_cache().clone();
     for candidate in cache.iter() {
-        let dist = edit_distance(cmd, candidate);
-        if dist <= 2 && dist < cmd.len() {
-            match &best {
-                Some((_, d)) if dist < *d => best = Some((candidate.clone(), dist)),
-                None => best = Some((candidate.clone(), dist)),
-                _ => {}
-            }
-        }
+        consider(&mut best, candidate);
     }
     for name in builtins::BUILTIN_NAMES {
-        let dist = edit_distance(cmd, name);
-        if dist <= 2 && dist < cmd.len() {
-            match &best {
-                Some((_, d)) if dist < *d => best = Some((name.to_string(), dist)),
-                None => best = Some((name.to_string(), dist)),
-                _ => {}
-            }
-        }
+        consider(&mut best, name);
+    }
+    // Phase 15d: include value-aware signed builtins (where/each/try/...).
+    for name in crate::signature::SIGNATURES.keys() {
+        consider(&mut best, name);
+    }
+    // Phase 15d: include user-defined `def` functions, aliases, and shell functions.
+    for name in state.user_signatures.keys() {
+        consider(&mut best, name);
+    }
+    for name in state.aliases.keys() {
+        consider(&mut best, name);
+    }
+    for name in state.functions.keys() {
+        consider(&mut best, name);
     }
     best.map(|(s, _)| s)
 }
@@ -256,6 +267,13 @@ fn execute_value_pipeline(cmds: &[Command], state: &mut ShellState) -> i32 {
                 return 1;
             }
         };
+        if let Some(sig) = crate::signature::SIGNATURES.get(name.as_str()) {
+            if let Err(msg) = sig.validate_args(args) {
+                eprintln!("rsh: {}", msg);
+                state.set_error(msg, 2);
+                return 2;
+            }
+        }
         match f(data, args, state) {
             Ok(out) => data = out,
             Err(code) => return code,
@@ -517,42 +535,51 @@ pub fn apply_closure(
 ) -> Result<crate::value::Value, i32> {
     use crate::pipeline_data::PipelineData;
     use crate::value::Value;
+    use std::collections::HashMap;
 
-    // Snapshot let_vars, install captured + bound params for the call.
-    let saved = std::mem::take(&mut state.let_vars);
-    state.let_vars = closure.captured.clone();
+    // Phase 14c hot path: the literal-value JSON and pure-expression
+    // shortcuts don't need to touch `state.let_vars` at all — they read
+    // captures from a local map. Avoiding the take+clone+restore here
+    // saves a sizeable allocation per `each`/`where`/`reduce` iteration.
+    let trimmed = closure.body_src.trim();
+    if !trimmed.is_empty() {
+        if let Ok(j) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            return Ok(Value::from_json(j));
+        }
+    }
+
+    // Build a lightweight var view: captured + params + $in. Cloning captured
+    // is unavoidable (try_eval may need the values), but we skip the broader
+    // state.let_vars swap unless we fall through to the shell path.
+    let mut local_vars: HashMap<String, Value> = closure.captured.clone();
     for (i, p) in closure.params.iter().enumerate() {
         let v = args.get(i).cloned().unwrap_or(Value::Null);
-        state.let_vars.insert(p.clone(), v);
+        local_vars.insert(p.clone(), v);
     }
-    // `$in` is a nushell-style alias for the first positional arg —
-    // always available so bare-body closures like `each { $in * 2 }` work.
-    // Only auto-injected if not already declared as an explicit param.
-    if !state.let_vars.contains_key("in") {
-        state.let_vars.insert(
+    if !local_vars.contains_key("in") {
+        local_vars.insert(
             "in".to_string(),
             args.first().cloned().unwrap_or(Value::Null),
         );
     }
 
+    // Expression-body shortcut: `{|a, b| $a + $b}`, `{|r| if $r.x > 5 ... }`,
+    // etc. Runs BEFORE installing into state so the bulk-iteration case
+    // (each / where / reduce) avoids per-iteration state churn.
+    match crate::closure_expr::try_eval(&closure.body_src, &local_vars) {
+        Ok(Some(v)) => return Ok(v),
+        Ok(None) => {} // not a pure expression — fall through to shell path
+        Err(msg) => {
+            state.set_error(msg, 1);
+            return Err(1);
+        }
+    }
+
+    // Fall through to the shell-command path: now we need state.let_vars to
+    // hold the local view so variable resolution inside the parsed body works.
+    let saved = std::mem::replace(&mut state.let_vars, local_vars);
+
     let result = (|| -> Result<Value, i32> {
-        // Literal-value body shortcut: `{|r| 100}` / `{|r| "x"}` / `{|r| [1,2]}`
-        // — if the trimmed body parses as JSON, treat it as a constant value
-        // and skip the command interpreter (so `update col {|r| 100}` works).
-        let trimmed = closure.body_src.trim();
-        if !trimmed.is_empty() {
-            if let Ok(j) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                return Ok(Value::from_json(j));
-            }
-        }
-        // Expression body shortcut: `{|a, b| $a + $b}`, `{|r| if $r.x > 5 { ... } else { ... }}`,
-        // etc. Runs BEFORE shell parse so the body can use syntax (like `if {}
-        // else {}`) that wouldn't parse as a shell command. The evaluator
-        // returns Ok(None) for anything that isn't a pure expression, so this
-        // falls through to the shell parser for command-shaped bodies.
-        if let Ok(Some(v)) = crate::closure_expr::try_eval(&closure.body_src, &state.let_vars) {
-            return Ok(v);
-        }
         let parsed = crate::parser::parse(&closure.body_src).map_err(|_| 2_i32)?;
         // Pure-variable-path body shortcut: `{|r| $r.a}` → return the typed
         // value of that path, not "run $r.a as a command".
@@ -597,13 +624,25 @@ pub fn apply_closure(
                     let extra_args = &expanded[1..];
                     let f = crate::value_builtins::VALUE_BUILTINS.get(name.as_str())
                         .ok_or(2_i32)?;
+                    if let Some(sig) = crate::signature::SIGNATURES.get(name.as_str()) {
+                        if let Err(msg) = sig.validate_args(extra_args) {
+                            state.set_error(msg.clone(), 2);
+                            eprintln!("rsh: {}", msg);
+                            return Err(2);
+                        }
+                    }
                     data = f(data, extra_args, state)?;
                 }
+                let data = match data {
+                    PipelineData::Stream(it) => PipelineData::Values(it.collect()),
+                    other => other,
+                };
                 last = match data {
                     PipelineData::Values(mut vs) if vs.len() == 1 => vs.remove(0),
                     PipelineData::Values(vs) => Value::List(vs),
                     PipelineData::Bytes(b) => Value::String(String::from_utf8_lossy(&b).to_string()),
                     PipelineData::Empty => Value::Null,
+                    PipelineData::Stream(_) => unreachable!("normalized above"),
                 };
             } else {
                 // Fall back: run as a normal command (e.g. `test ...` style).
@@ -700,6 +739,59 @@ fn execute_simple_with_mode(cmd: &SimpleCommand, state: &mut ShellState, fork_ex
         };
 
         return return_code;
+    }
+
+    // Phase 15c — typed user function registered via `def`. Validate arity
+    // via RuntimeSignature, coerce each arg to a Value (best effort), run the
+    // captured closure, then print the resulting value.
+    if state.user_typed_fns.contains_key(cmd_name) {
+        let sig = state.user_signatures.get(cmd_name).cloned();
+        if let Some(s) = &sig {
+            if let Err(msg) = s.validate_args(args) {
+                eprintln!("rsh: {}", msg);
+                state.set_error(msg, 2);
+                return 2;
+            }
+        }
+        let closure = state.user_typed_fns.get(cmd_name).cloned().unwrap();
+        let mut call_args: Vec<crate::value::Value> = Vec::with_capacity(args.len());
+        for (i, a) in args.iter().enumerate() {
+            // Skip flag tokens for now — only positional args become bound params.
+            if a.starts_with('-') && a.len() > 1 && !a.chars().nth(1).unwrap().is_ascii_digit() {
+                continue;
+            }
+            let v = if let Ok(j) = serde_json::from_str::<serde_json::Value>(a) {
+                crate::value::Value::from_json(j)
+            } else {
+                crate::value_builtins::coerce_string_to_value(a)
+            };
+            if let Some(s) = &sig {
+                if let Some(p) = s.params.get(i) {
+                    if !p.rest {
+                        if let Err(msg) = crate::signature::check_value_type(&v, p.kind, &p.name) {
+                            eprintln!("rsh: {}: {}", cmd_name, msg);
+                            state.set_error(msg, 2);
+                            return 2;
+                        }
+                    }
+                }
+            }
+            call_args.push(v);
+        }
+        match crate::executor::apply_closure(&closure, &call_args, state) {
+            Ok(v) => {
+                let pd = match v {
+                    crate::value::Value::Null => crate::pipeline_data::PipelineData::Empty,
+                    other => crate::pipeline_data::PipelineData::Values(vec![other]),
+                };
+                if let Err(e) = pd.write_to_stdout() {
+                    eprintln!("rsh: {}", e);
+                    return 1;
+                }
+                return 0;
+            }
+            Err(code) => return code,
+        }
     }
 
     // Check for builtin

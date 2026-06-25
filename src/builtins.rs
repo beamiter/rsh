@@ -73,7 +73,7 @@ pub fn run_builtin(name: &str, args: &[String], state: &mut ShellState) -> i32 {
         }
         "shift" => builtin_shift(state),
         "exec" => builtin_exec(args, state),
-        "help" => builtin_help(args),
+        "help" => builtin_help(args, state),
         "history" => builtin_history(state),
         "pushd" => builtin_pushd(args, state),
         "popd" => builtin_popd(state),
@@ -209,19 +209,22 @@ fn run_value_builtin_in_fork(
     match vfn(input, args, state) {
         Ok(out) => {
             let mut sink: Vec<u8> = Vec::new();
+            // Normalize Stream to Values for the legacy render path.
+            let out = match out {
+                PipelineData::Stream(it) => PipelineData::Values(it.collect()),
+                other => other,
+            };
             match out {
                 PipelineData::Empty => {}
                 PipelineData::Bytes(b) => sink.extend_from_slice(&b),
                 PipelineData::Values(ref vs) => {
-                    // Scalar-friendly rendering: single non-record value prints raw
-                    // (so `count` outputs `4`, not `[4]`). Record/list output serializes
-                    // as JSON so downstream value-aware builtins can re-parse it.
                     if vs.len() == 1 && !vs[0].is_record() {
                         let _ = writeln!(sink, "{}", vs[0].to_display_string());
                     } else {
                         sink.extend_from_slice(&PipelineData::Values(vs.clone()).into_bytes());
                     }
                 }
+                PipelineData::Stream(_) => unreachable!("normalized above"),
             }
             let _ = std::io::stdout().lock().write_all(&sink);
             0
@@ -2648,18 +2651,76 @@ const HELP_ENTRIES: &[(&str, &str)] = &[
     ("select", "select field... — Project fields from structured records."),
 ];
 
-fn builtin_help(args: &[String]) -> i32 {
+fn builtin_help(args: &[String], state: &ShellState) -> i32 {
+    // Phase 14b: prefer signature-driven help when available.
     if args.is_empty() {
         println!("rsh — a modern shell with bash compatibility and AI features\n");
         println!("Core builtins:");
         for (name, desc) in HELP_ENTRIES {
             println!("  {:12} {}", name, desc.split(" — ").nth(1).unwrap_or(desc));
         }
+        // Also list signed value-aware commands (Phase 14b).
+        let mut signed: Vec<&'static str> = crate::signature::SIGNATURES.keys().copied().collect();
+        signed.sort_unstable();
+        if !signed.is_empty() {
+            println!("\nValue-aware commands (with signatures):");
+            // Print 6 per line for compactness.
+            for chunk in signed.chunks(6) {
+                println!("  {}", chunk.join("  "));
+            }
+        }
+        if !state.user_signatures.is_empty() {
+            let mut user: Vec<&str> = state.user_signatures.keys().map(|s| s.as_str()).collect();
+            user.sort_unstable();
+            println!("\nUser-defined functions:");
+            for chunk in user.chunks(6) {
+                println!("  {}", chunk.join("  "));
+            }
+        }
         println!("\nType 'help <command>' for detailed help on a specific builtin.");
         return 0;
     }
 
-    let cmd = args[0].as_str();
+    // -r / --record asks for the signature as a JSON record on stdout.
+    let mut as_record = false;
+    let mut cmd: Option<&str> = None;
+    for a in args {
+        match a.as_str() {
+            "-r" | "--record" => as_record = true,
+            other => { if cmd.is_none() { cmd = Some(other); } }
+        }
+    }
+    let cmd = match cmd {
+        Some(c) => c,
+        None => { return builtin_help(&[], state); }
+    };
+
+    // Phase 15c: user-defined signatures take precedence so re-defs are visible.
+    if let Some(rsig) = state.user_signatures.get(cmd) {
+        if as_record {
+            println!("{{\"name\":\"{}\",\"user_defined\":true,\"params\":{}}}",
+                rsig.name, rsig.params.len());
+        } else {
+            print!("{}", rsig.render_help());
+        }
+        return 0;
+    }
+
+    if let Some(sig) = crate::signature::SIGNATURES.get(cmd) {
+        if as_record {
+            // Print the to_record() form as JSON for downstream consumption.
+            let json = sig.to_record().to_json();
+            match serde_json::to_string_pretty(&json) {
+                Ok(s) => println!("{}", s),
+                Err(_) => println!("{:?}", sig),
+            }
+        } else {
+            print!("{}", sig.render_help());
+        }
+        return 0;
+    }
+
+    // Fall back to legacy short-form HELP_ENTRIES.
     for (name, desc) in HELP_ENTRIES {
         if *name == cmd {
             println!("{}", desc);

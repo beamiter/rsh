@@ -159,6 +159,18 @@ pub struct ShellState {
     pub inline_closures: Vec<std::sync::Arc<crate::value::ClosureData>>,
     /// Number of fork() calls executed for pipelines (test instrumentation).
     pub fork_count: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Phase 14a: structured error from the most recent failing value-aware
+    /// builtin or closure body. Populated alongside the conventional i32 exit
+    /// code so `try { ... } catch { |e| ... }` can surface a Record `{msg, code}`
+    /// to the handler. Cleared on success and at the entry of each `try` block.
+    pub last_error: Option<crate::value::Value>,
+    /// Phase 15c: signatures registered for user-defined functions via `def`.
+    /// Looked up alongside the static `SIGNATURES` so `help my-fn` works and
+    /// `my-fn` calls can validate args.
+    pub user_signatures: HashMap<String, crate::signature::RuntimeSignature>,
+    /// Phase 15c: typed user functions — name → closure body. The closure
+    /// captures let_vars at def time, like inline `{||...}` closures.
+    pub user_typed_fns: HashMap<String, std::sync::Arc<crate::value::ClosureData>>,
 }
 
 impl ShellState {
@@ -216,7 +228,26 @@ impl ShellState {
             let_vars: HashMap::new(),
             inline_closures: Vec::new(),
             fork_count: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            last_error: None,
+            user_signatures: HashMap::new(),
+            user_typed_fns: HashMap::new(),
         }
+    }
+
+    /// Phase 14a: record a structured error. `msg` is the human-readable
+    /// description; `code` is the conventional exit code the builtin returns
+    /// alongside it. Stored as a Record so `catch { |e| $e.msg }` works.
+    pub fn set_error(&mut self, msg: impl Into<String>, code: i32) {
+        use crate::value::Value;
+        let mut rec = indexmap::IndexMap::new();
+        rec.insert("msg".to_string(), Value::String(msg.into()));
+        rec.insert("code".to_string(), Value::Int(code as i64));
+        self.last_error = Some(Value::Record(rec));
+    }
+
+    /// Phase 14a: pop the structured error (consumed by `try`).
+    pub fn take_error(&mut self) -> Option<crate::value::Value> {
+        self.last_error.take()
     }
 
     fn hash_path(path: &str) -> u64 {
