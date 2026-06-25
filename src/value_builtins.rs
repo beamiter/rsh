@@ -32,6 +32,8 @@ pub static VALUE_BUILTINS: Lazy<HashMap<&'static str, ValueBuiltin>> = Lazy::new
     m.insert("last", vb_last);
     m.insert("reverse", vb_reverse);
     m.insert("each", vb_each);
+    // Phase 16b — parallel each
+    m.insert("par-each", vb_par_each);
     m.insert("from-yaml", vb_from_yaml);
     m.insert("to-yaml", vb_to_yaml);
     m.insert("from-toml", vb_from_toml);
@@ -113,6 +115,10 @@ pub static VALUE_BUILTINS: Lazy<HashMap<&'static str, ValueBuiltin>> = Lazy::new
     m.insert("help", vb_help);
     // Phase 15c — typed user functions
     m.insert("def", vb_def);
+    // Phase 16a — module import
+    m.insert("use", vb_use);
+    // Phase 16c — http client
+    m.insert("http", vb_http);
     m
 });
 
@@ -237,6 +243,116 @@ fn vb_each(input: PipelineData, args: &[String], state: &mut ShellState) -> Resu
         out.push(r);
     }
     Ok(PipelineData::Values(out))
+}
+
+/// Phase 16b — parallel `each`. Runs the closure body on a worker pool while
+/// preserving input order. Restricted to *pure-expression* closures (the same
+/// fast path used by closure_expr::try_eval) so the workers never touch
+/// ShellState. Non-pure bodies fall back to sequential `each` for correctness.
+fn vb_par_each(input: PipelineData, args: &[String], state: &mut ShellState) -> Result<PipelineData, i32> {
+    use std::sync::{Arc, Mutex};
+    let mut keep_empty = false;
+    let mut closure_arg: Option<&String> = None;
+    let mut threads_override: Option<usize> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-k" | "--keep-empty" => keep_empty = true,
+            "-t" | "--threads" => {
+                threads_override = args.get(i + 1).and_then(|s| s.parse().ok());
+                i += 1;
+            }
+            _ => { if closure_arg.is_none() { closure_arg = Some(&args[i]); } }
+        }
+        i += 1;
+    }
+    let closure = match lookup_closure(closure_arg, state) {
+        Some(c) => c,
+        None => {
+            eprintln!("Usage: par-each [-k] [-t N] {{|x| ...}}");
+            return Err(1);
+        }
+    };
+    // Pre-flight: if the body isn't a pure expression, fall back to sequential
+    // each so semantics (closures that call builtins, mutate state, etc.) are
+    // preserved. We probe with an empty var map — try_eval doesn't need the
+    // real params to decide if the body is parseable as an expression.
+    let probe_vars: std::collections::HashMap<String, Value> = closure.captured.clone();
+    let is_pure = matches!(crate::closure_expr::try_eval(&closure.body_src, &probe_vars), Ok(Some(_)) | Err(_));
+    if !is_pure {
+        // Fall back: defer to vb_each by re-dispatching with the same args.
+        return vb_each(input, args, state);
+    }
+
+    let vs = input.into_values()?;
+    let n = vs.len();
+    if n == 0 { return Ok(PipelineData::Values(Vec::new())); }
+
+    let workers = threads_override
+        .unwrap_or_else(|| std::thread::available_parallelism()
+            .map(|p| p.get()).unwrap_or(4))
+        .max(1).min(n);
+
+    let param = closure.params.first().cloned().unwrap_or_else(|| "in".to_string());
+    let body = Arc::new(closure.body_src.clone());
+    let captured = Arc::new(closure.captured.clone());
+    let param = Arc::new(param);
+    let results = Arc::new(Mutex::new(vec![Value::Null; n]));
+    let err_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+
+    // Static chunking — simpler than a work-stealing queue and good enough for
+    // the typical "expensive but uniform" workload.
+    let chunk = (n + workers - 1) / workers;
+    let work: Vec<(usize, Value)> = vs.into_iter().enumerate().collect();
+
+    let mut handles = Vec::with_capacity(workers);
+    for w in 0..workers {
+        let start = w * chunk;
+        let end = (start + chunk).min(n);
+        if start >= end { break; }
+        let slice = work[start..end].to_vec();
+        let results = results.clone();
+        let err_slot = err_slot.clone();
+        let body = body.clone();
+        let captured = captured.clone();
+        let param = param.clone();
+        handles.push(std::thread::spawn(move || {
+            for (idx, val) in slice {
+                if err_slot.lock().unwrap().is_some() { return; }
+                let mut vars: std::collections::HashMap<String, Value> = (*captured).clone();
+                vars.insert((*param).clone(), val.clone());
+                vars.insert("in".to_string(), val);
+                match crate::closure_expr::try_eval(&body, &vars) {
+                    Ok(Some(v)) => { results.lock().unwrap()[idx] = v; }
+                    Ok(None) => {
+                        *err_slot.lock().unwrap() = Some("par-each: closure body is not a pure expression".to_string());
+                        return;
+                    }
+                    Err(msg) => {
+                        *err_slot.lock().unwrap() = Some(msg);
+                        return;
+                    }
+                }
+            }
+        }));
+    }
+    for h in handles { let _ = h.join(); }
+
+    if let Some(msg) = err_slot.lock().unwrap().take() {
+        eprintln!("rsh: {}", msg);
+        state.set_error(msg, 1);
+        return Err(1);
+    }
+    let out_vec = Arc::try_unwrap(results)
+        .map_err(|_| 1_i32)?
+        .into_inner()
+        .map_err(|_| 1_i32)?;
+    let final_out: Vec<Value> = if keep_empty {
+        out_vec
+    } else {
+        out_vec.into_iter().filter(|v| !matches!(v, Value::Null)).collect()
+    };
+    Ok(PipelineData::Values(final_out))
 }
 
 fn vb_sort_by(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
@@ -3312,6 +3428,59 @@ fn vb_error(_input: PipelineData, args: &[String], state: &mut ShellState) -> Re
 }
 
 // ---------------------------------------------------------------------------
+// Phase 16a — module system: `use ./path.rsh [names...]`
+// ---------------------------------------------------------------------------
+
+/// `use PATH [NAME ...]`
+///
+/// Reads PATH as an rsh source file and executes it in the current shell, so
+/// any `def`-registered functions land in `state.user_signatures` /
+/// `state.user_typed_fns`. If extra NAMEs are supplied, only those newly
+/// defined functions are kept; the rest are rolled back.
+fn vb_use(_input: PipelineData, args: &[String], state: &mut ShellState) -> Result<PipelineData, i32> {
+    let path = match args.first() {
+        Some(p) => p,
+        None => { eprintln!("Usage: use PATH [name ...]"); return Err(1); }
+    };
+    let content = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            let msg = format!("use: cannot read `{}`: {}", path, e);
+            eprintln!("{}", msg);
+            state.set_error(msg, 1);
+            return Err(1);
+        }
+    };
+    let parsed = match crate::parser::parse(&content) {
+        Ok(p) => p,
+        Err(e) => {
+            let msg = format!("use: parse error in `{}`: {:?}", path, e);
+            eprintln!("{}", msg);
+            state.set_error(msg, 1);
+            return Err(1);
+        }
+    };
+    let before: std::collections::HashSet<String> = state.user_signatures.keys().cloned().collect();
+    for c in &parsed {
+        let _ = crate::executor::execute_complete_command(c, state);
+    }
+    let added: Vec<String> = state.user_signatures.keys()
+        .filter(|k| !before.contains(k.as_str()))
+        .cloned()
+        .collect();
+    if args.len() > 1 {
+        let keep: std::collections::HashSet<&str> = args[1..].iter().map(|s| s.as_str()).collect();
+        for name in &added {
+            if !keep.contains(name.as_str()) {
+                state.user_signatures.remove(name);
+                state.user_typed_fns.remove(name);
+            }
+        }
+    }
+    Ok(PipelineData::Empty)
+}
+
+// ---------------------------------------------------------------------------
 // Phase 15c — typed user functions: `def NAME [a:int b:string ...] { ... }`
 // ---------------------------------------------------------------------------
 
@@ -3432,4 +3601,160 @@ fn vb_help(_input: PipelineData, args: &[String], state: &mut ShellState) -> Res
     } else {
         Ok(PipelineData::Bytes(sig.render_help().into_bytes()))
     }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 16c — http get/post
+// ---------------------------------------------------------------------------
+
+/// `http get URL [-H "K: V"] [--query "k=v"]`
+/// `http post URL [-d body] [--json] [-H ...]`
+///
+/// Returns a record `{status: int, headers: record, body: string|value}`. If
+/// the response content type is JSON the body is auto-parsed into a Value.
+#[cfg(feature = "ai")]
+fn vb_http(input: PipelineData, args: &[String], state: &mut ShellState) -> Result<PipelineData, i32> {
+    let method = match args.first().map(|s| s.as_str()) {
+        Some("get") => "GET",
+        Some("post") => "POST",
+        Some("put") => "PUT",
+        Some("delete") => "DELETE",
+        Some(other) => {
+            let msg = format!("http: unknown method `{}`", other);
+            eprintln!("{}", msg); state.set_error(msg, 1); return Err(1);
+        }
+        None => {
+            eprintln!("Usage: http get|post|put|delete URL [-H \"K: V\"] [-d body] [--json]");
+            return Err(1);
+        }
+    };
+    let url = match args.get(1) {
+        Some(u) => u.clone(),
+        None => { eprintln!("http: missing URL"); return Err(1); }
+    };
+
+    let mut headers: Vec<(String, String)> = Vec::new();
+    let mut body_arg: Option<String> = None;
+    let mut as_json = false;
+    let mut query: Vec<(String, String)> = Vec::new();
+    let mut i = 2;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-H" | "--header" => {
+                if let Some(h) = args.get(i + 1) {
+                    if let Some((k, v)) = h.split_once(':') {
+                        headers.push((k.trim().to_string(), v.trim().to_string()));
+                    }
+                    i += 1;
+                }
+            }
+            "-d" | "--data" => { body_arg = args.get(i + 1).cloned(); i += 1; }
+            "--json" => { as_json = true; }
+            "--query" => {
+                if let Some(q) = args.get(i + 1) {
+                    if let Some((k, v)) = q.split_once('=') {
+                        query.push((k.to_string(), v.to_string()));
+                    }
+                    i += 1;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    // Body: explicit -d wins; else use the pipeline input if non-empty.
+    let body_bytes: Option<Vec<u8>> = if let Some(b) = body_arg {
+        Some(b.into_bytes())
+    } else {
+        match input {
+            PipelineData::Empty => None,
+            PipelineData::Bytes(b) if !b.is_empty() => Some(b),
+            PipelineData::Bytes(_) => None,
+            PipelineData::Values(vs) if !vs.is_empty() => {
+                Some(PipelineData::Values(vs).into_bytes())
+            }
+            PipelineData::Values(_) => None,
+            PipelineData::Stream(it) => {
+                let vs: Vec<Value> = it.collect();
+                if vs.is_empty() { None } else { Some(PipelineData::Values(vs).into_bytes()) }
+            }
+        }
+    };
+
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(10))
+        .timeout_read(std::time::Duration::from_secs(30))
+        .build();
+    let mut req = agent.request(method, &url);
+    for (k, v) in &query { req = req.query(k, v); }
+    for (k, v) in &headers { req = req.set(k, v); }
+    if as_json && body_bytes.is_none() {
+        // no-op — kept for symmetry with --json on POSTs
+    }
+    if as_json {
+        req = req.set("Content-Type", "application/json");
+    }
+
+    let response = match body_bytes {
+        Some(b) => req.send_bytes(&b),
+        None => req.call(),
+    };
+
+    // ureq folds non-2xx into Err(Response). We surface both as the same record
+    // shape (status code captured) rather than failing the pipeline — callers
+    // can `where status >= 400` to filter.
+    let resp = match response {
+        Ok(r) => r,
+        Err(ureq::Error::Status(_, r)) => r,
+        Err(e) => {
+            let msg = format!("http: request failed: {}", e);
+            eprintln!("{}", msg);
+            state.set_error(msg, 1);
+            return Err(1);
+        }
+    };
+
+    let status = resp.status() as i64;
+    let mut header_rec = indexmap::IndexMap::new();
+    for name in resp.headers_names() {
+        if let Some(v) = resp.header(&name) {
+            header_rec.insert(name, Value::String(v.to_string()));
+        }
+    }
+    let content_type = header_rec.get("content-type")
+        .or_else(|| header_rec.get("Content-Type"))
+        .and_then(|v| if let Value::String(s) = v { Some(s.clone()) } else { None })
+        .unwrap_or_default();
+    let body_string = match resp.into_string() {
+        Ok(s) => s,
+        Err(e) => {
+            let msg = format!("http: body read failed: {}", e);
+            eprintln!("{}", msg);
+            state.set_error(msg, 1);
+            return Err(1);
+        }
+    };
+    let body_value = if content_type.contains("json") {
+        match serde_json::from_str::<serde_json::Value>(&body_string) {
+            Ok(j) => Value::from_json(j),
+            Err(_) => Value::String(body_string),
+        }
+    } else {
+        Value::String(body_string)
+    };
+
+    let mut rec = indexmap::IndexMap::new();
+    rec.insert("status".to_string(), Value::Int(status));
+    rec.insert("headers".to_string(), Value::Record(header_rec));
+    rec.insert("body".to_string(), body_value);
+    Ok(PipelineData::Values(vec![Value::Record(rec)]))
+}
+
+#[cfg(not(feature = "ai"))]
+fn vb_http(_input: PipelineData, _args: &[String], state: &mut ShellState) -> Result<PipelineData, i32> {
+    let msg = "http: not available — rsh was built without the `ai` feature".to_string();
+    eprintln!("{}", msg);
+    state.set_error(msg, 1);
+    Err(1)
 }

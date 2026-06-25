@@ -1332,6 +1332,18 @@ impl Editor {
             } else {
                 prompt_width + display_width(buf_cursor_last) as u16
             };
+
+            // Phase 16d — signature hint line below the input
+            // Only when nothing else owns this slot: no completion menu, no widget mode.
+            if self.completion_menu.is_none() && self.workflow_mode.is_none() && self.search_mode.is_none() {
+                if let Some(hint) = crate::signature::hint_for(
+                    &self.buffer, self.cursor, &state.user_signatures,
+                ) {
+                    out.queue(Print("\r\n"))?;
+                    out.queue(Print(&hint))?;
+                    rendered_lines += 1;
+                }
+            }
         }
 
         // Render completion menu if active

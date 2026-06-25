@@ -268,6 +268,8 @@ const SIGS: &[Signature] = &[
                 desc: "Filter rows by closure or `<field> <op> <value>`." },
     Signature { name: "each",      input: Type::List, output: Type::List, params: PARAMS_EACH,
                 desc: "Map each item through a closure. -k keeps Null results." },
+    Signature { name: "par-each",  input: Type::List, output: Type::List, params: PARAMS_EACH,
+                desc: "Like each, but runs pure-expression closures in parallel." },
     Signature { name: "reduce",    input: Type::List, output: Type::Any,  params: PARAMS_REDUCE,
                 desc: "Fold the list with an initial value and a 2-arg closure." },
     Signature { name: "any",       input: Type::List, output: Type::Bool, params: PARAMS_PREDICATE,
@@ -378,7 +380,14 @@ const SIGS: &[Signature] = &[
     Signature { name: "char",      input: Type::Any,    output: Type::String, params: PARAMS_CHAR, desc: "Look up a named character (nl/tab/sp/...)." },
     Signature { name: "ansi",      input: Type::Any,    output: Type::String, params: PARAMS_CHAR, desc: "Look up a named ANSI escape (red/reset/...)." },
     Signature { name: "fill",      input: Type::Any,    output: Type::String, params: &[],         desc: "Pad input to width/character with flags." },
+    // Phase 16a — module import
+    Signature { name: "use",       input: Type::Null,   output: Type::Null,  params: PARAMS_USE,  desc: "Import `def`s from a file: use PATH [name ...]." },
+    // Phase 16c — http client
+    Signature { name: "http",      input: Type::Any,    output: Type::Record, params: PARAMS_HTTP, desc: "HTTP client: http get|post|put|delete URL [-H K:V] [-d body] [--json]." },
 ];
+
+const PARAMS_USE: &[Param] = &[p("path", Type::String), p_rest("names", Type::String)];
+const PARAMS_HTTP: &[Param] = &[p("method", Type::String), p("url", Type::String), p_rest("opts", Type::String)];
 
 // ---------------------------------------------------------------------------
 // Phase 15c — runtime signatures for user-defined functions (`def`)
@@ -532,6 +541,131 @@ pub static SIGNATURES: Lazy<HashMap<&'static str, &'static Signature>> = Lazy::n
     m
 });
 
+// ---------------------------------------------------------------------------
+// Phase 16d — signature hints
+// ---------------------------------------------------------------------------
+
+/// Find the offset of the command segment that contains `cursor`.
+/// Returns (segment_start, segment_end) where segment is delimited by
+/// `|`, `;`, or newline. Cursor at exactly a delimiter is treated as being
+/// in the segment that ENDS at that delimiter.
+fn segment_around(buffer: &str, cursor: usize) -> (usize, usize) {
+    let bytes = buffer.as_bytes();
+    let cursor = cursor.min(buffer.len());
+    let mut start = 0usize;
+    for i in 0..cursor {
+        let c = bytes[i] as char;
+        if c == '|' || c == ';' || c == '\n' {
+            start = i + 1;
+        }
+    }
+    let mut end = buffer.len();
+    for i in cursor..buffer.len() {
+        let c = bytes[i] as char;
+        if c == '|' || c == ';' || c == '\n' {
+            end = i;
+            break;
+        }
+    }
+    (start, end)
+}
+
+/// Tokenize a segment into (token_start, token_text) pairs by whitespace.
+/// Ignores quoting subtleties — this is best-effort for hint display.
+fn tokenize_segment(seg: &str, seg_start: usize) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut cur_start: Option<usize> = None;
+    for (i, ch) in seg.char_indices() {
+        if ch.is_whitespace() {
+            if let Some(s) = cur_start.take() {
+                out.push((s + seg_start, std::mem::take(&mut cur)));
+            }
+        } else {
+            if cur_start.is_none() { cur_start = Some(i); }
+            cur.push(ch);
+        }
+    }
+    if let Some(s) = cur_start {
+        out.push((s + seg_start, cur));
+    }
+    out
+}
+
+/// Render a one-line signature hint for the command segment containing `cursor`.
+/// Returns None if no known command starts the segment.
+///
+/// Looks up `state.user_signatures` first (so user-defined `def`s shadow
+/// builtins for the hint), then SIGNATURES.
+pub fn hint_for(
+    buffer: &str,
+    cursor: usize,
+    user_sigs: &std::collections::HashMap<String, RuntimeSignature>,
+) -> Option<String> {
+    if buffer.trim().is_empty() { return None; }
+    let (seg_start, seg_end) = segment_around(buffer, cursor);
+    let seg = &buffer[seg_start..seg_end];
+    let toks = tokenize_segment(seg, seg_start);
+    let (cmd_tok_start, cmd_name) = toks.first()?.clone();
+    // Cursor before/at the command-name token start → don't hint yet.
+    if cursor <= cmd_tok_start { return None; }
+
+    // Active positional index: count non-flag tokens after the command,
+    // up to (but not including) the cursor's token.
+    // If the cursor is inside a token, that token is the active one;
+    // if between tokens (whitespace), the NEXT positional is active.
+    let positionals: Vec<&(usize, String)> = toks.iter()
+        .skip(1)
+        .filter(|(_, t)| !(t.starts_with('-') && t.len() > 1
+            && !t.chars().nth(1).unwrap().is_ascii_digit()))
+        .collect();
+
+    let mut active = positionals.len(); // default: pointing past last
+    for (i, (start, text)) in positionals.iter().enumerate() {
+        let end = start + text.len();
+        if cursor <= end {
+            active = i;
+            break;
+        }
+    }
+
+    // Pull params from runtime sig first, then static.
+    let (params, desc): (Vec<(String, String, bool, bool)>, String) =
+        if let Some(rs) = user_sigs.get(&cmd_name) {
+            (rs.params.iter().map(|p| (p.name.clone(), p.kind.render(), p.optional, p.rest)).collect(),
+             rs.desc.clone())
+        } else if let Some(s) = SIGNATURES.get(cmd_name.as_str()) {
+            (s.params.iter().map(|p| (p.name.to_string(), p.kind.render(), p.optional, p.rest)).collect(),
+             s.desc.to_string())
+        } else {
+            return None;
+        };
+
+    if params.is_empty() && desc.is_empty() { return None; }
+
+    let mut parts: Vec<String> = Vec::with_capacity(params.len());
+    for (i, (name, kind, opt, rest)) in params.iter().enumerate() {
+        let tag = if *rest { "..." } else if *opt { "?" } else { "" };
+        let is_active = if *rest { i <= active } else { i == active };
+        let piece = format!("{}{}:{}", tag, name, kind);
+        if is_active {
+            // ANSI: bold + cyan; reset before continuing
+            parts.push(format!("\x1b[1;36m{}\x1b[0;2m", piece));
+        } else {
+            parts.push(piece);
+        }
+    }
+    let params_str = if parts.is_empty() { String::new() } else { parts.join(" ") };
+    let mut line = format!("\x1b[2m{} {}", cmd_name, params_str);
+    if !desc.is_empty() {
+        if !params_str.is_empty() { line.push_str("  "); }
+        line.push_str("— ");
+        line.push_str(&desc);
+    }
+    line.push_str("\x1b[0m");
+    Some(line)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -573,5 +707,48 @@ mod tests {
         for n in &["from-json", "to-json", "where", "each", "select", "math", "try", "error", "help"] {
             assert!(SIGNATURES.contains_key(*n), "missing signature: {}", n);
         }
+    }
+
+    #[test]
+    fn hint_for_known_builtin_renders_name_and_params() {
+        let empty: std::collections::HashMap<String, RuntimeSignature> = Default::default();
+        let h = hint_for("each ", 5, &empty).expect("each is a known signature");
+        assert!(h.contains("each"), "got: {}", h);
+        assert!(h.contains("closure"), "got: {}", h);
+    }
+
+    #[test]
+    fn hint_for_unknown_command_returns_none() {
+        let empty: std::collections::HashMap<String, RuntimeSignature> = Default::default();
+        assert!(hint_for("xyznotacommand foo", 17, &empty).is_none());
+    }
+
+    #[test]
+    fn hint_for_picks_segment_after_pipe() {
+        let empty: std::collections::HashMap<String, RuntimeSignature> = Default::default();
+        // Cursor is in the `where` segment; hint should describe `where`.
+        let src = "ls | where size > 0";
+        let cur = src.find("where").unwrap() + 5;
+        let h = hint_for(src, cur, &empty).expect("where is known");
+        assert!(h.contains("where"), "got: {}", h);
+    }
+
+    #[test]
+    fn hint_for_user_def_overrides_builtin() {
+        let mut sigs = std::collections::HashMap::new();
+        sigs.insert("each".to_string(), RuntimeSignature {
+            name: "each".to_string(),
+            params: vec![RuntimeParam { name: "x".into(), kind: Type::Int, optional: false, rest: false }],
+            desc: "USER".into(),
+        });
+        let h = hint_for("each 1", 6, &sigs).expect("user each is known");
+        assert!(h.contains("USER"), "got: {}", h);
+    }
+
+    #[test]
+    fn hint_for_empty_buffer_is_none() {
+        let empty: std::collections::HashMap<String, RuntimeSignature> = Default::default();
+        assert!(hint_for("", 0, &empty).is_none());
+        assert!(hint_for("    ", 2, &empty).is_none());
     }
 }
