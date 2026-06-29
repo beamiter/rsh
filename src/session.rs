@@ -2,8 +2,7 @@
 ///
 /// When jterm4 spawns rsh with `--session <id>`, rsh restores state from
 /// `~/.rsh/sessions/<id>.json`. On exit, rsh saves a snapshot back.
-
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -17,30 +16,49 @@ const SNAPSHOT_VERSION: u32 = 1;
 /// These are process-specific or terminal-specific and would be stale after restore.
 const SKIP_ENV_VARS: &[&str] = &[
     // Process-specific
-    "BASHPID", "PPID", "SHLVL", "_", "OLDPWD",
+    "BASHPID",
+    "PPID",
+    "SHLVL",
+    "_",
+    "OLDPWD",
     // Terminal-specific (re-set by the new terminal)
-    "COLUMNS", "LINES", "TERM", "COLORTERM",
-    "WINDOWID", "DISPLAY", "WAYLAND_DISPLAY",
+    "COLUMNS",
+    "LINES",
+    "TERM",
+    "COLORTERM",
+    "WINDOWID",
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
     // Session-specific
-    "SSH_AUTH_SOCK", "SSH_AGENT_PID",
-    "GPG_AGENT_INFO", "DBUS_SESSION_BUS_ADDRESS",
-    "XDG_SESSION_ID", "XDG_RUNTIME_DIR",
+    "SSH_AUTH_SOCK",
+    "SSH_AGENT_PID",
+    "GPG_AGENT_INFO",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "XDG_SESSION_ID",
+    "XDG_RUNTIME_DIR",
     // Internal
-    "RSH_SESSION_ID", "TERM_SESSION_ID",
+    "RSH_SESSION_ID",
+    "TERM_SESSION_ID",
 ];
 
 /// Detected environment context for re-activation on restore.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EnvironmentContext {
     Plain,
-    PythonVenv { virtual_env: String },
+    PythonVenv {
+        virtual_env: String,
+    },
     NixShell {
         #[serde(default)]
         flake_dir: Option<String>,
         nix_build_top: Option<String>,
     },
-    Docker { container_id: Option<String> },
-    Ssh { ssh_connection: String },
+    Docker {
+        container_id: Option<String>,
+    },
+    Ssh {
+        ssh_connection: String,
+    },
 }
 
 impl Default for EnvironmentContext {
@@ -99,7 +117,9 @@ impl SessionSnapshot {
             .unwrap_or_else(|_| "/".to_string());
 
         // Filter out process/terminal-specific env vars
-        let env_vars: HashMap<String, String> = state.env_vars.iter()
+        let env_vars: HashMap<String, String> = state
+            .env_vars
+            .iter()
             .filter(|(k, _)| !SKIP_ENV_VARS.contains(&k.as_str()))
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
@@ -151,7 +171,8 @@ impl SessionSnapshot {
         state.editing_mode = self.editing_mode;
         state.prompt_style = self.prompt_style;
         state.last_exit_code = self.last_exit_code;
-        state.notification_threshold = std::time::Duration::from_secs(self.notification_threshold_secs);
+        state.notification_threshold =
+            std::time::Duration::from_secs(self.notification_threshold_secs);
     }
 
     /// Save snapshot to disk as JSON (atomic write).
@@ -242,12 +263,16 @@ pub fn detect_environment() -> EnvironmentContext {
     // SSH
     if let Ok(conn) = std::env::var("SSH_CONNECTION") {
         if !conn.is_empty() {
-            return EnvironmentContext::Ssh { ssh_connection: conn };
+            return EnvironmentContext::Ssh {
+                ssh_connection: conn,
+            };
         }
     }
     if std::env::var("SSH_CLIENT").is_ok() {
         let conn = std::env::var("SSH_CLIENT").unwrap_or_default();
-        return EnvironmentContext::Ssh { ssh_connection: conn };
+        return EnvironmentContext::Ssh {
+            ssh_connection: conn,
+        };
     }
 
     EnvironmentContext::Plain
@@ -272,7 +297,10 @@ pub fn reactivate_environment(ctx: &EnvironmentContext, state: &mut ShellState) 
                     }
                 }
             } else {
-                eprintln!("rsh: session restore: venv {} no longer exists", virtual_env);
+                eprintln!(
+                    "rsh: session restore: venv {} no longer exists",
+                    virtual_env
+                );
             }
         }
         EnvironmentContext::NixShell { .. } => {
@@ -323,7 +351,9 @@ mod tests {
         state.export_var("MY_VAR", "hello");
         state.shell_opts.extglob = true;
         state.hooks.precmd.push("echo hi".to_string());
-        state.traps.insert("EXIT".to_string(), "echo bye".to_string());
+        state
+            .traps
+            .insert("EXIT".to_string(), "echo bye".to_string());
 
         let snapshot = SessionSnapshot::capture(&state, "test-roundtrip");
         let json = serde_json::to_string_pretty(&snapshot).expect("serialize");
@@ -340,9 +370,13 @@ mod tests {
     #[test]
     fn test_env_var_filtering() {
         let mut state = ShellState::new(false);
-        state.env_vars.insert("COLUMNS".to_string(), "80".to_string());
+        state
+            .env_vars
+            .insert("COLUMNS".to_string(), "80".to_string());
         state.env_vars.insert("LINES".to_string(), "24".to_string());
-        state.env_vars.insert("MY_APP".to_string(), "value".to_string());
+        state
+            .env_vars
+            .insert("MY_APP".to_string(), "value".to_string());
 
         let snapshot = SessionSnapshot::capture(&state, "test-filter");
         assert!(!snapshot.env_vars.contains_key("COLUMNS"));

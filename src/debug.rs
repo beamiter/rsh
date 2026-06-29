@@ -1,8 +1,7 @@
+use std::collections::HashMap;
 /// Script debugging and diagnostics
 /// Provides execution tracing, timing, variable monitoring, and performance analysis
-
 use std::time::Instant;
-use std::collections::HashMap;
 
 /// Debug information for a command execution
 #[derive(Debug, Clone)]
@@ -18,12 +17,12 @@ pub struct DebugInfo {
 
 /// Debugger configuration
 pub struct DebugConfig {
-    pub trace: bool,          // set -x: trace command execution
-    pub timing: bool,         // Show execution time
-    pub profile: bool,        // Profile performance
-    pub var_watch: bool,      // Monitor variable changes
-    pub call_stack: bool,     // Show function call stack
-    pub verbose: bool,        // Verbose output
+    pub trace: bool,      // set -x: trace command execution
+    pub timing: bool,     // Show execution time
+    pub profile: bool,    // Profile performance
+    pub var_watch: bool,  // Monitor variable changes
+    pub call_stack: bool, // Show function call stack
+    pub verbose: bool,    // Verbose output
 }
 
 impl Default for DebugConfig {
@@ -162,8 +161,15 @@ impl DebugSession {
         if !stats.slow_commands.is_empty() {
             eprintln!("\nSlow commands (> 100ms):");
             for (cmd, dur) in &stats.slow_commands {
-                eprintln!("  {} ms - {}", dur.as_millis(),
-                    if cmd.len() > 60 { format!("{}...", &cmd[..60]) } else { cmd.clone() });
+                eprintln!(
+                    "  {} ms - {}",
+                    dur.as_millis(),
+                    if cmd.len() > 60 {
+                        format!("{}...", &cmd[..60])
+                    } else {
+                        cmd.clone()
+                    }
+                );
             }
         }
     }

@@ -1,13 +1,10 @@
 /// Stream processing and utility commands
 /// Adds functional programming style commands to rsh
-
 use crate::environment::ShellState;
 
 /// sum - Add up all numbers in arguments
 pub fn builtin_sum(args: &[String]) -> i32 {
-    let sum: f64 = args.iter()
-        .filter_map(|s| s.parse::<f64>().ok())
-        .sum();
+    let sum: f64 = args.iter().filter_map(|s| s.parse::<f64>().ok()).sum();
     if sum.fract() == 0.0 {
         println!("{}", sum as i64);
     } else {
@@ -21,9 +18,7 @@ pub fn builtin_avg(args: &[String]) -> i32 {
     if args.is_empty() {
         return 0;
     }
-    let nums: Vec<f64> = args.iter()
-        .filter_map(|s| s.parse::<f64>().ok())
-        .collect();
+    let nums: Vec<f64> = args.iter().filter_map(|s| s.parse::<f64>().ok()).collect();
 
     if nums.is_empty() {
         return 0;
@@ -40,11 +35,13 @@ pub fn builtin_avg(args: &[String]) -> i32 {
 
 /// min - Find minimum value
 pub fn builtin_min(args: &[String]) -> i32 {
-    let nums: Vec<f64> = args.iter()
-        .filter_map(|s| s.parse::<f64>().ok())
-        .collect();
+    let nums: Vec<f64> = args.iter().filter_map(|s| s.parse::<f64>().ok()).collect();
 
-    if let Some(min) = nums.iter().cloned().min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)) {
+    if let Some(min) = nums
+        .iter()
+        .cloned()
+        .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+    {
         if min.fract() == 0.0 {
             println!("{}", min as i64);
         } else {
@@ -56,11 +53,13 @@ pub fn builtin_min(args: &[String]) -> i32 {
 
 /// max - Find maximum value
 pub fn builtin_max(args: &[String]) -> i32 {
-    let nums: Vec<f64> = args.iter()
-        .filter_map(|s| s.parse::<f64>().ok())
-        .collect();
+    let nums: Vec<f64> = args.iter().filter_map(|s| s.parse::<f64>().ok()).collect();
 
-    if let Some(max) = nums.iter().cloned().max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)) {
+    if let Some(max) = nums
+        .iter()
+        .cloned()
+        .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+    {
         if max.fract() == 0.0 {
             println!("{}", max as i64);
         } else {
@@ -99,7 +98,10 @@ pub fn builtin_stats(_args: &[String]) -> i32 {
         println!("  Total Size: {} bytes", stats.total_size);
         println!("  Total Hits: {}", stats.total_hits);
         if stats.entries > 0 {
-            println!("  Avg Hits/Entry: {:.2}", stats.total_hits as f64 / stats.entries as f64);
+            println!(
+                "  Avg Hits/Entry: {:.2}",
+                stats.total_hits as f64 / stats.entries as f64
+            );
         }
     }
 
@@ -161,9 +163,7 @@ pub fn builtin_reverse(args: &[String]) -> i32 {
         // Read from stdin
         use std::io::BufRead;
         let stdin = std::io::stdin();
-        let mut lines: Vec<String> = stdin.lock().lines()
-            .filter_map(|l| l.ok())
-            .collect();
+        let mut lines: Vec<String> = stdin.lock().lines().filter_map(|l| l.ok()).collect();
         lines.reverse();
         for line in lines {
             println!("{}", line);

@@ -1,16 +1,26 @@
 /// Phase 9 — closure if/else, format builtin, new str subs, and `do`.
-
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-fn rsh_bin() -> String { env!("CARGO_BIN_EXE_rsh").to_string() }
+fn rsh_bin() -> String {
+    env!("CARGO_BIN_EXE_rsh").to_string()
+}
 
 fn run(script: &str, stdin: &str) -> (String, String, i32) {
     let mut child = Command::new(rsh_bin())
-        .arg("-c").arg(script)
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-        .spawn().expect("spawn");
-    child.stdin.as_mut().unwrap().write_all(stdin.as_bytes()).unwrap();
+        .arg("-c")
+        .arg(script)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(stdin.as_bytes())
+        .unwrap();
     let out = child.wait_with_output().expect("wait");
     (
         String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -55,7 +65,10 @@ fn closure_else_if_chain() {
         "",
     );
     assert_eq!(code, 0, "stderr: {}", err);
-    assert_eq!(squash_json(&out), "[\"zero\",\"one\",\"many\",\"many\",\"many\"]");
+    assert_eq!(
+        squash_json(&out),
+        "[\"zero\",\"one\",\"many\",\"many\",\"many\"]"
+    );
 }
 
 // ---------------------------------------------------------------------------

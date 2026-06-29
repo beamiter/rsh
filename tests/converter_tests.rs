@@ -1,6 +1,5 @@
 /// Phase 5d — format converters (`from-yaml`/`to-yaml`, `from-toml`/`to-toml`,
 /// `from-xml`/`to-xml`) and structured `ls`/`ps`.
-
 use std::io::Write;
 use std::process::{Command, Stdio};
 
@@ -18,7 +17,12 @@ fn run(script: &str, stdin: &str) -> (String, String, i32) {
         .spawn()
         .expect("spawn rsh");
     if !stdin.is_empty() {
-        child.stdin.as_mut().unwrap().write_all(stdin.as_bytes()).unwrap();
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(stdin.as_bytes())
+            .unwrap();
     }
     let out = child.wait_with_output().expect("wait");
     (
@@ -40,7 +44,11 @@ fn yaml_record_to_json() {
     let (out, err, code) = run("from-yaml | to-json", stdin);
     assert_eq!(code, 0, "stderr: {}", err);
     let parsed: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
-    let obj = if parsed.is_array() { parsed[0].clone() } else { parsed };
+    let obj = if parsed.is_array() {
+        parsed[0].clone()
+    } else {
+        parsed
+    };
     assert_eq!(obj, serde_json::json!({"name":"alice","age":30}));
 }
 
@@ -50,7 +58,11 @@ fn yaml_round_trip_preserves_record() {
     let (out, err, code) = run("from-json | to-yaml | from-yaml | to-json", stdin);
     assert_eq!(code, 0, "stderr: {}", err);
     let parsed: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
-    let obj = if parsed.is_array() { parsed[0].clone() } else { parsed };
+    let obj = if parsed.is_array() {
+        parsed[0].clone()
+    } else {
+        parsed
+    };
     assert_eq!(obj, serde_json::json!({"k":"v","n":42}));
 }
 
@@ -109,10 +121,7 @@ fn xml_self_closing_element() {
 #[test]
 fn ls_produces_records_with_size_and_type() {
     // ls of the project root: filter to Cargo.toml.
-    let (out, err, code) = run(
-        r#"ls | where {|r| [ $r.name = Cargo.toml ]} | to-json"#,
-        "",
-    );
+    let (out, err, code) = run(r#"ls | where {|r| [ $r.name = Cargo.toml ]} | to-json"#, "");
     assert_eq!(code, 0, "stderr: {}", err);
     let parsed: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
     let arr = parsed.as_array().expect("list");

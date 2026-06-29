@@ -4,7 +4,6 @@
 /// only verify (a) interpolation rendering and (b) bash backward-compat:
 /// `$name.txt` keeps working as "var value + literal `.txt`" when the name
 /// has no typed Value in `let_vars`.
-
 use std::process::{Command, Stdio};
 
 fn rsh_bin() -> String {

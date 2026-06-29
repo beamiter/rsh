@@ -1,17 +1,27 @@
 /// Phase 6b — text → structured bridges (`lines`, `split row|column`,
 /// `parse`, `str <sub>`).
-
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-fn rsh_bin() -> String { env!("CARGO_BIN_EXE_rsh").to_string() }
+fn rsh_bin() -> String {
+    env!("CARGO_BIN_EXE_rsh").to_string()
+}
 
 fn run(script: &str, stdin: &str) -> (String, String, i32) {
     let mut child = Command::new(rsh_bin())
-        .arg("-c").arg(script)
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-        .spawn().expect("spawn");
-    child.stdin.as_mut().unwrap().write_all(stdin.as_bytes()).unwrap();
+        .arg("-c")
+        .arg(script)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(stdin.as_bytes())
+        .unwrap();
     let out = child.wait_with_output().expect("wait");
     (
         String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -29,7 +39,7 @@ fn lines_splits_stdin_drops_trailing_empty() {
     let (out, err, code) = run("lines | to-json", "a\nb\nc\n");
     assert_eq!(code, 0, "stderr: {}", err);
     let p: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
-    assert_eq!(p, serde_json::json!(["a","b","c"]));
+    assert_eq!(p, serde_json::json!(["a", "b", "c"]));
 }
 
 #[test]
@@ -37,7 +47,7 @@ fn lines_keeps_internal_empty() {
     let (out, err, code) = run("lines | to-json", "a\n\nb\n");
     assert_eq!(code, 0, "stderr: {}", err);
     let p: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
-    assert_eq!(p, serde_json::json!(["a","","b"]));
+    assert_eq!(p, serde_json::json!(["a", "", "b"]));
 }
 
 // ---------------------------------------------------------------------------
@@ -49,7 +59,7 @@ fn split_row_csv() {
     let (out, err, code) = run(r#"split row "," | to-json"#, "a,b,c");
     assert_eq!(code, 0, "stderr: {}", err);
     let p: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
-    assert_eq!(p, serde_json::json!(["a","b","c"]));
+    assert_eq!(p, serde_json::json!(["a", "b", "c"]));
 }
 
 #[test]
@@ -60,10 +70,13 @@ fn split_column_per_line() {
     );
     assert_eq!(code, 0, "stderr: {}", err);
     let p: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
-    assert_eq!(p, serde_json::json!([
-        {"name":"a","num":"1"},
-        {"name":"b","num":"2"}
-    ]));
+    assert_eq!(
+        p,
+        serde_json::json!([
+            {"name":"a","num":"1"},
+            {"name":"b","num":"2"}
+        ])
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -78,10 +91,13 @@ fn parse_named_captures() {
     );
     assert_eq!(code, 0, "stderr: {}", err);
     let p: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
-    assert_eq!(p, serde_json::json!([
-        {"name":"alice","age":"30"},
-        {"name":"bob","age":"25"}
-    ]));
+    assert_eq!(
+        p,
+        serde_json::json!([
+            {"name":"alice","age":"30"},
+            {"name":"bob","age":"25"}
+        ])
+    );
 }
 
 #[test]
@@ -92,10 +108,13 @@ fn parse_skips_non_matching() {
     );
     assert_eq!(code, 0, "stderr: {}", err);
     let p: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
-    assert_eq!(p, serde_json::json!([
-        {"user":"alice","role":"admin"},
-        {"user":"bob","role":"user"}
-    ]));
+    assert_eq!(
+        p,
+        serde_json::json!([
+            {"user":"alice","role":"admin"},
+            {"user":"bob","role":"user"}
+        ])
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -107,7 +126,7 @@ fn str_trim_per_line() {
     let (out, err, code) = run("lines | str trim | to-json", "  a  \n  b  \n");
     assert_eq!(code, 0, "stderr: {}", err);
     let p: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
-    assert_eq!(p, serde_json::json!(["a","b"]));
+    assert_eq!(p, serde_json::json!(["a", "b"]));
 }
 
 #[test]

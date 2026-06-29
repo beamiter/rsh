@@ -1,16 +1,26 @@
 /// Phase 12 — $in alias + each -k + get -i, match expression, url parse/join.
-
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-fn rsh_bin() -> String { env!("CARGO_BIN_EXE_rsh").to_string() }
+fn rsh_bin() -> String {
+    env!("CARGO_BIN_EXE_rsh").to_string()
+}
 
 fn run(script: &str, stdin: &str) -> (String, String, i32) {
     let mut child = Command::new(rsh_bin())
-        .arg("-c").arg(script)
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-        .spawn().expect("spawn");
-    child.stdin.as_mut().unwrap().write_all(stdin.as_bytes()).unwrap();
+        .arg("-c")
+        .arg(script)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(stdin.as_bytes())
+        .unwrap();
     let out = child.wait_with_output().expect("wait");
     (
         String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -173,10 +183,7 @@ fn url_parse_from_pipeline() {
 
 #[test]
 fn url_join_roundtrip() {
-    let (out, _, _) = run(
-        "url parse 'https://example.com/foo?a=1&b=2' | url join",
-        "",
-    );
+    let (out, _, _) = run("url parse 'https://example.com/foo?a=1&b=2' | url join", "");
     let s = out.trim();
     // params record is rebuilt; key order from IndexMap is insertion order.
     assert_eq!(s, "https://example.com/foo?a=1&b=2");

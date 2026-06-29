@@ -1,5 +1,4 @@
 /// Structured data pipeline: JSON-based data processing builtins.
-
 use serde_json::Value;
 use std::io::{self, BufRead, Write};
 
@@ -21,7 +20,9 @@ pub fn read_json_stdin() -> Vec<Value> {
         }
     }
     let input = input.trim();
-    if input.is_empty() { return Vec::new(); }
+    if input.is_empty() {
+        return Vec::new();
+    }
 
     // Try parsing as JSON array first
     if let Ok(Value::Array(arr)) = serde_json::from_str(input) {
@@ -32,7 +33,9 @@ pub fn read_json_stdin() -> Vec<Value> {
     let mut records = Vec::new();
     for line in input.lines() {
         let line = line.trim();
-        if line.is_empty() { continue; }
+        if line.is_empty() {
+            continue;
+        }
         if let Ok(val) = serde_json::from_str(line) {
             records.push(val);
         }
@@ -42,13 +45,17 @@ pub fn read_json_stdin() -> Vec<Value> {
 
 /// Filter records by field comparison.
 pub fn filter_where(records: &[Value], field: &str, op: &str, value: &str) -> Vec<Value> {
-    records.iter().filter(|record| {
-        let field_val = record.get(field);
-        match field_val {
-            Some(v) => compare_value(v, op, value),
-            None => false,
-        }
-    }).cloned().collect()
+    records
+        .iter()
+        .filter(|record| {
+            let field_val = record.get(field);
+            match field_val {
+                Some(v) => compare_value(v, op, value),
+                None => false,
+            }
+        })
+        .cloned()
+        .collect()
 }
 
 fn compare_value(v: &Value, op: &str, rhs: &str) -> bool {
@@ -68,20 +75,32 @@ fn compare_value(v: &Value, op: &str, rhs: &str) -> bool {
         "==" | "=" => lhs_str == rhs,
         "!=" => lhs_str != rhs,
         ">" | "-gt" => {
-            if let (Some(l), Some(r)) = (lhs_num, rhs_num) { l > r }
-            else { lhs_str.as_str() > rhs }
+            if let (Some(l), Some(r)) = (lhs_num, rhs_num) {
+                l > r
+            } else {
+                lhs_str.as_str() > rhs
+            }
         }
         ">=" | "-ge" => {
-            if let (Some(l), Some(r)) = (lhs_num, rhs_num) { l >= r }
-            else { lhs_str.as_str() >= rhs }
+            if let (Some(l), Some(r)) = (lhs_num, rhs_num) {
+                l >= r
+            } else {
+                lhs_str.as_str() >= rhs
+            }
         }
         "<" | "-lt" => {
-            if let (Some(l), Some(r)) = (lhs_num, rhs_num) { l < r }
-            else { lhs_str.as_str() < rhs }
+            if let (Some(l), Some(r)) = (lhs_num, rhs_num) {
+                l < r
+            } else {
+                lhs_str.as_str() < rhs
+            }
         }
         "<=" | "-le" => {
-            if let (Some(l), Some(r)) = (lhs_num, rhs_num) { l <= r }
-            else { lhs_str.as_str() <= rhs }
+            if let (Some(l), Some(r)) = (lhs_num, rhs_num) {
+                l <= r
+            } else {
+                lhs_str.as_str() <= rhs
+            }
         }
         "=~" => lhs_str.contains(rhs),
         _ => false,
@@ -94,7 +113,11 @@ pub fn sort_by(records: &mut [Value], field: &str, reverse: bool) {
         let va = a.get(field);
         let vb = b.get(field);
         let cmp = compare_json_values(va, vb);
-        if reverse { cmp.reverse() } else { cmp }
+        if reverse {
+            cmp.reverse()
+        } else {
+            cmp
+        }
     });
 }
 
@@ -127,24 +150,29 @@ fn value_to_string(v: &Value) -> String {
 
 /// Project only selected fields.
 pub fn select_fields(records: &[Value], fields: &[&str]) -> Vec<Value> {
-    records.iter().map(|record| {
-        if let Value::Object(map) = record {
-            let mut new_map = serde_json::Map::new();
-            for &field in fields {
-                if let Some(v) = map.get(field) {
-                    new_map.insert(field.to_string(), v.clone());
+    records
+        .iter()
+        .map(|record| {
+            if let Value::Object(map) = record {
+                let mut new_map = serde_json::Map::new();
+                for &field in fields {
+                    if let Some(v) = map.get(field) {
+                        new_map.insert(field.to_string(), v.clone());
+                    }
                 }
+                Value::Object(new_map)
+            } else {
+                record.clone()
             }
-            Value::Object(new_map)
-        } else {
-            record.clone()
-        }
-    }).collect()
+        })
+        .collect()
 }
 
 /// Pretty-print records as an aligned table.
 pub fn to_table(records: &[Value]) -> String {
-    if records.is_empty() { return String::new(); }
+    if records.is_empty() {
+        return String::new();
+    }
 
     // Collect all field names (preserving order from first record)
     let mut columns: Vec<String> = Vec::new();
@@ -157,15 +185,23 @@ pub fn to_table(records: &[Value]) -> String {
             }
         }
     }
-    if columns.is_empty() { return String::new(); }
+    if columns.is_empty() {
+        return String::new();
+    }
 
     // Build rows
     let mut rows: Vec<Vec<String>> = Vec::new();
     rows.push(columns.clone()); // header
     for record in records {
-        let row: Vec<String> = columns.iter().map(|col| {
-            record.get(col).map(|v| value_to_string(v)).unwrap_or_default()
-        }).collect();
+        let row: Vec<String> = columns
+            .iter()
+            .map(|col| {
+                record
+                    .get(col)
+                    .map(|v| value_to_string(v))
+                    .unwrap_or_default()
+            })
+            .collect();
         rows.push(row);
     }
 
@@ -183,7 +219,9 @@ pub fn to_table(records: &[Value]) -> String {
     let mut output = String::new();
     for (ri, row) in rows.iter().enumerate() {
         for (i, cell) in row.iter().enumerate() {
-            if i > 0 { output.push_str("  "); }
+            if i > 0 {
+                output.push_str("  ");
+            }
             let w = widths.get(i).copied().unwrap_or(0);
             output.push_str(&format!("{:<width$}", cell, width = w));
         }
@@ -191,7 +229,9 @@ pub fn to_table(records: &[Value]) -> String {
         // Separator after header
         if ri == 0 {
             for (i, w) in widths.iter().enumerate() {
-                if i > 0 { output.push_str("  "); }
+                if i > 0 {
+                    output.push_str("  ");
+                }
                 output.push_str(&"-".repeat(*w));
             }
             output.push('\n');
@@ -210,7 +250,9 @@ pub fn read_csv_stdin() -> Vec<Value> {
             Err(_) => break,
         }
     }
-    if lines.is_empty() { return Vec::new(); }
+    if lines.is_empty() {
+        return Vec::new();
+    }
 
     let headers = parse_csv_line(&lines[0]);
     let mut records = Vec::new();
@@ -221,7 +263,12 @@ pub fn read_csv_stdin() -> Vec<Value> {
             let val = values.get(i).map(|s| s.as_str()).unwrap_or("");
             // Try to parse as number
             if let Ok(n) = val.parse::<f64>() {
-                map.insert(header.clone(), Value::Number(serde_json::Number::from_f64(n).unwrap_or(serde_json::Number::from(0))));
+                map.insert(
+                    header.clone(),
+                    Value::Number(
+                        serde_json::Number::from_f64(n).unwrap_or(serde_json::Number::from(0)),
+                    ),
+                );
             } else {
                 map.insert(header.clone(), Value::String(val.to_string()));
             }
@@ -267,10 +314,13 @@ fn parse_csv_line(line: &str) -> Vec<String> {
 pub fn group_by(records: &[Value], field: &str) -> Value {
     let mut groups: serde_json::Map<String, Value> = serde_json::Map::new();
     for record in records {
-        let key = record.get(field)
+        let key = record
+            .get(field)
             .map(|v| value_to_string(v))
             .unwrap_or_else(|| "null".to_string());
-        let entry = groups.entry(key).or_insert_with(|| Value::Array(Vec::new()));
+        let entry = groups
+            .entry(key)
+            .or_insert_with(|| Value::Array(Vec::new()));
         if let Value::Array(arr) = entry {
             arr.push(record.clone());
         }
@@ -301,11 +351,17 @@ pub fn count(records: &[Value]) -> usize {
 
 /// Perform a math operation (sum, avg, min, max) on a numeric field.
 pub fn math_op(records: &[Value], op: &str, field: &str) -> Option<f64> {
-    let values: Vec<f64> = records.iter()
+    let values: Vec<f64> = records
+        .iter()
         .filter_map(|r| r.get(field))
-        .filter_map(|v| v.as_f64().or_else(|| value_to_string(v).parse::<f64>().ok()))
+        .filter_map(|v| {
+            v.as_f64()
+                .or_else(|| value_to_string(v).parse::<f64>().ok())
+        })
         .collect();
-    if values.is_empty() { return None; }
+    if values.is_empty() {
+        return None;
+    }
     match op {
         "sum" => Some(values.iter().sum()),
         "avg" => Some(values.iter().sum::<f64>() / values.len() as f64),

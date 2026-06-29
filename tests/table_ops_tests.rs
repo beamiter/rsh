@@ -1,17 +1,27 @@
 /// Phase 6c — table/record operators (`get`, `update`, `insert`, `reject`,
 /// `wrap`, `flatten`).
-
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-fn rsh_bin() -> String { env!("CARGO_BIN_EXE_rsh").to_string() }
+fn rsh_bin() -> String {
+    env!("CARGO_BIN_EXE_rsh").to_string()
+}
 
 fn run(script: &str, stdin: &str) -> (String, String, i32) {
     let mut child = Command::new(rsh_bin())
-        .arg("-c").arg(script)
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-        .spawn().expect("spawn");
-    child.stdin.as_mut().unwrap().write_all(stdin.as_bytes()).unwrap();
+        .arg("-c")
+        .arg(script)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(stdin.as_bytes())
+        .unwrap();
     let out = child.wait_with_output().expect("wait");
     (
         String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -60,8 +70,10 @@ fn update_literal_value() {
 
 #[test]
 fn update_closure_literal_body() {
-    let (out, err, code) = run("from-json | update a {|r| 100} | to-json",
-        r#"[{"a":1},{"a":2}]"#);
+    let (out, err, code) = run(
+        "from-json | update a {|r| 100} | to-json",
+        r#"[{"a":1},{"a":2}]"#,
+    );
     assert_eq!(code, 0, "stderr: {}", err);
     let p: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
     assert_eq!(p, serde_json::json!([{"a":100},{"a":100}]));
@@ -70,8 +82,10 @@ fn update_closure_literal_body() {
 #[test]
 fn update_closure_var_path_body() {
     // `{|r| $r.a}` should read $r.a as a typed value, not exec it as a command.
-    let (out, err, code) = run("from-json | update b {|r| $r.a} | to-json",
-        r#"[{"a":10},{"a":20}]"#);
+    let (out, err, code) = run(
+        "from-json | update b {|r| $r.a} | to-json",
+        r#"[{"a":10},{"a":20}]"#,
+    );
     assert_eq!(code, 0, "stderr: {}", err);
     let p: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
     assert_eq!(p, serde_json::json!([{"a":10,"b":10},{"a":20,"b":20}]));
@@ -97,8 +111,7 @@ fn insert_existing_column_errors() {
 
 #[test]
 fn reject_drops_named_columns() {
-    let (out, err, code) = run("from-json | reject b | to-json",
-        r#"[{"a":1,"b":2,"c":3}]"#);
+    let (out, err, code) = run("from-json | reject b | to-json", r#"[{"a":1,"b":2,"c":3}]"#);
     assert_eq!(code, 0, "stderr: {}", err);
     let p: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
     assert_eq!(p, serde_json::json!([{"a":1,"c":3}]));
@@ -121,5 +134,5 @@ fn flatten_unnests_lists() {
     let (out, err, code) = run("from-json | flatten | to-json", r#"[[1,2],[3,4]]"#);
     assert_eq!(code, 0, "stderr: {}", err);
     let p: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
-    assert_eq!(p, serde_json::json!([1,2,3,4]));
+    assert_eq!(p, serde_json::json!([1, 2, 3, 4]));
 }

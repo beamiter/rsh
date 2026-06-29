@@ -170,10 +170,7 @@ fn test_tilde_expansion() {
 #[test]
 fn test_expand_words_multiple() {
     let mut state = make_state();
-    let words = vec![
-        parse_word_parts("$FOO"),
-        parse_word_parts("$BAR"),
-    ];
+    let words = vec![parse_word_parts("$FOO"), parse_word_parts("$BAR")];
     let result = expand_words(&words, &mut state);
     assert_eq!(result, vec!["hello", "world"]);
 }
@@ -181,7 +178,10 @@ fn test_expand_words_multiple() {
 #[test]
 fn test_array_expansion() {
     let mut state = make_state();
-    state.arrays.insert("arr".to_string(), vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+    state.arrays.insert(
+        "arr".to_string(),
+        vec!["a".to_string(), "b".to_string(), "c".to_string()],
+    );
 
     let word = parse_word_parts("${arr[0]}");
     assert_eq!(expand_word_to_string(&word, &mut state), "a");

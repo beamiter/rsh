@@ -1,6 +1,5 @@
 /// Prompt rendering with colors, git branch, exit code.
-
-use crate::environment::{ShellState, PromptStyle};
+use crate::environment::{PromptStyle, ShellState};
 use crossterm::style::{Color, Stylize};
 use std::env;
 
@@ -46,13 +45,28 @@ fn render_prompt_full(state: &ShellState) -> String {
     let mut prompt = String::new();
 
     // User@host
-    prompt.push_str(&format!("{}", format!("{}@{}", user, hostname)
-        .with(Color::Rgb { r: 0, g: 210, b: 210 }).bold()));
+    prompt.push_str(&format!(
+        "{}",
+        format!("{}@{}", user, hostname)
+            .with(Color::Rgb {
+                r: 0,
+                g: 210,
+                b: 210
+            })
+            .bold()
+    ));
     prompt.push(' ');
 
     // CWD
-    prompt.push_str(&format!("{}", cwd
-        .with(Color::Rgb { r: 80, g: 255, b: 120 }).bold()));
+    prompt.push_str(&format!(
+        "{}",
+        cwd.with(Color::Rgb {
+            r: 80,
+            g: 255,
+            b: 120
+        })
+        .bold()
+    ));
 
     // Git branch in magenta
     if let Some(branch) = &git_branch {
@@ -63,8 +77,10 @@ fn render_prompt_full(state: &ShellState) -> String {
     if let Some(d) = &state.last_command_duration {
         let dur_str = format_duration(*d);
         if !dur_str.is_empty() {
-            prompt.push_str(&format!(" {}", format!("took {}", dur_str)
-                .with(Color::Yellow)));
+            prompt.push_str(&format!(
+                " {}",
+                format!("took {}", dur_str).with(Color::Yellow)
+            ));
         }
     }
 
@@ -89,13 +105,27 @@ fn render_prompt_compact(state: &ShellState) -> String {
     let mut prompt = String::new();
 
     // User only (no hostname)
-    prompt.push_str(&format!("{}", user
-        .with(Color::Rgb { r: 0, g: 210, b: 210 }).bold()));
+    prompt.push_str(&format!(
+        "{}",
+        user.with(Color::Rgb {
+            r: 0,
+            g: 210,
+            b: 210
+        })
+        .bold()
+    ));
     prompt.push(' ');
 
     // CWD
-    prompt.push_str(&format!("{}", cwd
-        .with(Color::Rgb { r: 80, g: 255, b: 120 }).bold()));
+    prompt.push_str(&format!(
+        "{}",
+        cwd.with(Color::Rgb {
+            r: 80,
+            g: 255,
+            b: 120
+        })
+        .bold()
+    ));
 
     // Git branch in magenta
     if let Some(branch) = &git_branch {
@@ -121,8 +151,15 @@ fn render_prompt_minimal(state: &ShellState) -> String {
     let mut prompt = String::new();
 
     // CWD only
-    prompt.push_str(&format!("{}", cwd
-        .with(Color::Rgb { r: 80, g: 255, b: 120 }).bold()));
+    prompt.push_str(&format!(
+        "{}",
+        cwd.with(Color::Rgb {
+            r: 80,
+            g: 255,
+            b: 120
+        })
+        .bold()
+    ));
 
     prompt.push(' ');
     prompt.push_str(&exit_indicator);
@@ -130,7 +167,6 @@ fn render_prompt_minimal(state: &ShellState) -> String {
 
     prompt
 }
-
 
 pub fn get_short_cwd(state: &ShellState) -> String {
     let cwd = env::current_dir()
@@ -159,7 +195,9 @@ pub fn get_git_branch() -> Option<String> {
             // Detached HEAD
             return Some(content[..8.min(content.len())].to_string());
         }
-        if !dir.pop() { break; }
+        if !dir.pop() {
+            break;
+        }
     }
     None
 }

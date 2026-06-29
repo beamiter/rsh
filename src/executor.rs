@@ -1,5 +1,4 @@
 /// AST executor: fork/exec, pipes, redirects, compound commands.
-
 use crate::builtins;
 use crate::environment::ShellState;
 use crate::expand::{expand_word_to_string, expand_words};
@@ -11,8 +10,8 @@ use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::{close, execvp, fork, pipe, setpgid, tcsetpgrp, ForkResult, Pid};
 use std::ffi::CString;
 use std::fs::{File, OpenOptions};
-use std::os::unix::io::{IntoRawFd, RawFd, AsRawFd, OwnedFd, BorrowedFd};
 use std::io::Write;
+use std::os::unix::io::{AsRawFd, BorrowedFd, IntoRawFd, OwnedFd, RawFd};
 
 fn shell_error(msg: &str) {
     if atty::is(atty::Stream::Stderr) {
@@ -63,15 +62,19 @@ fn edit_distance(a: &str, b: &str) -> usize {
     let a: Vec<char> = a.chars().collect();
     let b: Vec<char> = b.chars().collect();
     let (m, n) = (a.len(), b.len());
-    if m == 0 { return n; }
-    if n == 0 { return m; }
+    if m == 0 {
+        return n;
+    }
+    if n == 0 {
+        return m;
+    }
     let mut prev: Vec<usize> = (0..=n).collect();
     let mut curr = vec![0; n + 1];
     for i in 1..=m {
         curr[0] = i;
         for j in 1..=n {
-            let cost = if a[i-1] == b[j-1] { 0 } else { 1 };
-            curr[j] = (prev[j] + 1).min(curr[j-1] + 1).min(prev[j-1] + cost);
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
         }
         std::mem::swap(&mut prev, &mut curr);
     }
@@ -236,9 +239,15 @@ fn execute_value_pipeline(cmds: &[Command], state: &mut ShellState) -> i32 {
     // Skip when the first command is a source (open / ls / ps) that ignores stdin.
     let first_is_source = matches!(
         cmds.first()
-            .and_then(|c| match c { Command::Simple(s) => s.words.first(), _ => None })
+            .and_then(|c| match c {
+                Command::Simple(s) => s.words.first(),
+                _ => None,
+            })
             .and_then(|w| w.first())
-            .and_then(|p| match p { WordPart::Literal(s) => Some(s.as_str()), _ => None }),
+            .and_then(|p| match p {
+                WordPart::Literal(s) => Some(s.as_str()),
+                _ => None,
+            }),
         Some("open" | "ls" | "ps")
     );
     let mut data = if first_is_source || atty::is(atty::Stream::Stdin) {
@@ -246,7 +255,11 @@ fn execute_value_pipeline(cmds: &[Command], state: &mut ShellState) -> i32 {
     } else {
         let mut buf = Vec::new();
         let _ = std::io::stdin().lock().read_to_end(&mut buf);
-        if buf.is_empty() { PipelineData::Empty } else { PipelineData::Bytes(buf) }
+        if buf.is_empty() {
+            PipelineData::Empty
+        } else {
+            PipelineData::Bytes(buf)
+        }
     };
     for (i, cmd) in cmds.iter().enumerate() {
         let simple = match cmd {
@@ -297,7 +310,15 @@ fn execute_pipeline(pipeline: &Pipeline, state: &mut ShellState) -> i32 {
         let code = execute_command(&cmds[0], state);
         state.pipestatus = vec![code];
         state.set_array("PIPESTATUS", vec![code.to_string()]);
-        return if pipeline.negated { if code == 0 { 1 } else { 0 } } else { code };
+        return if pipeline.negated {
+            if code == 0 {
+                1
+            } else {
+                0
+            }
+        } else {
+            code
+        };
     }
 
     // Phase 5a: if every command is a value-aware builtin with no redirects /
@@ -306,7 +327,15 @@ fn execute_pipeline(pipeline: &Pipeline, state: &mut ShellState) -> i32 {
         let code = execute_value_pipeline(cmds, state);
         state.pipestatus = vec![code];
         state.set_array("PIPESTATUS", vec![code.to_string()]);
-        return if pipeline.negated { if code == 0 { 1 } else { 0 } } else { code };
+        return if pipeline.negated {
+            if code == 0 {
+                1
+            } else {
+                0
+            }
+        } else {
+            code
+        };
     }
 
     let mut prev_read_fd: Option<RawFd> = None;
@@ -321,7 +350,9 @@ fn execute_pipeline(pipeline: &Pipeline, state: &mut ShellState) -> i32 {
                 Ok((r, w)) => (Some(r.into_raw_fd()), Some(w.into_raw_fd())),
                 Err(e) => {
                     eprintln!("rsh: pipe failed: {}", e);
-                    if let Some(fd) = prev_read_fd { close(fd).ok(); }
+                    if let Some(fd) = prev_read_fd {
+                        close(fd).ok();
+                    }
                     return 1;
                 }
             }
@@ -329,7 +360,9 @@ fn execute_pipeline(pipeline: &Pipeline, state: &mut ShellState) -> i32 {
             (None, None)
         };
 
-        state.fork_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        state
+            .fork_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         match unsafe { fork() } {
             Ok(ForkResult::Child) => {
                 signal::reset_child_signals();
@@ -383,9 +416,19 @@ fn execute_pipeline(pipeline: &Pipeline, state: &mut ShellState) -> i32 {
     let mut pipestatus = Vec::new();
     for pid in child_pids {
         match waitpid(pid, None) {
-            Ok(WaitStatus::Exited(_, code)) => { pipestatus.push(code); last_status = code; }
-            Ok(WaitStatus::Signaled(_, sig, _)) => { let c = 128 + sig as i32; pipestatus.push(c); last_status = c; }
-            _ => { pipestatus.push(1); last_status = 1; }
+            Ok(WaitStatus::Exited(_, code)) => {
+                pipestatus.push(code);
+                last_status = code;
+            }
+            Ok(WaitStatus::Signaled(_, sig, _)) => {
+                let c = 128 + sig as i32;
+                pipestatus.push(c);
+                last_status = c;
+            }
+            _ => {
+                pipestatus.push(1);
+                last_status = 1;
+            }
         }
     }
 
@@ -398,9 +441,20 @@ fn execute_pipeline(pipeline: &Pipeline, state: &mut ShellState) -> i32 {
         }
     }
     state.pipestatus = pipestatus.clone();
-    state.set_array("PIPESTATUS", pipestatus.iter().map(|c| c.to_string()).collect());
+    state.set_array(
+        "PIPESTATUS",
+        pipestatus.iter().map(|c| c.to_string()).collect(),
+    );
 
-    if pipeline.negated { if last_status == 0 { 1 } else { 0 } } else { last_status }
+    if pipeline.negated {
+        if last_status == 0 {
+            1
+        } else {
+            0
+        }
+    } else {
+        last_status
+    }
 }
 
 fn execute_command(cmd: &Command, state: &mut ShellState) -> i32 {
@@ -424,7 +478,8 @@ fn execute_command_in_pipeline_child(cmd: &Command, state: &mut ShellState) -> i
 fn execute_assignment(assign: &Assignment, state: &mut ShellState) {
     if let Some(ref array_words) = assign.array_value {
         // Array assignment: arr=(a b c)
-        let values: Vec<String> = array_words.iter()
+        let values: Vec<String> = array_words
+            .iter()
             .map(|w| expand_word_to_string(w, state))
             .collect();
         if assign.append {
@@ -456,7 +511,9 @@ fn execute_assignment(assign: &Assignment, state: &mut ShellState) {
 /// `let NAME = ...` form: `=` must be the entire third word (a bare literal).
 /// Bash arithmetic `let "x = 1+2"` quotes the assignment into one word.
 fn is_typed_let(words: &[Word]) -> bool {
-    if words.len() < 4 { return false; }
+    if words.len() < 4 {
+        return false;
+    }
     let head_is_let = matches!(words[0].as_slice(), [WordPart::Literal(s)] if s == "let");
     let eq_is_bare = matches!(words[2].as_slice(), [WordPart::Literal(s)] if s == "=");
     head_is_let && eq_is_bare && is_simple_ident(&words[1])
@@ -464,15 +521,20 @@ fn is_typed_let(words: &[Word]) -> bool {
 
 fn is_simple_ident(w: &Word) -> bool {
     match w.as_slice() {
-        [WordPart::Literal(s)] => !s.is_empty()
-            && s.chars().next().map(|c| c.is_alphabetic() || c == '_').unwrap_or(false)
-            && s.chars().all(|c| c.is_alphanumeric() || c == '_'),
+        [WordPart::Literal(s)] => {
+            !s.is_empty()
+                && s.chars()
+                    .next()
+                    .map(|c| c.is_alphabetic() || c == '_')
+                    .unwrap_or(false)
+                && s.chars().all(|c| c.is_alphanumeric() || c == '_')
+        }
         _ => false,
     }
 }
 
 fn execute_typed_let(words: &[Word], state: &mut ShellState) -> i32 {
-    use crate::value::{Value, ClosureData};
+    use crate::value::{ClosureData, Value};
     use std::sync::Arc;
 
     let name = match &words[1][0] {
@@ -490,7 +552,7 @@ fn execute_typed_let(words: &[Word], state: &mut ShellState) -> i32 {
 }
 
 fn build_let_value(rhs: &[Word], state: &mut ShellState) -> crate::value::Value {
-    use crate::value::{Value, ClosureData};
+    use crate::value::{ClosureData, Value};
     use std::sync::Arc;
 
     // Single closure literal — bind with captured snapshot.
@@ -505,7 +567,8 @@ fn build_let_value(rhs: &[Word], state: &mut ShellState) -> crate::value::Value 
     }
     // Otherwise expand & sniff. Pure-literal RHS (no expansion) goes through
     // JSON; expanded text falls back to JSON if it parses, else String.
-    let joined: String = rhs.iter()
+    let joined: String = rhs
+        .iter()
         .map(|w| expand_word_to_string(w, state))
         .collect::<Vec<_>>()
         .join(" ");
@@ -588,9 +651,13 @@ pub fn apply_closure(
             if pipeline.commands.len() == 1 {
                 if let crate::parser::ast::Command::Simple(s) = &pipeline.commands[0] {
                     if s.words.len() == 1 && s.assignments.is_empty() && s.redirects.is_empty() {
-                        if let [crate::parser::ast::WordPart::VariablePath { name, path }] = s.words[0].as_slice() {
+                        if let [crate::parser::ast::WordPart::VariablePath { name, path }] =
+                            s.words[0].as_slice()
+                        {
                             if let Some(base) = state.let_vars.get(name).cloned() {
-                                return Ok(crate::expand::resolve_path(&base, path).cloned().unwrap_or(Value::Null));
+                                return Ok(crate::expand::resolve_path(&base, path)
+                                    .cloned()
+                                    .unwrap_or(Value::Null));
                             }
                         }
                     }
@@ -604,8 +671,7 @@ pub fn apply_closure(
             // all-value-aware, fall back to running it for its exit status and
             // returning Bool(exit==0).
             let pipeline = &complete.list.first;
-            if !pipeline.commands.is_empty()
-                && pipeline.commands.iter().all(is_value_aware_command)
+            if !pipeline.commands.is_empty() && pipeline.commands.iter().all(is_value_aware_command)
             {
                 // The body's pipeline starts with the first argument as input,
                 // so `each {|x| select name}` projects from `x`.
@@ -619,10 +685,13 @@ pub fn apply_closure(
                         _ => unreachable!(),
                     };
                     let expanded = expand_words(&simple.words, state);
-                    if expanded.is_empty() { continue; }
+                    if expanded.is_empty() {
+                        continue;
+                    }
                     let name = &expanded[0];
                     let extra_args = &expanded[1..];
-                    let f = crate::value_builtins::VALUE_BUILTINS.get(name.as_str())
+                    let f = crate::value_builtins::VALUE_BUILTINS
+                        .get(name.as_str())
                         .ok_or(2_i32)?;
                     if let Some(sig) = crate::signature::SIGNATURES.get(name.as_str()) {
                         if let Err(msg) = sig.validate_args(extra_args) {
@@ -640,7 +709,9 @@ pub fn apply_closure(
                 last = match data {
                     PipelineData::Values(mut vs) if vs.len() == 1 => vs.remove(0),
                     PipelineData::Values(vs) => Value::List(vs),
-                    PipelineData::Bytes(b) => Value::String(String::from_utf8_lossy(&b).to_string()),
+                    PipelineData::Bytes(b) => {
+                        Value::String(String::from_utf8_lossy(&b).to_string())
+                    }
                     PipelineData::Empty => Value::Null,
                     PipelineData::Stream(_) => unreachable!("normalized above"),
                 };
@@ -661,9 +732,17 @@ fn execute_simple(cmd: &SimpleCommand, state: &mut ShellState) -> i32 {
     execute_simple_with_mode(cmd, state, true)
 }
 
-fn execute_simple_with_mode(cmd: &SimpleCommand, state: &mut ShellState, fork_external: bool) -> i32 {
+fn execute_simple_with_mode(
+    cmd: &SimpleCommand,
+    state: &mut ShellState,
+    fork_external: bool,
+) -> i32 {
     if state.shell_opts.xtrace && !cmd.words.is_empty() {
-        let trace: Vec<String> = cmd.words.iter().map(|w| expand_word_to_string(w, state)).collect();
+        let trace: Vec<String> = cmd
+            .words
+            .iter()
+            .map(|w| expand_word_to_string(w, state))
+            .collect();
         eprintln!("+ {}", trace.join(" "));
     }
 
@@ -797,12 +876,16 @@ fn execute_simple_with_mode(cmd: &SimpleCommand, state: &mut ShellState, fork_ex
     // Check for builtin
     if builtins::is_builtin(cmd_name) {
         let saved_fds = setup_redirects(&cmd.redirects, state);
-        let saved_vars: Vec<(String, Option<String>)> = cmd.assignments.iter().map(|a| {
-            let old = state.get_var(&a.name).map(|s| s.to_string());
-            let val = expand_word_to_string(&a.value, state);
-            state.set_var(&a.name, &val);
-            (a.name.clone(), old)
-        }).collect();
+        let saved_vars: Vec<(String, Option<String>)> = cmd
+            .assignments
+            .iter()
+            .map(|a| {
+                let old = state.get_var(&a.name).map(|s| s.to_string());
+                let val = expand_word_to_string(&a.value, state);
+                state.set_var(&a.name, &val);
+                (a.name.clone(), old)
+            })
+            .collect();
 
         let code = builtins::run_builtin(cmd_name, &args.to_vec(), state);
 
@@ -826,7 +909,8 @@ fn execute_simple_with_mode(cmd: &SimpleCommand, state: &mut ShellState, fork_ex
         }
 
         let c_cmd = CString::new(cmd_name.as_str()).unwrap_or_default();
-        let c_args: Vec<CString> = expanded.iter()
+        let c_args: Vec<CString> = expanded
+            .iter()
             .map(|s| CString::new(s.as_str()).unwrap_or_default())
             .collect();
 
@@ -855,7 +939,8 @@ fn execute_simple_with_mode(cmd: &SimpleCommand, state: &mut ShellState, fork_ex
             }
 
             let c_cmd = CString::new(cmd_name.as_str()).unwrap_or_default();
-            let c_args: Vec<CString> = expanded.iter()
+            let c_args: Vec<CString> = expanded
+                .iter()
                 .map(|s| CString::new(s.as_str()).unwrap_or_default())
                 .collect();
 
@@ -903,57 +988,60 @@ where
 pub fn execute_compound(cmd: &CompoundCommand, state: &mut ShellState) -> i32 {
     match cmd {
         CompoundCommand::BraceGroup { body, redirects } => {
-            with_redirects(redirects, state, |state| {
-                execute_command_list(body, state)
-            })
+            with_redirects(redirects, state, |state| execute_command_list(body, state))
         }
-        CompoundCommand::Subshell { body, redirects } => {
-            match unsafe { fork() } {
-                Ok(ForkResult::Child) => {
-                    signal::reset_child_signals();
-                    let pid = nix::unistd::getpid();
-                    setpgid(pid, pid).ok();
-                    apply_redirects_in_child(redirects, state);
-                    let code = execute_command_list(body, state);
-                    child_exit(code);
-                }
-                Ok(ForkResult::Parent { child }) => {
-                    setpgid(child, child).ok();
-                    if state.interactive {
-                        wait_for_fg(child, state)
-                    } else {
-                        match waitpid(child, None) {
-                            Ok(WaitStatus::Exited(_, code)) => code,
-                            _ => 1,
-                        }
-                    }
-                }
-                Err(_) => 1,
+        CompoundCommand::Subshell { body, redirects } => match unsafe { fork() } {
+            Ok(ForkResult::Child) => {
+                signal::reset_child_signals();
+                let pid = nix::unistd::getpid();
+                setpgid(pid, pid).ok();
+                apply_redirects_in_child(redirects, state);
+                let code = execute_command_list(body, state);
+                child_exit(code);
             }
-        }
-        CompoundCommand::If { conditions, else_branch, redirects } => {
-            with_redirects(redirects, state, |state| {
-                let mut code = 0;
-                let mut matched = false;
-
-                for (condition, body) in conditions {
-                    let cond_code = execute_condition(condition, state);
-                    if cond_code == 0 {
-                        code = execute_command_list(body, state);
-                        matched = true;
-                        break;
+            Ok(ForkResult::Parent { child }) => {
+                setpgid(child, child).ok();
+                if state.interactive {
+                    wait_for_fg(child, state)
+                } else {
+                    match waitpid(child, None) {
+                        Ok(WaitStatus::Exited(_, code)) => code,
+                        _ => 1,
                     }
                 }
+            }
+            Err(_) => 1,
+        },
+        CompoundCommand::If {
+            conditions,
+            else_branch,
+            redirects,
+        } => with_redirects(redirects, state, |state| {
+            let mut code = 0;
+            let mut matched = false;
 
-                if !matched {
-                    if let Some(else_body) = else_branch {
-                        code = execute_command_list(else_body, state);
-                    }
+            for (condition, body) in conditions {
+                let cond_code = execute_condition(condition, state);
+                if cond_code == 0 {
+                    code = execute_command_list(body, state);
+                    matched = true;
+                    break;
                 }
-                code
-            })
-        }
-        CompoundCommand::For { var, words, body, redirects } => {
+            }
+
+            if !matched {
+                if let Some(else_body) = else_branch {
+                    code = execute_command_list(else_body, state);
+                }
+            }
+            code
+        }),
+        CompoundCommand::For {
+            var,
+            words,
+            body,
+            redirects,
+        } => {
             with_redirects(redirects, state, |state| {
                 let word_list = match words {
                     Some(ws) => expand_words(ws, state),
@@ -978,7 +1066,13 @@ pub fn execute_compound(cmd: &CompoundCommand, state: &mut ShellState) -> i32 {
                 code
             })
         }
-        CompoundCommand::CStyleFor { init, condition, update, body, redirects } => {
+        CompoundCommand::CStyleFor {
+            init,
+            condition,
+            update,
+            body,
+            redirects,
+        } => {
             with_redirects(redirects, state, |state| {
                 // Execute init expression
                 if !init.is_empty() {
@@ -1022,43 +1116,55 @@ pub fn execute_compound(cmd: &CompoundCommand, state: &mut ShellState) -> i32 {
                 code
             })
         }
-        CompoundCommand::While { condition, body, redirects } => {
-            with_redirects(redirects, state, |state| {
-                let mut code = 0;
-                loop {
-                    let cond = execute_condition(condition, state);
-                    if cond != 0 { break; }
-                    code = execute_command_list(body, state);
-                    if state.loop_break {
-                        state.loop_break = false;
-                        break;
-                    }
-                    if state.loop_continue {
-                        state.loop_continue = false;
-                    }
+        CompoundCommand::While {
+            condition,
+            body,
+            redirects,
+        } => with_redirects(redirects, state, |state| {
+            let mut code = 0;
+            loop {
+                let cond = execute_condition(condition, state);
+                if cond != 0 {
+                    break;
                 }
-                code
-            })
-        }
-        CompoundCommand::Until { condition, body, redirects } => {
-            with_redirects(redirects, state, |state| {
-                let mut code = 0;
-                loop {
-                    let cond = execute_condition(condition, state);
-                    if cond == 0 { break; }
-                    code = execute_command_list(body, state);
-                    if state.loop_break {
-                        state.loop_break = false;
-                        break;
-                    }
-                    if state.loop_continue {
-                        state.loop_continue = false;
-                    }
+                code = execute_command_list(body, state);
+                if state.loop_break {
+                    state.loop_break = false;
+                    break;
                 }
-                code
-            })
-        }
-        CompoundCommand::Case { word, arms, redirects } => {
+                if state.loop_continue {
+                    state.loop_continue = false;
+                }
+            }
+            code
+        }),
+        CompoundCommand::Until {
+            condition,
+            body,
+            redirects,
+        } => with_redirects(redirects, state, |state| {
+            let mut code = 0;
+            loop {
+                let cond = execute_condition(condition, state);
+                if cond == 0 {
+                    break;
+                }
+                code = execute_command_list(body, state);
+                if state.loop_break {
+                    state.loop_break = false;
+                    break;
+                }
+                if state.loop_continue {
+                    state.loop_continue = false;
+                }
+            }
+            code
+        }),
+        CompoundCommand::Case {
+            word,
+            arms,
+            redirects,
+        } => {
             with_redirects(redirects, state, |state| {
                 let value = expand_word_to_string(word, state);
                 let mut last = 0;
@@ -1068,16 +1174,23 @@ pub fn execute_compound(cmd: &CompoundCommand, state: &mut ShellState) -> i32 {
                 let mut fall = false;
                 while i < arms.len() {
                     let arm = &arms[i];
-                    let hit = fall || arm.patterns.iter().any(|p| {
-                        let pat = expand_word_to_string(p, state);
-                        match_pattern(&value, &pat)
-                    });
+                    let hit = fall
+                        || arm.patterns.iter().any(|p| {
+                            let pat = expand_word_to_string(p, state);
+                            match_pattern(&value, &pat)
+                        });
                     if hit {
                         last = execute_command_list(&arm.body, state);
                         match arm.terminator {
                             CaseTerminator::Break => return last,
-                            CaseTerminator::FallThrough => { fall = true; i += 1; }
-                            CaseTerminator::ContinueMatch => { fall = false; i += 1; }
+                            CaseTerminator::FallThrough => {
+                                fall = true;
+                                i += 1;
+                            }
+                            CaseTerminator::ContinueMatch => {
+                                fall = false;
+                                i += 1;
+                            }
                         }
                     } else {
                         i += 1;
@@ -1086,7 +1199,12 @@ pub fn execute_compound(cmd: &CompoundCommand, state: &mut ShellState) -> i32 {
                 last
             })
         }
-        CompoundCommand::Select { var, words, body, redirects } => {
+        CompoundCommand::Select {
+            var,
+            words,
+            body,
+            redirects,
+        } => {
             with_redirects(redirects, state, |state| {
                 // Expand items list
                 let items = match words {
@@ -1171,18 +1289,28 @@ pub fn execute_compound(cmd: &CompoundCommand, state: &mut ShellState) -> i32 {
                 }
             })
         }
-        CompoundCommand::Coproc { name, command, redirects } => {
+        CompoundCommand::Coproc {
+            name,
+            command,
+            redirects,
+        } => {
             with_redirects(redirects, state, |state| {
                 // Create two pipes for bidirectional communication
                 // Pipe 1: parent writes to child's stdin
                 // Pipe 2: parent reads from child's stdout
                 let (read_from_parent, write_to_child) = match pipe() {
                     Ok(p) => p,
-                    Err(e) => { eprintln!("rsh: pipe failed: {}", e); return 1; }
+                    Err(e) => {
+                        eprintln!("rsh: pipe failed: {}", e);
+                        return 1;
+                    }
                 };
                 let (read_from_child, write_to_parent) = match pipe() {
                     Ok(p) => p,
-                    Err(e) => { eprintln!("rsh: pipe failed: {}", e); return 1; }
+                    Err(e) => {
+                        eprintln!("rsh: pipe failed: {}", e);
+                        return 1;
+                    }
                 };
 
                 match unsafe { fork() } {
@@ -1224,10 +1352,7 @@ pub fn execute_compound(cmd: &CompoundCommand, state: &mut ShellState) -> i32 {
                         let read_fd = read_from_child.into_raw_fd();
 
                         // Set array: COPROC[0]=read_fd COPROC[1]=write_fd
-                        let coproc_array = vec![
-                            read_fd.to_string(),
-                            write_fd.to_string(),
-                        ];
+                        let coproc_array = vec![read_fd.to_string(), write_fd.to_string()];
                         state.arrays.insert(coproc_var, coproc_array);
 
                         // Don't wait for coproc - it runs in background
@@ -1300,8 +1425,11 @@ fn heredoc_fd(data: &str) -> Option<RawFd> {
     dir.push(format!("rsh-heredoc-{}-{}", pid, nanos));
 
     let mut file = OpenOptions::new()
-        .read(true).write(true).create_new(true)
-        .open(&dir).ok()?;
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&dir)
+        .ok()?;
     // Unlink immediately; the open fd keeps the file alive until closed.
     std::fs::remove_file(&dir).ok();
     file.write_all(data.as_bytes()).ok()?;
@@ -1309,27 +1437,38 @@ fn heredoc_fd(data: &str) -> Option<RawFd> {
     Some(file.into_raw_fd())
 }
 
-fn apply_one_redirect(kind: &RedirectKind, fd: RawFd, data: &str, _here_doc_opts: &Option<HereDocOptions>) {
+fn apply_one_redirect(
+    kind: &RedirectKind,
+    fd: RawFd,
+    data: &str,
+    _here_doc_opts: &Option<HereDocOptions>,
+) {
     match kind {
         RedirectKind::Output => {
             if let Ok(file) = File::create(data) {
                 let src = file.into_raw_fd();
                 dup2_raw(src, fd).ok();
-                if src != fd { close(src).ok(); }
+                if src != fd {
+                    close(src).ok();
+                }
             }
         }
         RedirectKind::Append => {
             if let Ok(file) = OpenOptions::new().create(true).append(true).open(data) {
                 let src = file.into_raw_fd();
                 dup2_raw(src, fd).ok();
-                if src != fd { close(src).ok(); }
+                if src != fd {
+                    close(src).ok();
+                }
             }
         }
         RedirectKind::Input => {
             if let Ok(file) = File::open(data) {
                 let src = file.into_raw_fd();
                 dup2_raw(src, fd).ok();
-                if src != fd { close(src).ok(); }
+                if src != fd {
+                    close(src).ok();
+                }
             }
         }
         RedirectKind::HereString | RedirectKind::HereDoc => {
@@ -1353,7 +1492,9 @@ fn apply_one_redirect(kind: &RedirectKind, fd: RawFd, data: &str, _here_doc_opts
                 let src = file.into_raw_fd();
                 dup2_raw(src, 1).ok(); // stdout
                 dup2_raw(src, 2).ok(); // stderr
-                if src != 1 && src != 2 { close(src).ok(); }
+                if src != 1 && src != 2 {
+                    close(src).ok();
+                }
             }
         }
         RedirectKind::AppendAll => {
@@ -1362,7 +1503,9 @@ fn apply_one_redirect(kind: &RedirectKind, fd: RawFd, data: &str, _here_doc_opts
                 let src = file.into_raw_fd();
                 dup2_raw(src, 1).ok(); // stdout
                 dup2_raw(src, 2).ok(); // stderr
-                if src != 1 && src != 2 { close(src).ok(); }
+                if src != 1 && src != 2 {
+                    close(src).ok();
+                }
             }
         }
     }
@@ -1370,9 +1513,14 @@ fn apply_one_redirect(kind: &RedirectKind, fd: RawFd, data: &str, _here_doc_opts
 
 fn redirect_fd(redir: &Redirect) -> RawFd {
     match redir.kind {
-        RedirectKind::Output | RedirectKind::Append | RedirectKind::DupOutput
-        | RedirectKind::OutputAll | RedirectKind::AppendAll => redir.fd.unwrap_or(1),
-        RedirectKind::Input | RedirectKind::HereString | RedirectKind::HereDoc
+        RedirectKind::Output
+        | RedirectKind::Append
+        | RedirectKind::DupOutput
+        | RedirectKind::OutputAll
+        | RedirectKind::AppendAll => redir.fd.unwrap_or(1),
+        RedirectKind::Input
+        | RedirectKind::HereString
+        | RedirectKind::HereDoc
         | RedirectKind::DupInput => redir.fd.unwrap_or(0),
     }
 }
@@ -1382,7 +1530,10 @@ fn setup_redirects(redirects: &[Redirect], state: &mut ShellState) -> Vec<SavedF
     for redir in redirects {
         let data = if let Some(here_doc_opts) = &redir.here_doc {
             if here_doc_opts.expand_vars {
-                expand_word_to_string(&crate::parser::parse_word_parts(&here_doc_opts.content), state)
+                expand_word_to_string(
+                    &crate::parser::parse_word_parts(&here_doc_opts.content),
+                    state,
+                )
             } else {
                 here_doc_opts.content.clone()
             }
@@ -1396,10 +1547,16 @@ fn setup_redirects(redirects: &[Redirect], state: &mut ShellState) -> Vec<SavedF
                 // Save both fd 1 (stdout) and fd 2 (stderr)
                 unsafe {
                     if let Ok(sfd1) = nix::unistd::dup(BorrowedFd::borrow_raw(1)) {
-                        saved.push(SavedFd { original_fd: 1, saved_fd: sfd1 });
+                        saved.push(SavedFd {
+                            original_fd: 1,
+                            saved_fd: sfd1,
+                        });
                     }
                     if let Ok(sfd2) = nix::unistd::dup(BorrowedFd::borrow_raw(2)) {
-                        saved.push(SavedFd { original_fd: 2, saved_fd: sfd2 });
+                        saved.push(SavedFd {
+                            original_fd: 2,
+                            saved_fd: sfd2,
+                        });
                     }
                 }
                 apply_one_redirect(&redir.kind, 1, &data, &redir.here_doc);
@@ -1409,7 +1566,10 @@ fn setup_redirects(redirects: &[Redirect], state: &mut ShellState) -> Vec<SavedF
                 // Safe because fd is a valid file descriptor at this point
                 unsafe {
                     if let Ok(sfd) = nix::unistd::dup(BorrowedFd::borrow_raw(fd)) {
-                        saved.push(SavedFd { original_fd: fd, saved_fd: sfd });
+                        saved.push(SavedFd {
+                            original_fd: fd,
+                            saved_fd: sfd,
+                        });
                     }
                 }
                 apply_one_redirect(&redir.kind, fd, &data, &redir.here_doc);
@@ -1434,7 +1594,10 @@ fn apply_redirects_in_child(redirects: &[Redirect], state: &mut ShellState) {
         let data = if let Some(here_doc_opts) = &redir.here_doc {
             // Optionally expand variables if requested
             if here_doc_opts.expand_vars {
-                expand_word_to_string(&crate::parser::parse_word_parts(&here_doc_opts.content), state)
+                expand_word_to_string(
+                    &crate::parser::parse_word_parts(&here_doc_opts.content),
+                    state,
+                )
             } else {
                 here_doc_opts.content.clone()
             }

@@ -3,7 +3,6 @@
 /// These exercise the in-process value-aware pipeline path: from-json, where,
 /// select, sort-by, to-json, to-table, count, math. Tests run an `rsh -c ...`
 /// subprocess, capture stdout, and assert against expected JSON / table.
-
 use std::io::Write;
 use std::process::{Command, Stdio};
 
@@ -22,7 +21,12 @@ fn run(script: &str, stdin: &str) -> (String, String, i32) {
         .spawn()
         .expect("spawn rsh");
     if !stdin.is_empty() {
-        child.stdin.as_mut().unwrap().write_all(stdin.as_bytes()).unwrap();
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(stdin.as_bytes())
+            .unwrap();
     }
     let out = child.wait_with_output().expect("wait");
     (
@@ -71,8 +75,7 @@ fn sort_by_reverse() {
     let (out, _err, code) = run(script, "");
     assert_eq!(code, 0);
     let parsed: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
-    let expected: serde_json::Value =
-        serde_json::from_str(r#"[{"n":3},{"n":2},{"n":1}]"#).unwrap();
+    let expected: serde_json::Value = serde_json::from_str(r#"[{"n":3},{"n":2},{"n":1}]"#).unwrap();
     assert_eq!(parsed, expected);
 }
 
@@ -112,8 +115,7 @@ fn first_and_last() {
     let parsed: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
     assert_eq!(parsed, serde_json::json!([{"i":1},{"i":2}]));
 
-    let script_last =
-        r#"echo '[{"i":1},{"i":2},{"i":3},{"i":4}]' | from-json | last 2 | to-json"#;
+    let script_last = r#"echo '[{"i":1},{"i":2},{"i":3},{"i":4}]' | from-json | last 2 | to-json"#;
     let (out, _, code) = run(script_last, "");
     assert_eq!(code, 0);
     let parsed: serde_json::Value = serde_json::from_str(out.trim()).unwrap();

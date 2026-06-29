@@ -1,17 +1,27 @@
 /// Phase 7 — iteration combinators (7a), record/table shaping (7b),
 /// predicates/reflection (7c), path/date helpers (7d).
-
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-fn rsh_bin() -> String { env!("CARGO_BIN_EXE_rsh").to_string() }
+fn rsh_bin() -> String {
+    env!("CARGO_BIN_EXE_rsh").to_string()
+}
 
 fn run(script: &str, stdin: &str) -> (String, String, i32) {
     let mut child = Command::new(rsh_bin())
-        .arg("-c").arg(script)
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-        .spawn().expect("spawn");
-    child.stdin.as_mut().unwrap().write_all(stdin.as_bytes()).unwrap();
+        .arg("-c")
+        .arg(script)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(stdin.as_bytes())
+        .unwrap();
     let out = child.wait_with_output().expect("wait");
     (
         String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -46,7 +56,7 @@ fn take_first_n() {
     let (out, err, code) = run("range 1..10 | take 3 | to-json", "");
     assert_eq!(code, 0, "stderr: {}", err);
     let p: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
-    assert_eq!(p, serde_json::json!([1,2,3]));
+    assert_eq!(p, serde_json::json!([1, 2, 3]));
 }
 
 #[test]
@@ -54,7 +64,7 @@ fn skip_first_n() {
     let (out, err, code) = run("range 1..5 | skip 2 | to-json", "");
     assert_eq!(code, 0, "stderr: {}", err);
     let p: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
-    assert_eq!(p, serde_json::json!([3,4,5]));
+    assert_eq!(p, serde_json::json!([3, 4, 5]));
 }
 
 #[test]
@@ -62,19 +72,25 @@ fn enumerate_adds_index_column() {
     let (out, err, code) = run(r#"from-json | enumerate | to-json"#, r#"["a","b","c"]"#);
     assert_eq!(code, 0, "stderr: {}", err);
     let p: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
-    assert_eq!(p, serde_json::json!([
-        {"index":0,"item":"a"},
-        {"index":1,"item":"b"},
-        {"index":2,"item":"c"}
-    ]));
+    assert_eq!(
+        p,
+        serde_json::json!([
+            {"index":0,"item":"a"},
+            {"index":1,"item":"b"},
+            {"index":2,"item":"c"}
+        ])
+    );
 }
 
 #[test]
 fn zip_pairs_with_literal_list() {
-    let (out, err, code) = run(r#"from-json | zip "[10,20,30]" | to-json"#, r#"["a","b","c"]"#);
+    let (out, err, code) = run(
+        r#"from-json | zip "[10,20,30]" | to-json"#,
+        r#"["a","b","c"]"#,
+    );
     assert_eq!(code, 0, "stderr: {}", err);
     let p: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
-    assert_eq!(p, serde_json::json!([["a",10],["b",20],["c",30]]));
+    assert_eq!(p, serde_json::json!([["a", 10], ["b", 20], ["c", 30]]));
 }
 
 // ---------------------------------------------------------------------------
@@ -86,7 +102,7 @@ fn columns_lists_record_keys() {
     let (out, err, code) = run("from-json | columns | to-json", r#"[{"a":1,"b":2,"c":3}]"#);
     assert_eq!(code, 0, "stderr: {}", err);
     let p: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
-    assert_eq!(p, serde_json::json!(["a","b","c"]));
+    assert_eq!(p, serde_json::json!(["a", "b", "c"]));
 }
 
 #[test]
@@ -94,7 +110,7 @@ fn values_lists_record_values() {
     let (out, err, code) = run("from-json | values | to-json", r#"[{"a":1,"b":2,"c":3}]"#);
     assert_eq!(code, 0, "stderr: {}", err);
     let p: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
-    assert_eq!(p, serde_json::json!([1,2,3]));
+    assert_eq!(p, serde_json::json!([1, 2, 3]));
 }
 
 #[test]
@@ -113,40 +129,54 @@ fn key_order(json_text: &str) -> Vec<String> {
         if bytes[i] == b'"' {
             let start = i + 1;
             let mut j = start;
-            while j < bytes.len() && bytes[j] != b'"' { j += 1; }
-            let key = std::str::from_utf8(&bytes[start..j]).unwrap_or("").to_string();
+            while j < bytes.len() && bytes[j] != b'"' {
+                j += 1;
+            }
+            let key = std::str::from_utf8(&bytes[start..j])
+                .unwrap_or("")
+                .to_string();
             // Only count as a key if followed by `:`
             let mut k = j + 1;
-            while k < bytes.len() && (bytes[k] == b' ' || bytes[k] == b'\n') { k += 1; }
+            while k < bytes.len() && (bytes[k] == b' ' || bytes[k] == b'\n') {
+                k += 1;
+            }
             if k < bytes.len() && bytes[k] == b':' {
                 out.push(key);
             }
             i = j + 1;
-        } else { i += 1; }
+        } else {
+            i += 1;
+        }
     }
     out
 }
 
 #[test]
 fn move_before() {
-    let (out, err, code) = run("from-json | move c --before b | to-json",
-        r#"[{"a":1,"b":2,"c":3}]"#);
+    let (out, err, code) = run(
+        "from-json | move c --before b | to-json",
+        r#"[{"a":1,"b":2,"c":3}]"#,
+    );
     assert_eq!(code, 0, "stderr: {}", err);
-    assert_eq!(key_order(&out), vec!["a","c","b"]);
+    assert_eq!(key_order(&out), vec!["a", "c", "b"]);
 }
 
 #[test]
 fn move_after() {
-    let (out, err, code) = run("from-json | move a --after b | to-json",
-        r#"[{"a":1,"b":2,"c":3}]"#);
+    let (out, err, code) = run(
+        "from-json | move a --after b | to-json",
+        r#"[{"a":1,"b":2,"c":3}]"#,
+    );
     assert_eq!(code, 0, "stderr: {}", err);
-    assert_eq!(key_order(&out), vec!["b","a","c"]);
+    assert_eq!(key_order(&out), vec!["b", "a", "c"]);
 }
 
 #[test]
 fn merge_table_with_literal_table() {
-    let (out, err, code) = run(r#"from-json | merge "[{\"b\":10},{\"b\":20}]" | to-json"#,
-        r#"[{"a":1},{"a":2}]"#);
+    let (out, err, code) = run(
+        r#"from-json | merge "[{\"b\":10},{\"b\":20}]" | to-json"#,
+        r#"[{"a":1},{"a":2}]"#,
+    );
     assert_eq!(code, 0, "stderr: {}", err);
     let p: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
     assert_eq!(p, serde_json::json!([{"a":1,"b":10},{"a":2,"b":20}]));
@@ -170,8 +200,10 @@ fn upsert_inserts_when_missing() {
 
 #[test]
 fn compact_drops_rows_with_null() {
-    let (out, err, code) = run("from-json | compact | to-json",
-        r#"[{"a":1,"b":2},{"a":null,"b":3},{"a":4,"b":5}]"#);
+    let (out, err, code) = run(
+        "from-json | compact | to-json",
+        r#"[{"a":1,"b":2},{"a":null,"b":3},{"a":4,"b":5}]"#,
+    );
     assert_eq!(code, 0, "stderr: {}", err);
     let p: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
     assert_eq!(p, serde_json::json!([{"a":1,"b":2},{"a":4,"b":5}]));
@@ -183,16 +215,20 @@ fn compact_drops_rows_with_null() {
 
 #[test]
 fn any_with_var_path_closure() {
-    let (out, err, code) = run(r#"from-json | any {|r| $r.a}"#,
-        r#"[{"a":false},{"a":true},{"a":false}]"#);
+    let (out, err, code) = run(
+        r#"from-json | any {|r| $r.a}"#,
+        r#"[{"a":false},{"a":true},{"a":false}]"#,
+    );
     assert_eq!(code, 0, "stderr: {}", err);
     assert_eq!(out.trim(), "true");
 }
 
 #[test]
 fn all_with_var_path_closure() {
-    let (out, err, code) = run(r#"from-json | all {|r| $r.a}"#,
-        r#"[{"a":true},{"a":true},{"a":false}]"#);
+    let (out, err, code) = run(
+        r#"from-json | all {|r| $r.a}"#,
+        r#"[{"a":true},{"a":true},{"a":false}]"#,
+    );
     assert_eq!(code, 0, "stderr: {}", err);
     assert_eq!(out.trim(), "false");
 }
@@ -257,7 +293,10 @@ fn path_parse_record_shape() {
     let (out, err, code) = run("path parse /tmp/foo.txt | to-json", "");
     assert_eq!(code, 0, "stderr: {}", err);
     let p: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
-    assert_eq!(p, serde_json::json!([{"parent":"/tmp","stem":"foo","extension":"txt"}]));
+    assert_eq!(
+        p,
+        serde_json::json!([{"parent":"/tmp","stem":"foo","extension":"txt"}])
+    );
 }
 
 #[test]
@@ -283,7 +322,10 @@ fn date_now_rfc3339_shape() {
 #[test]
 fn date_format_known_epoch() {
     // 1700000000 = 2023-11-14 22:13:20 UTC
-    let (out, err, code) = run(r#"from-json | date format "%Y-%m-%d %H:%M:%S""#, "1700000000");
+    let (out, err, code) = run(
+        r#"from-json | date format "%Y-%m-%d %H:%M:%S""#,
+        "1700000000",
+    );
     assert_eq!(code, 0, "stderr: {}", err);
     assert_eq!(out.trim(), "2023-11-14 22:13:20");
 }

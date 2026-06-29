@@ -7,7 +7,6 @@ mod closure_expr;
 mod completer;
 mod completion_spec;
 mod config;
-mod workflows;
 mod data;
 mod debug;
 mod editor;
@@ -34,6 +33,7 @@ mod structured;
 mod suggest;
 mod value;
 mod value_builtins;
+mod workflows;
 mod zjump;
 
 use crossterm::terminal;
@@ -46,7 +46,9 @@ fn parse_session_id() -> Option<String> {
             return args.get(i + 1).cloned();
         }
     }
-    std::env::var("RSH_SESSION_ID").ok().filter(|s| !s.is_empty())
+    std::env::var("RSH_SESSION_ID")
+        .ok()
+        .filter(|s| !s.is_empty())
 }
 
 fn main() {

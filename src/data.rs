@@ -1,6 +1,5 @@
 /// Data processing and transformation commands
 /// Provides CSV, JSON, filtering, aggregation, and transformation utilities
-
 use crate::environment::ShellState;
 use std::collections::HashMap;
 
@@ -115,9 +114,7 @@ pub fn builtin_select(args: &[String]) -> i32 {
         return 1;
     }
 
-    let indices: Vec<usize> = args.iter()
-        .filter_map(|s| s.parse().ok())
-        .collect();
+    let indices: Vec<usize> = args.iter().filter_map(|s| s.parse().ok()).collect();
 
     if indices.is_empty() {
         eprintln!("No valid field indices provided");
@@ -130,7 +127,8 @@ pub fn builtin_select(args: &[String]) -> i32 {
     for line in stdin.lock().lines() {
         if let Ok(line) = line {
             let fields: Vec<&str> = line.split_whitespace().collect();
-            let selected: Vec<&str> = indices.iter()
+            let selected: Vec<&str> = indices
+                .iter()
                 .filter_map(|&i| fields.get(i).copied())
                 .collect();
 
@@ -193,10 +191,7 @@ pub fn builtin_shuffle(_args: &[String]) -> i32 {
     use std::io::BufRead;
 
     let stdin = std::io::stdin();
-    let mut lines: Vec<String> = stdin.lock()
-        .lines()
-        .filter_map(Result::ok)
-        .collect();
+    let mut lines: Vec<String> = stdin.lock().lines().filter_map(Result::ok).collect();
 
     // Simple shuffle using XORShift
     let seed = std::time::SystemTime::now()
@@ -224,8 +219,8 @@ pub fn builtin_dedupe(_args: &[String]) -> i32 {
         eprintln!("dedupe: requires piped input, e.g.: cat file | dedupe");
         return 1;
     }
-    use std::io::BufRead;
     use std::collections::HashSet;
+    use std::io::BufRead;
 
     let stdin = std::io::stdin();
     let mut seen = HashSet::new();

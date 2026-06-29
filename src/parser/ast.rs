@@ -1,6 +1,5 @@
 /// AST node definitions for bash-compatible shell grammar.
-
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum WordPart {
@@ -9,16 +8,26 @@ pub enum WordPart {
     DoubleQuoted(Vec<WordPart>),
     Variable(String),
     /// `$name.field[0].other` — variable with dotted/indexed path access into a typed Value.
-    VariablePath { name: String, path: Vec<PathSeg> },
+    VariablePath {
+        name: String,
+        path: Vec<PathSeg>,
+    },
     /// `$"...($expr)..."` — nushell-style interpolated string. Parts concatenate at expand time.
     Interpolated(Vec<InterpPart>),
     /// `{|p1 p2| body}` — closure literal. Body is kept as raw source and re-parsed at apply time.
-    Closure { params: Vec<String>, body_src: String },
+    Closure {
+        params: Vec<String>,
+        body_src: String,
+    },
     CommandSub(String),
     Glob(String),
     Tilde(String),
     BraceExpansion(Vec<Vec<WordPart>>),
-    BraceRange { start: String, end: String, step: Option<String> },
+    BraceRange {
+        start: String,
+        end: String,
+        step: Option<String>,
+    },
     Arithmetic(String),
     ProcessSub(String, ProcessSubKind),
 }
@@ -47,24 +56,24 @@ pub type Word = Vec<WordPart>;
 pub struct Assignment {
     pub name: String,
     pub value: Word,
-    pub index: Option<String>,       // For arr[idx]=value
-    pub append: bool,                 // For var+=value or arr+=(...)
+    pub index: Option<String>,          // For arr[idx]=value
+    pub append: bool,                   // For var+=value or arr+=(...)
     pub array_value: Option<Vec<Word>>, // For arr=(a b c)
 }
 
 // Here-doc options to store multi-line content and modifiers
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HereDocOptions {
-    pub delimiter: String,           // The delimiter (e.g., "EOF")
-    pub content: String,             // The multi-line content
-    pub strip_tabs: bool,            // <<- strips leading tabs
-    pub expand_vars: bool,           // Whether to expand variables ($var, $(cmd), etc)
+    pub delimiter: String, // The delimiter (e.g., "EOF")
+    pub content: String,   // The multi-line content
+    pub strip_tabs: bool,  // <<- strips leading tabs
+    pub expand_vars: bool, // Whether to expand variables ($var, $(cmd), etc)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum RedirectTarget {
-    File(Word),                      // Regular file redirection target
-    HereDoc(HereDocOptions),         // Here-doc with content and options
+    File(Word),              // Regular file redirection target
+    HereDoc(HereDocOptions), // Here-doc with content and options
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -72,19 +81,19 @@ pub enum RedirectKind {
     Output,
     Append,
     Input,
-    HereDoc,                         // << (still used for identification)
+    HereDoc, // << (still used for identification)
     HereString,
     DupOutput,
     DupInput,
-    OutputAll,    // &> (redirect stdout and stderr)
-    AppendAll,    // &>> (append stdout and stderr)
+    OutputAll, // &> (redirect stdout and stderr)
+    AppendAll, // &>> (append stdout and stderr)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Redirect {
     pub fd: Option<i32>,
     pub kind: RedirectKind,
-    pub target: Word,                // For backward compatibility, kept as Word
+    pub target: Word,                     // For backward compatibility, kept as Word
     pub here_doc: Option<HereDocOptions>, // Here-doc specific data
 }
 

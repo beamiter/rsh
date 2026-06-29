@@ -4,14 +4,13 @@
 /// landed in Phase 14c) and the structured builtins on synthetic
 /// tables. The intent is to track regressions to the per-iteration cost
 /// of `each` / `where` / `reduce` over large inputs.
-
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
+use indexmap::IndexMap;
 use rsh::environment::ShellState;
 use rsh::pipeline_data::PipelineData;
 use rsh::value::{ClosureData, Value};
 use rsh::value_builtins::VALUE_BUILTINS;
-use indexmap::IndexMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -39,7 +38,9 @@ fn install_closure(state: &mut ShellState, name: &str, body: &str, params: &[&st
         body_src: body.to_string(),
         captured: HashMap::new(),
     };
-    state.let_vars.insert(name.to_string(), Value::Closure(Arc::new(c)));
+    state
+        .let_vars
+        .insert(name.to_string(), Value::Closure(Arc::new(c)));
 }
 
 fn bench_each(c: &mut Criterion) {
@@ -146,5 +147,11 @@ fn bench_chain_where_select(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_each, bench_where, bench_reduce, bench_chain_where_select);
+criterion_group!(
+    benches,
+    bench_each,
+    bench_where,
+    bench_reduce,
+    bench_chain_where_select
+);
 criterion_main!(benches);

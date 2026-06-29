@@ -1,9 +1,8 @@
 /// Tab completion engine: context-aware completion for commands, paths, variables,
 /// with configurable completion specs (Phase 7).
-
 use crate::environment::ShellState;
-use std::fs;
 use std::collections::HashMap;
+use std::fs;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompletionKind {
@@ -79,7 +78,8 @@ impl CompletionCache {
     fn insert(&mut self, key: String, completions: Vec<Completion>) {
         if self.cache.len() >= self.max_size && !self.cache.contains_key(&key) {
             // Remove the least frequently used entry
-            if let Some(lfu_key) = self.cache
+            if let Some(lfu_key) = self
+                .cache
                 .iter()
                 .min_by_key(|(_, entry)| entry.hit_count)
                 .map(|(k, _)| k.clone())
@@ -125,9 +125,7 @@ pub fn complete(buffer: &str, cursor: usize, state: &mut ShellState) -> (usize, 
     };
 
     // Try to get from cache
-    let cached = COMPLETION_CACHE.with(|cache| {
-        cache.borrow_mut().get(&cache_key)
-    });
+    let cached = COMPLETION_CACHE.with(|cache| cache.borrow_mut().get(&cache_key));
 
     if let Some(completions) = cached {
         return (word_start, completions);
@@ -178,7 +176,10 @@ pub fn complete(buffer: &str, cursor: usize, state: &mut ShellState) -> (usize, 
     } else if let Some(spec_completions) = complete_from_spec(&cmd, &word, buf, state) {
         spec_completions
     } else if cmd == "cd" || cmd == "mkdir" || cmd == "rmdir" || cmd == "z" {
-        complete_path(&word, state).into_iter().filter(|c| c.is_dir).collect()
+        complete_path(&word, state)
+            .into_iter()
+            .filter(|c| c.is_dir)
+            .collect()
     } else {
         complete_path(&word, state)
     };
@@ -191,7 +192,11 @@ pub fn complete(buffer: &str, cursor: usize, state: &mut ShellState) -> (usize, 
     (word_start, completions)
 }
 
-fn apply_completion_spec(spec: &crate::environment::CompletionSpec, prefix: &str, state: &mut ShellState) -> Vec<Completion> {
+fn apply_completion_spec(
+    spec: &crate::environment::CompletionSpec,
+    prefix: &str,
+    state: &mut ShellState,
+) -> Vec<Completion> {
     let mut completions = Vec::new();
 
     // -W word list
@@ -218,7 +223,10 @@ fn apply_completion_spec(spec: &crate::environment::CompletionSpec, prefix: &str
             let words: Vec<String> = line.split_whitespace().map(|s| s.to_string()).collect();
             state.arrays.insert("COMP_WORDS".to_string(), words.clone());
             if let Some(scope) = state.local_vars_stack.last_mut() {
-                scope.insert("COMP_CWORD".to_string(), (words.len().saturating_sub(1)).to_string());
+                scope.insert(
+                    "COMP_CWORD".to_string(),
+                    (words.len().saturating_sub(1)).to_string(),
+                );
                 scope.insert("COMP_LINE".to_string(), line.to_string());
                 scope.insert("COMP_POINT".to_string(), line.len().to_string());
             }
@@ -251,7 +259,11 @@ fn apply_completion_spec(spec: &crate::environment::CompletionSpec, prefix: &str
 
     // -d directory
     if spec.directory {
-        completions.extend(complete_path(prefix, state).into_iter().filter(|c| c.is_dir));
+        completions.extend(
+            complete_path(prefix, state)
+                .into_iter()
+                .filter(|c| c.is_dir),
+        );
     }
 
     // -f file
@@ -266,10 +278,14 @@ fn apply_completion_spec(spec: &crate::environment::CompletionSpec, prefix: &str
 
     // -P prefix, -S suffix
     if let Some(ref pfx) = spec.prefix {
-        for c in &mut completions { c.text = format!("{}{}", pfx, c.text); }
+        for c in &mut completions {
+            c.text = format!("{}{}", pfx, c.text);
+        }
     }
     if let Some(ref sfx) = spec.suffix {
-        for c in &mut completions { c.text = format!("{}{}", c.text, sfx); }
+        for c in &mut completions {
+            c.text = format!("{}{}", c.text, sfx);
+        }
     }
 
     completions
@@ -277,14 +293,20 @@ fn apply_completion_spec(spec: &crate::environment::CompletionSpec, prefix: &str
 
 fn first_command(buf: &str) -> String {
     let trimmed = buf.trim_start();
-    let cmd_start = trimmed.rfind(|c: char| c == '|' || c == ';')
+    let cmd_start = trimmed
+        .rfind(|c: char| c == '|' || c == ';')
         .map(|i| i + 1)
         .unwrap_or(0);
     let segment = trimmed[cmd_start..].trim_start();
     segment.split_whitespace().next().unwrap_or("").to_string()
 }
 
-fn subcommand_completions(cmd: &str, prefix: &str, buf: &str, word_start: usize) -> Option<Vec<Completion>> {
+fn subcommand_completions(
+    cmd: &str,
+    prefix: &str,
+    buf: &str,
+    word_start: usize,
+) -> Option<Vec<Completion>> {
     let before = buf[..word_start].trim_end();
     let words: Vec<&str> = before.split_whitespace().collect();
     let word_count = words.len();
@@ -521,7 +543,8 @@ fn subcommand_completions(cmd: &str, prefix: &str, buf: &str, word_start: usize)
             _ => return None,
         };
 
-        let completions = subs.iter()
+        let completions = subs
+            .iter()
             .filter(|(name, _)| name.starts_with(prefix))
             .map(|(name, desc)| Completion {
                 text: name.to_string(),
@@ -556,12 +579,16 @@ fn subcommand_completions(cmd: &str, prefix: &str, buf: &str, word_start: usize)
             "stash" if word_count == 2 => {
                 // stash subcommands
                 let subs = &[
-                    ("push", "Stash changes"), ("pop", "Apply and drop"),
-                    ("apply", "Apply stash"), ("drop", "Drop stash"),
-                    ("list", "List stashes"), ("show", "Show stash"),
+                    ("push", "Stash changes"),
+                    ("pop", "Apply and drop"),
+                    ("apply", "Apply stash"),
+                    ("drop", "Drop stash"),
+                    ("list", "List stashes"),
+                    ("show", "Show stash"),
                     ("clear", "Clear all stashes"),
                 ];
-                let completions = subs.iter()
+                let completions = subs
+                    .iter()
                     .filter(|(name, _)| name.starts_with(prefix))
                     .map(|(name, desc)| Completion {
                         text: name.to_string(),
@@ -575,7 +602,11 @@ fn subcommand_completions(cmd: &str, prefix: &str, buf: &str, word_start: usize)
             }
             "stash" if word_count >= 3 => {
                 let stash_sub = words.get(2).copied().unwrap_or("");
-                if stash_sub == "pop" || stash_sub == "apply" || stash_sub == "drop" || stash_sub == "show" {
+                if stash_sub == "pop"
+                    || stash_sub == "apply"
+                    || stash_sub == "drop"
+                    || stash_sub == "show"
+                {
                     return Some(complete_git_stashes(prefix));
                 }
             }
@@ -584,11 +615,15 @@ fn subcommand_completions(cmd: &str, prefix: &str, buf: &str, word_start: usize)
             }
             "remote" if word_count == 2 => {
                 let subs = &[
-                    ("add", "Add remote"), ("remove", "Remove remote"),
-                    ("rename", "Rename remote"), ("show", "Show remote"),
-                    ("prune", "Prune stale refs"), ("update", "Fetch updates"),
+                    ("add", "Add remote"),
+                    ("remove", "Remove remote"),
+                    ("rename", "Rename remote"),
+                    ("show", "Show remote"),
+                    ("prune", "Prune stale refs"),
+                    ("update", "Fetch updates"),
                 ];
-                let completions = subs.iter()
+                let completions = subs
+                    .iter()
                     .filter(|(name, _)| name.starts_with(prefix))
                     .map(|(name, desc)| Completion {
                         text: name.to_string(),
@@ -617,10 +652,13 @@ fn subcommand_completions(cmd: &str, prefix: &str, buf: &str, word_start: usize)
     if cmd == "docker" && word_count == 2 {
         let subcmd = words.get(1).copied().unwrap_or("");
         if subcmd == "compose" {
-            let subs = &["build", "config", "create", "down", "events", "exec",
-                "images", "kill", "logs", "ls", "pause", "port", "ps", "pull",
-                "push", "restart", "rm", "run", "start", "stop", "top", "unpause", "up"];
-            let completions = subs.iter()
+            let subs = &[
+                "build", "config", "create", "down", "events", "exec", "images", "kill", "logs",
+                "ls", "pause", "port", "ps", "pull", "push", "restart", "rm", "run", "start",
+                "stop", "top", "unpause", "up",
+            ];
+            let completions = subs
+                .iter()
                 .filter(|s| s.starts_with(prefix))
                 .map(|s| Completion {
                     text: s.to_string(),
@@ -639,7 +677,9 @@ fn subcommand_completions(cmd: &str, prefix: &str, buf: &str, word_start: usize)
         let subcmd = words.get(1).copied().unwrap_or("");
         if subcmd == "go" || subcmd == "rm" {
             if let Ok(db) = crate::bookmarks::get_bookmark_db().lock() {
-                let completions = db.names().into_iter()
+                let completions = db
+                    .names()
+                    .into_iter()
                     .filter(|n| n.starts_with(prefix))
                     .map(|n| Completion {
                         text: n.clone(),
@@ -714,11 +754,7 @@ fn subcommand_completions(cmd: &str, prefix: &str, buf: &str, word_start: usize)
                 ("-a", "preserve all"),
                 ("-p", "preserve properties"),
             ],
-            "mkdir" => &[
-                ("-p", "parents"),
-                ("-m", "mode"),
-                ("-v", "verbose"),
-            ],
+            "mkdir" => &[("-p", "parents"), ("-m", "mode"), ("-v", "verbose")],
             "chmod" => &[
                 ("-r", "recursive"),
                 ("-v", "verbose"),
@@ -728,7 +764,8 @@ fn subcommand_completions(cmd: &str, prefix: &str, buf: &str, word_start: usize)
             _ => return None,
         };
 
-        let completions = options.iter()
+        let completions = options
+            .iter()
             .filter(|(opt, _)| opt.starts_with(prefix))
             .map(|(opt, desc)| Completion {
                 text: opt.to_string(),
@@ -833,13 +870,17 @@ fn complete_git_dirty_files(prefix: &str, context: &str) -> Vec<Completion> {
         if output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             for line in stdout.lines() {
-                if line.len() < 4 { continue; }
+                if line.len() < 4 {
+                    continue;
+                }
                 let status = &line[..2];
                 let file = line[3..].trim_start();
                 // Strip quotes from filenames with special chars
                 let file = file.trim_matches('"');
 
-                if !file.starts_with(prefix) { continue; }
+                if !file.starts_with(prefix) {
+                    continue;
+                }
 
                 let (desc, include) = match context {
                     "add" => match status.trim() {
@@ -946,10 +987,7 @@ fn complete_git_recent_commits(prefix: &str) -> Vec<Completion> {
 
 fn complete_git_remotes(prefix: &str) -> Vec<Completion> {
     let mut completions = Vec::new();
-    if let Ok(output) = std::process::Command::new("git")
-        .args(["remote"])
-        .output()
-    {
+    if let Ok(output) = std::process::Command::new("git").args(["remote"]).output() {
         if output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             for remote in stdout.lines() {
@@ -969,7 +1007,12 @@ fn complete_git_remotes(prefix: &str) -> Vec<Completion> {
     completions
 }
 
-fn complete_from_spec(cmd: &str, prefix: &str, buf: &str, state: &ShellState) -> Option<Vec<Completion>> {
+fn complete_from_spec(
+    cmd: &str,
+    prefix: &str,
+    buf: &str,
+    state: &ShellState,
+) -> Option<Vec<Completion>> {
     use crate::completion_spec::SpecCompletionKind;
 
     let words: Vec<&str> = buf.split_whitespace().collect();
@@ -980,7 +1023,8 @@ fn complete_from_spec(cmd: &str, prefix: &str, buf: &str, state: &ShellState) ->
         return None;
     }
 
-    let completions = results.into_iter()
+    let completions = results
+        .into_iter()
         .map(|(text, desc, kind)| {
             let ck = match kind {
                 SpecCompletionKind::Subcommand => CompletionKind::Subcommand,
@@ -1010,7 +1054,9 @@ fn extract_word_at(buf: &str) -> (String, usize) {
                 break;
             }
             _ => {
-                if i == 0 { start = 0; }
+                if i == 0 {
+                    start = 0;
+                }
             }
         }
     }
@@ -1020,13 +1066,13 @@ fn extract_word_at(buf: &str) -> (String, usize) {
 
 fn is_command_position(buf: &str, word_start: usize) -> bool {
     let before = buf[..word_start].trim_end();
-    before.is_empty() ||
-    before.ends_with('|') ||
-    before.ends_with("&&") ||
-    before.ends_with("||") ||
-    before.ends_with(';') ||
-    before.ends_with('(') ||
-    before.ends_with('{')
+    before.is_empty()
+        || before.ends_with('|')
+        || before.ends_with("&&")
+        || before.ends_with("||")
+        || before.ends_with(';')
+        || before.ends_with('(')
+        || before.ends_with('{')
 }
 
 fn complete_command(prefix: &str, state: &mut ShellState) -> Vec<Completion> {
@@ -1085,16 +1131,26 @@ fn complete_command(prefix: &str, state: &mut ShellState) -> Vec<Completion> {
         let desc = if sig.params.is_empty() {
             "user-defined".to_string()
         } else {
-            sig.params.iter()
-                .map(|p| format!("{}{}{}",
-                    p.name,
-                    if p.optional { "?" } else if p.rest { "..." } else { "" },
-                    if matches!(p.kind, crate::signature::Type::Any) {
-                        String::new()
-                    } else {
-                        format!(":{}", p.kind.render())
-                    }
-                ))
+            sig.params
+                .iter()
+                .map(|p| {
+                    format!(
+                        "{}{}{}",
+                        p.name,
+                        if p.optional {
+                            "?"
+                        } else if p.rest {
+                            "..."
+                        } else {
+                            ""
+                        },
+                        if matches!(p.kind, crate::signature::Type::Any) {
+                            String::new()
+                        } else {
+                            format!(":{}", p.kind.render())
+                        }
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join(" ")
         };
@@ -1152,9 +1208,15 @@ fn path_metadata_desc(entry: &fs::DirEntry) -> Option<String> {
 }
 
 fn format_file_size(bytes: u64) -> String {
-    if bytes < 1024 { return format!("{}B", bytes); }
-    if bytes < 1024 * 1024 { return format!("{:.1}K", bytes as f64 / 1024.0); }
-    if bytes < 1024 * 1024 * 1024 { return format!("{:.1}M", bytes as f64 / (1024.0 * 1024.0)); }
+    if bytes < 1024 {
+        return format!("{}B", bytes);
+    }
+    if bytes < 1024 * 1024 {
+        return format!("{:.1}K", bytes as f64 / 1024.0);
+    }
+    if bytes < 1024 * 1024 * 1024 {
+        return format!("{:.1}M", bytes as f64 / (1024.0 * 1024.0));
+    }
     format!("{:.1}G", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
 }
 
@@ -1184,12 +1246,20 @@ fn complete_path(prefix: &str, state: &ShellState) -> Vec<Completion> {
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
-            if !name.starts_with(file_prefix) { continue; }
-            if name.starts_with('.') && !file_prefix.starts_with('.') { continue; }
+            if !name.starts_with(file_prefix) {
+                continue;
+            }
+            if name.starts_with('.') && !file_prefix.starts_with('.') {
+                continue;
+            }
 
             let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
             let full = if dir == "." {
-                if is_dir { format!("{}/", name) } else { name.clone() }
+                if is_dir {
+                    format!("{}/", name)
+                } else {
+                    name.clone()
+                }
             } else if prefix.starts_with('~') {
                 let suffix = if expanded.ends_with('/') {
                     format!("{}{}", &prefix, name)
@@ -1199,7 +1269,11 @@ fn complete_path(prefix: &str, state: &ShellState) -> Vec<Completion> {
                         None => format!("~/{}", name),
                     }
                 };
-                if is_dir { format!("{}/", suffix) } else { suffix }
+                if is_dir {
+                    format!("{}/", suffix)
+                } else {
+                    suffix
+                }
             } else {
                 let path = if expanded.ends_with('/') {
                     format!("{}{}", prefix, name)
@@ -1209,16 +1283,28 @@ fn complete_path(prefix: &str, state: &ShellState) -> Vec<Completion> {
                         None => name.clone(),
                     }
                 };
-                if is_dir { format!("{}/", path) } else { path }
+                if is_dir {
+                    format!("{}/", path)
+                } else {
+                    path
+                }
             };
 
             let description = path_metadata_desc(&entry);
 
             completions.push(Completion {
                 text: full,
-                display: if is_dir { format!("{}/", name) } else { name.clone() },
+                display: if is_dir {
+                    format!("{}/", name)
+                } else {
+                    name.clone()
+                },
                 description,
-                kind: if is_dir { CompletionKind::Directory } else { CompletionKind::File },
+                kind: if is_dir {
+                    CompletionKind::Directory
+                } else {
+                    CompletionKind::File
+                },
                 is_dir,
             });
         }
@@ -1335,7 +1421,9 @@ fn complete_variable(prefix: &str, state: &ShellState) -> Vec<Completion> {
 }
 
 pub fn common_prefix(completions: &[Completion]) -> String {
-    if completions.is_empty() { return String::new(); }
+    if completions.is_empty() {
+        return String::new();
+    }
     let first = &completions[0].text;
     let mut len = first.len();
     for c in &completions[1..] {
@@ -1383,9 +1471,12 @@ pub fn fuzzy_match_score(text: &str, pattern: &str) -> i32 {
                 last_match_pos = pos;
 
                 // Bonus for consecutive matches
-                if pos > 0 && text_lower.chars().nth(pos - 1)
-                    .map(|c| c == pattern_lower.chars().next().unwrap())
-                    .unwrap_or(false)
+                if pos > 0
+                    && text_lower
+                        .chars()
+                        .nth(pos - 1)
+                        .map(|c| c == pattern_lower.chars().next().unwrap())
+                        .unwrap_or(false)
                 {
                     gap_penalty = gap_penalty.saturating_sub(5);
                 }
@@ -1441,7 +1532,7 @@ pub fn complete_from_history(prefix: &str) -> Vec<Completion> {
     if let Ok(file) = std::fs::File::open(
         dirs::home_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-            .join(".rsh_history")
+            .join(".rsh_history"),
     ) {
         use std::io::BufRead;
         let reader = std::io::BufReader::new(file);

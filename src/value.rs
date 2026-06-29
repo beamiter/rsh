@@ -2,9 +2,8 @@
 ///
 /// Phase 5a: foundation for in-process structured pipelines.
 /// `Closure` is declared but only populated in Phase 5b.
-
 use indexmap::IndexMap;
-use serde_json::{Value as JsonValue, Number};
+use serde_json::{Number, Value as JsonValue};
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
@@ -38,12 +37,16 @@ impl PartialEq for Value {
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Int(a), Value::Int(b)) => a == b,
             (Value::Float(a), Value::Float(b)) => a == b,
-            (Value::Int(a), Value::Float(b)) | (Value::Float(b), Value::Int(a)) => (*a as f64) == *b,
+            (Value::Int(a), Value::Float(b)) | (Value::Float(b), Value::Int(a)) => {
+                (*a as f64) == *b
+            }
             (Value::String(a), Value::String(b)) => a == b,
             (Value::List(a), Value::List(b)) => a == b,
             (Value::Record(a), Value::Record(b)) => {
                 a.len() == b.len()
-                    && a.iter().zip(b.iter()).all(|((ka, va), (kb, vb))| ka == kb && va == vb)
+                    && a.iter()
+                        .zip(b.iter())
+                        .all(|((ka, va), (kb, vb))| ka == kb && va == vb)
             }
             (Value::Binary(a), Value::Binary(b)) => a == b,
             _ => false,
@@ -71,8 +74,10 @@ impl Value {
                 format!("[{}]", inner.join(", "))
             }
             Value::Record(map) => {
-                let inner: Vec<String> =
-                    map.iter().map(|(k, v)| format!("{}: {}", k, v.to_display_string())).collect();
+                let inner: Vec<String> = map
+                    .iter()
+                    .map(|(k, v)| format!("{}: {}", k, v.to_display_string()))
+                    .collect();
                 format!("{{{}}}", inner.join(", "))
             }
             Value::Binary(b) => format!("<{} bytes>", b.len()),
@@ -134,7 +139,9 @@ impl Value {
             Value::Null => JsonValue::Null,
             Value::Bool(b) => JsonValue::Bool(*b),
             Value::Int(i) => JsonValue::Number((*i).into()),
-            Value::Float(f) => Number::from_f64(*f).map(JsonValue::Number).unwrap_or(JsonValue::Null),
+            Value::Float(f) => Number::from_f64(*f)
+                .map(JsonValue::Number)
+                .unwrap_or(JsonValue::Null),
             Value::String(s) => JsonValue::String(s.clone()),
             Value::List(items) => JsonValue::Array(items.iter().map(|v| v.to_json()).collect()),
             Value::Record(map) => {
@@ -200,7 +207,11 @@ pub fn render_table(records: &[Value]) -> String {
     for rec in records {
         let row: Vec<String> = columns
             .iter()
-            .map(|col| rec.get(col).map(|v| v.to_display_string()).unwrap_or_default())
+            .map(|col| {
+                rec.get(col)
+                    .map(|v| v.to_display_string())
+                    .unwrap_or_default()
+            })
             .collect();
         rows.push(row);
     }

@@ -1,9 +1,8 @@
-/// Auto-suggestion engine: fish-style ghost text from history + z-jump,
-/// with context-aware git suggestions and sequential command recommendations.
-
-use std::collections::HashMap;
 use crate::history::History;
 use crate::probe;
+/// Auto-suggestion engine: fish-style ghost text from history + z-jump,
+/// with context-aware git suggestions and sequential command recommendations.
+use std::collections::HashMap;
 
 /// Context passed to the suggestion engine (zero-allocation, borrows from ShellState).
 pub struct SuggestionContext<'a> {
@@ -33,85 +32,103 @@ const COMMAND_CHAINS: &[(&str, &str)] = &[
 /// Subcommand abbreviation suggestions: (command, [(abbreviation, full_subcommand), ...])
 /// Suggests full subcommand names from common abbreviations.
 const SUBCOMMAND_SUGGESTIONS: &[(&str, &[(&str, &str)])] = &[
-    ("git", &[
-        ("a", "add"),
-        ("b", "branch"),
-        ("bi", "bisect"),
-        ("bl", "blame"),
-        ("c", "commit"),
-        ("ch", "checkout"),
-        ("che", "cherry-pick"),
-        ("cl", "clone"),
-        ("d", "diff"),
-        ("f", "fetch"),
-        ("l", "log"),
-        ("m", "merge"),
-        ("mv", "mv"),
-        ("p", "push"),
-        ("pl", "pull"),
-        ("r", "reflog"),
-        ("re", "rebase"),
-        ("rem", "remote"),
-        ("res", "reset"),
-        ("rev", "revert"),
-        ("rm", "rm"),
-        ("s", "status"),
-        ("sh", "show"),
-        ("st", "stash"),
-        ("sw", "switch"),
-        ("t", "tag"),
-    ]),
-    ("cargo", &[
-        ("b", "build"),
-        ("c", "check"),
-        ("cl", "clean"),
-        ("d", "doc"),
-        ("f", "fmt"),
-        ("i", "init"),
-        ("n", "new"),
-        ("r", "run"),
-        ("t", "test"),
-        ("u", "update"),
-    ]),
-    ("docker", &[
-        ("b", "build"),
-        ("c", "container"),
-        ("e", "exec"),
-        ("i", "images"),
-        ("l", "logs"),
-        ("p", "ps"),
-        ("pu", "pull"),
-        ("r", "run"),
-        ("rm", "rm"),
-        ("s", "start"),
-        ("st", "stop"),
-        ("v", "volume"),
-    ]),
-    ("kubectl", &[
-        ("a", "apply"),
-        ("c", "create"),
-        ("d", "delete"),
-        ("des", "describe"),
-        ("e", "exec"),
-        ("g", "get"),
-        ("l", "logs"),
-        ("r", "run"),
-    ]),
-    ("npm", &[
-        ("i", "install"),
-        ("r", "run"),
-        ("s", "start"),
-        ("t", "test"),
-        ("u", "update"),
-    ]),
-    ("systemctl", &[
-        ("e", "enable"),
-        ("d", "disable"),
-        ("r", "restart"),
-        ("s", "status"),
-        ("sta", "start"),
-        ("sto", "stop"),
-    ]),
+    (
+        "git",
+        &[
+            ("a", "add"),
+            ("b", "branch"),
+            ("bi", "bisect"),
+            ("bl", "blame"),
+            ("c", "commit"),
+            ("ch", "checkout"),
+            ("che", "cherry-pick"),
+            ("cl", "clone"),
+            ("d", "diff"),
+            ("f", "fetch"),
+            ("l", "log"),
+            ("m", "merge"),
+            ("mv", "mv"),
+            ("p", "push"),
+            ("pl", "pull"),
+            ("r", "reflog"),
+            ("re", "rebase"),
+            ("rem", "remote"),
+            ("res", "reset"),
+            ("rev", "revert"),
+            ("rm", "rm"),
+            ("s", "status"),
+            ("sh", "show"),
+            ("st", "stash"),
+            ("sw", "switch"),
+            ("t", "tag"),
+        ],
+    ),
+    (
+        "cargo",
+        &[
+            ("b", "build"),
+            ("c", "check"),
+            ("cl", "clean"),
+            ("d", "doc"),
+            ("f", "fmt"),
+            ("i", "init"),
+            ("n", "new"),
+            ("r", "run"),
+            ("t", "test"),
+            ("u", "update"),
+        ],
+    ),
+    (
+        "docker",
+        &[
+            ("b", "build"),
+            ("c", "container"),
+            ("e", "exec"),
+            ("i", "images"),
+            ("l", "logs"),
+            ("p", "ps"),
+            ("pu", "pull"),
+            ("r", "run"),
+            ("rm", "rm"),
+            ("s", "start"),
+            ("st", "stop"),
+            ("v", "volume"),
+        ],
+    ),
+    (
+        "kubectl",
+        &[
+            ("a", "apply"),
+            ("c", "create"),
+            ("d", "delete"),
+            ("des", "describe"),
+            ("e", "exec"),
+            ("g", "get"),
+            ("l", "logs"),
+            ("r", "run"),
+        ],
+    ),
+    (
+        "npm",
+        &[
+            ("i", "install"),
+            ("r", "run"),
+            ("s", "start"),
+            ("t", "test"),
+            ("u", "update"),
+        ],
+    ),
+    (
+        "systemctl",
+        &[
+            ("e", "enable"),
+            ("d", "disable"),
+            ("r", "restart"),
+            ("s", "status"),
+            ("sta", "start"),
+            ("sto", "stop"),
+        ],
+    ),
 ];
 
 /// Given the current buffer, find a suggestion from history, git context, or z-jump.
@@ -349,7 +366,8 @@ fn suggest_from_history_chains(last_cmd: &str, history: &History) -> Option<Stri
     }
 
     // Require at least 3 occurrences to avoid noise
-    successors.into_iter()
+    successors
+        .into_iter()
         .filter(|(_, count)| *count >= 3)
         .max_by_key(|(_, count)| *count)
         .map(|(cmd, _)| cmd.to_string())

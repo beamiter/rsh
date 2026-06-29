@@ -1,16 +1,26 @@
 /// Phase 14a — structured errors + try/catch.
-
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-fn rsh_bin() -> String { env!("CARGO_BIN_EXE_rsh").to_string() }
+fn rsh_bin() -> String {
+    env!("CARGO_BIN_EXE_rsh").to_string()
+}
 
 fn run(script: &str, stdin: &str) -> (String, String, i32) {
     let mut child = Command::new(rsh_bin())
-        .arg("-c").arg(script)
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-        .spawn().expect("spawn");
-    child.stdin.as_mut().unwrap().write_all(stdin.as_bytes()).unwrap();
+        .arg("-c")
+        .arg(script)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(stdin.as_bytes())
+        .unwrap();
     let out = child.wait_with_output().expect("wait");
     (
         String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -53,10 +63,7 @@ fn try_catch_can_inspect_code() {
 
 #[test]
 fn error_make_then_catch() {
-    let (out, _, code) = run(
-        r#"try {|| error make "boom" } catch {|e| $e.msg }"#,
-        "",
-    );
+    let (out, _, code) = run(r#"try {|| error make "boom" } catch {|e| $e.msg }"#, "");
     assert_eq!(out.trim(), "boom");
     assert_eq!(code, 0);
 }
@@ -70,10 +77,7 @@ fn error_make_without_try_leaves_nonzero_exit() {
 #[test]
 fn try_does_not_poison_exit_code() {
     // Even though the inner closure errored, the outer pipeline succeeded.
-    let (out, _, code) = run(
-        r#"try {|| error make "x" } catch {|e| "ok" }"#,
-        "",
-    );
+    let (out, _, code) = run(r#"try {|| error make "x" } catch {|e| "ok" }"#, "");
     assert_eq!(out.trim(), "ok");
     assert_eq!(code, 0);
 }
@@ -212,7 +216,16 @@ fn arity_missing_required_arg_reports_param_name() {
 #[test]
 fn arity_signature_covers_new_builtins() {
     // 15a registered the rest of the value builtins. Spot-check a few.
-    for n in &["unique", "count", "open", "save", "encode", "decode", "ansi", "histogram"] {
+    for n in &[
+        "unique",
+        "count",
+        "open",
+        "save",
+        "encode",
+        "decode",
+        "ansi",
+        "histogram",
+    ] {
         assert!(
             rsh::signature::SIGNATURES.contains_key(*n),
             "missing signature: {}",
@@ -225,7 +238,10 @@ fn arity_signature_covers_new_builtins() {
 fn arity_flagged_call_is_not_overconstrained() {
     // `window 3 --stride 2` mixes positional + flag. The validator
     // must not misread `2` as a stray positional.
-    let (out, _err, code) = run("from-json | window 3 --stride 2 | to-json", "[1,2,3,4,5,6,7]");
+    let (out, _err, code) = run(
+        "from-json | window 3 --stride 2 | to-json",
+        "[1,2,3,4,5,6,7]",
+    );
     assert_eq!(code, 0);
     let compact: String = out.chars().filter(|c| !c.is_whitespace()).collect();
     assert_eq!(compact, "[[1,2,3],[3,4,5],[5,6,7]]");

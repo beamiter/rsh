@@ -1,6 +1,5 @@
 /// Advanced keybindings and search enhancements for rsh editor
 /// Supports customizable Vi/Emacs modes and quick navigation
-
 use std::collections::HashMap;
 
 /// Configurable key binding
@@ -37,34 +36,59 @@ impl KeyBindingManager {
         match self.mode {
             EditorMode::Emacs => {
                 // Emacs mode bindings
-                self.bindings.insert("C-a".to_string(), "move_home".to_string());
-                self.bindings.insert("C-e".to_string(), "move_end".to_string());
-                self.bindings.insert("C-b".to_string(), "move_left".to_string());
-                self.bindings.insert("C-f".to_string(), "move_right".to_string());
-                self.bindings.insert("C-p".to_string(), "history_prev".to_string());
-                self.bindings.insert("C-n".to_string(), "history_next".to_string());
-                self.bindings.insert("C-r".to_string(), "search_history".to_string());
-                self.bindings.insert("C-s".to_string(), "search_forward".to_string());
-                self.bindings.insert("C-u".to_string(), "delete_line".to_string());
-                self.bindings.insert("C-k".to_string(), "kill_line".to_string());
-                self.bindings.insert("M-f".to_string(), "move_word_right".to_string());
-                self.bindings.insert("M-b".to_string(), "move_word_left".to_string());
-                self.bindings.insert("M-d".to_string(), "kill_word".to_string());
+                self.bindings
+                    .insert("C-a".to_string(), "move_home".to_string());
+                self.bindings
+                    .insert("C-e".to_string(), "move_end".to_string());
+                self.bindings
+                    .insert("C-b".to_string(), "move_left".to_string());
+                self.bindings
+                    .insert("C-f".to_string(), "move_right".to_string());
+                self.bindings
+                    .insert("C-p".to_string(), "history_prev".to_string());
+                self.bindings
+                    .insert("C-n".to_string(), "history_next".to_string());
+                self.bindings
+                    .insert("C-r".to_string(), "search_history".to_string());
+                self.bindings
+                    .insert("C-s".to_string(), "search_forward".to_string());
+                self.bindings
+                    .insert("C-u".to_string(), "delete_line".to_string());
+                self.bindings
+                    .insert("C-k".to_string(), "kill_line".to_string());
+                self.bindings
+                    .insert("M-f".to_string(), "move_word_right".to_string());
+                self.bindings
+                    .insert("M-b".to_string(), "move_word_left".to_string());
+                self.bindings
+                    .insert("M-d".to_string(), "kill_word".to_string());
             }
             EditorMode::Vi => {
                 // Vi mode bindings
-                self.bindings.insert("h".to_string(), "move_left".to_string());
-                self.bindings.insert("j".to_string(), "history_next".to_string());
-                self.bindings.insert("k".to_string(), "history_prev".to_string());
-                self.bindings.insert("l".to_string(), "move_right".to_string());
-                self.bindings.insert("0".to_string(), "move_home".to_string());
-                self.bindings.insert("$".to_string(), "move_end".to_string());
-                self.bindings.insert("w".to_string(), "move_word_right".to_string());
-                self.bindings.insert("b".to_string(), "move_word_left".to_string());
-                self.bindings.insert("/".to_string(), "search_forward".to_string());
-                self.bindings.insert("?".to_string(), "search_backward".to_string());
-                self.bindings.insert("n".to_string(), "next_search_result".to_string());
-                self.bindings.insert("N".to_string(), "prev_search_result".to_string());
+                self.bindings
+                    .insert("h".to_string(), "move_left".to_string());
+                self.bindings
+                    .insert("j".to_string(), "history_next".to_string());
+                self.bindings
+                    .insert("k".to_string(), "history_prev".to_string());
+                self.bindings
+                    .insert("l".to_string(), "move_right".to_string());
+                self.bindings
+                    .insert("0".to_string(), "move_home".to_string());
+                self.bindings
+                    .insert("$".to_string(), "move_end".to_string());
+                self.bindings
+                    .insert("w".to_string(), "move_word_right".to_string());
+                self.bindings
+                    .insert("b".to_string(), "move_word_left".to_string());
+                self.bindings
+                    .insert("/".to_string(), "search_forward".to_string());
+                self.bindings
+                    .insert("?".to_string(), "search_backward".to_string());
+                self.bindings
+                    .insert("n".to_string(), "next_search_result".to_string());
+                self.bindings
+                    .insert("N".to_string(), "prev_search_result".to_string());
             }
         }
     }
@@ -153,8 +177,10 @@ impl SearchEngine {
                 let start = i;
                 let end = i + pattern.len();
 
-                let before_ok = start == 0 || !search_text[..start].ends_with(|c: char| c.is_alphanumeric());
-                let after_ok = end >= search_text.len() || !search_text[end..].starts_with(|c: char| c.is_alphanumeric());
+                let before_ok =
+                    start == 0 || !search_text[..start].ends_with(|c: char| c.is_alphanumeric());
+                let after_ok = end >= search_text.len()
+                    || !search_text[end..].starts_with(|c: char| c.is_alphanumeric());
 
                 if before_ok && after_ok {
                     results.push((start, end));

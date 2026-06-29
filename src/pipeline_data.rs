@@ -5,7 +5,6 @@
 /// `where` short-circuit, `to-json` streaming, etc.) can drain it
 /// incrementally; legacy code paths transparently `collect()` via
 /// `into_values()`.
-
 use crate::value::Value;
 use std::io::{self, Write};
 

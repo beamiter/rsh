@@ -1,7 +1,6 @@
-/// Phase 6a — `open` and `save` (file I/O bridges to converters).
-
-use std::process::{Command, Stdio};
 use std::io::Write;
+/// Phase 6a — `open` and `save` (file I/O bridges to converters).
+use std::process::{Command, Stdio};
 
 fn rsh_bin() -> String {
     env!("CARGO_BIN_EXE_rsh").to_string()
@@ -10,11 +9,13 @@ fn rsh_bin() -> String {
 fn run_in(dir: &std::path::Path, script: &str) -> (String, String, i32) {
     let child = Command::new(rsh_bin())
         .current_dir(dir)
-        .arg("-c").arg(script)
+        .arg("-c")
+        .arg(script)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn().expect("spawn");
+        .spawn()
+        .expect("spawn");
     let out = child.wait_with_output().expect("wait");
     (
         String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -26,12 +27,19 @@ fn run_in(dir: &std::path::Path, script: &str) -> (String, String, i32) {
 fn run_with_stdin(dir: &std::path::Path, script: &str, stdin: &str) -> (String, String, i32) {
     let mut child = Command::new(rsh_bin())
         .current_dir(dir)
-        .arg("-c").arg(script)
+        .arg("-c")
+        .arg(script)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn().expect("spawn");
-    child.stdin.as_mut().unwrap().write_all(stdin.as_bytes()).unwrap();
+        .spawn()
+        .expect("spawn");
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(stdin.as_bytes())
+        .unwrap();
     let out = child.wait_with_output().expect("wait");
     (
         String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -44,8 +52,10 @@ fn run_with_stdin(dir: &std::path::Path, script: &str, stdin: &str) -> (String, 
 fn open_json_then_filter() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("t.json"), r#"[{"a":1},{"a":3}]"#).unwrap();
-    let (out, err, code) = run_in(dir.path(),
-        r#"open t.json | where {|r| [ $r.a -gt 1 ]} | to-json"#);
+    let (out, err, code) = run_in(
+        dir.path(),
+        r#"open t.json | where {|r| [ $r.a -gt 1 ]} | to-json"#,
+    );
     assert_eq!(code, 0, "stderr: {}", err);
     let p: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
     assert_eq!(p, serde_json::json!([{"a":3}]));
@@ -94,7 +104,10 @@ fn save_passthrough_text_bytes() {
     let dir = tempfile::tempdir().unwrap();
     let (_out, err, code) = run_with_stdin(dir.path(), "save out.txt", "abc\n");
     assert_eq!(code, 0, "stderr: {}", err);
-    assert_eq!(std::fs::read_to_string(dir.path().join("out.txt")).unwrap(), "abc\n");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("out.txt")).unwrap(),
+        "abc\n"
+    );
 }
 
 #[test]

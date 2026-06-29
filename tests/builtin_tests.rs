@@ -52,14 +52,21 @@ fn test_local() {
     // local only works within a function scope
     state.push_local_scope();
     run_builtin("local", &["X=hello".into()], &mut state);
-    assert_eq!(state.local_vars_stack.last().and_then(|s| s.get("X")), Some(&"hello".to_string()));
+    assert_eq!(
+        state.local_vars_stack.last().and_then(|s| s.get("X")),
+        Some(&"hello".to_string())
+    );
     state.pop_local_scope();
 }
 
 #[test]
 fn test_set_positional() {
     let mut state = make_state();
-    run_builtin("set", &["--".into(), "a".into(), "b".into(), "c".into()], &mut state);
+    run_builtin(
+        "set",
+        &["--".into(), "a".into(), "b".into(), "c".into()],
+        &mut state,
+    );
     assert_eq!(state.positional_params, vec!["a", "b", "c"]);
 }
 
@@ -117,19 +124,34 @@ fn test_declare_assoc_array() {
 fn test_hook_add_remove() {
     let mut state = make_state();
     assert!(state.hooks.precmd.is_empty());
-    run_builtin("hook", &["add".into(), "precmd".into(), "myfunc".into()], &mut state);
+    run_builtin(
+        "hook",
+        &["add".into(), "precmd".into(), "myfunc".into()],
+        &mut state,
+    );
     assert_eq!(state.hooks.precmd, vec!["myfunc"]);
-    run_builtin("hook", &["remove".into(), "precmd".into(), "myfunc".into()], &mut state);
+    run_builtin(
+        "hook",
+        &["remove".into(), "precmd".into(), "myfunc".into()],
+        &mut state,
+    );
     assert!(state.hooks.precmd.is_empty());
 }
 
 #[test]
 fn test_complete_spec() {
     let mut state = make_state();
-    run_builtin("complete", &["-W".into(), "start stop restart".into(), "myservice".into()], &mut state);
+    run_builtin(
+        "complete",
+        &["-W".into(), "start stop restart".into(), "myservice".into()],
+        &mut state,
+    );
     assert!(state.completion_specs.contains_key("myservice"));
     let spec = &state.completion_specs["myservice"];
-    assert_eq!(spec.word_list, Some(vec!["start".into(), "stop".into(), "restart".into()]));
+    assert_eq!(
+        spec.word_list,
+        Some(vec!["start".into(), "stop".into(), "restart".into()])
+    );
 
     // Remove
     run_builtin("complete", &["-r".into(), "myservice".into()], &mut state);
@@ -139,14 +161,37 @@ fn test_complete_spec() {
 #[test]
 fn test_double_bracket_string_eq() {
     let mut state = make_state();
-    assert_eq!(run_builtin("[[", &["hello".into(), "==".into(), "hello".into(), "]]".into()], &mut state), 0);
-    assert_eq!(run_builtin("[[", &["hello".into(), "==".into(), "world".into(), "]]".into()], &mut state), 1);
+    assert_eq!(
+        run_builtin(
+            "[[",
+            &["hello".into(), "==".into(), "hello".into(), "]]".into()],
+            &mut state
+        ),
+        0
+    );
+    assert_eq!(
+        run_builtin(
+            "[[",
+            &["hello".into(), "==".into(), "world".into(), "]]".into()],
+            &mut state
+        ),
+        1
+    );
 }
 
 #[test]
 fn test_double_bracket_regex() {
     let mut state = make_state();
-    let result = run_builtin("[[", &["hello123".into(), "=~".into(), "hello([0-9]+)".into(), "]]".into()], &mut state);
+    let result = run_builtin(
+        "[[",
+        &[
+            "hello123".into(),
+            "=~".into(),
+            "hello([0-9]+)".into(),
+            "]]".into(),
+        ],
+        &mut state,
+    );
     assert_eq!(result, 0);
     // Check BASH_REMATCH
     assert!(state.arrays.contains_key("BASH_REMATCH"));
@@ -158,31 +203,81 @@ fn test_double_bracket_regex() {
 #[test]
 fn test_double_bracket_regex_no_match() {
     let mut state = make_state();
-    let result = run_builtin("[[", &["hello".into(), "=~".into(), "^[0-9]+$".into(), "]]".into()], &mut state);
+    let result = run_builtin(
+        "[[",
+        &["hello".into(), "=~".into(), "^[0-9]+$".into(), "]]".into()],
+        &mut state,
+    );
     assert_eq!(result, 1);
 }
 
 #[test]
 fn test_double_bracket_numeric() {
     let mut state = make_state();
-    assert_eq!(run_builtin("[[", &["5".into(), "-gt".into(), "3".into(), "]]".into()], &mut state), 0);
-    assert_eq!(run_builtin("[[", &["2".into(), "-gt".into(), "3".into(), "]]".into()], &mut state), 1);
+    assert_eq!(
+        run_builtin(
+            "[[",
+            &["5".into(), "-gt".into(), "3".into(), "]]".into()],
+            &mut state
+        ),
+        0
+    );
+    assert_eq!(
+        run_builtin(
+            "[[",
+            &["2".into(), "-gt".into(), "3".into(), "]]".into()],
+            &mut state
+        ),
+        1
+    );
 }
 
 #[test]
 fn test_double_bracket_file_test() {
     let mut state = make_state();
-    assert_eq!(run_builtin("[[", &["-f".into(), "/etc/hostname".into(), "]]".into()], &mut state), 0);
-    assert_eq!(run_builtin("[[", &["-d".into(), "/tmp".into(), "]]".into()], &mut state), 0);
-    assert_eq!(run_builtin("[[", &["-f".into(), "/nonexistent".into(), "]]".into()], &mut state), 1);
+    assert_eq!(
+        run_builtin(
+            "[[",
+            &["-f".into(), "/etc/hostname".into(), "]]".into()],
+            &mut state
+        ),
+        0
+    );
+    assert_eq!(
+        run_builtin("[[", &["-d".into(), "/tmp".into(), "]]".into()], &mut state),
+        0
+    );
+    assert_eq!(
+        run_builtin(
+            "[[",
+            &["-f".into(), "/nonexistent".into(), "]]".into()],
+            &mut state
+        ),
+        1
+    );
 }
 
 #[test]
 fn test_test_builtin() {
     let mut state = make_state();
-    assert_eq!(run_builtin("test", &["-n".into(), "hello".into()], &mut state), 0);
-    assert_eq!(run_builtin("test", &["-z".into(), "".into()], &mut state), 0);
-    assert_eq!(run_builtin("test", &["-z".into(), "hello".into()], &mut state), 1);
-    assert_eq!(run_builtin("test", &["3".into(), "-eq".into(), "3".into()], &mut state), 0);
-    assert_eq!(run_builtin("test", &["3".into(), "-ne".into(), "4".into()], &mut state), 0);
+    assert_eq!(
+        run_builtin("test", &["-n".into(), "hello".into()], &mut state),
+        0
+    );
+    assert_eq!(
+        run_builtin("test", &["-z".into(), "".into()], &mut state),
+        0
+    );
+    assert_eq!(
+        run_builtin("test", &["-z".into(), "hello".into()], &mut state),
+        1
+    );
+    assert_eq!(
+        run_builtin("test", &["3".into(), "-eq".into(), "3".into()], &mut state),
+        0
+    );
+    assert_eq!(
+        run_builtin("test", &["3".into(), "-ne".into(), "4".into()], &mut state),
+        0
+    );
 }

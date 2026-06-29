@@ -1,5 +1,5 @@
-use rsh::parser::parse;
 use rsh::parser::ast::*;
+use rsh::parser::parse;
 
 #[test]
 fn test_simple_command() {
@@ -50,7 +50,12 @@ fn test_background_disown() {
 fn test_if_statement() {
     let cmds = parse("if true\nthen echo yes\nfi").unwrap();
     assert_eq!(cmds.len(), 1);
-    if let Command::Compound(CompoundCommand::If { conditions, else_branch, .. }) = &cmds[0].list.first.commands[0] {
+    if let Command::Compound(CompoundCommand::If {
+        conditions,
+        else_branch,
+        ..
+    }) = &cmds[0].list.first.commands[0]
+    {
         assert_eq!(conditions.len(), 1);
         assert!(else_branch.is_none());
     } else {
@@ -61,7 +66,9 @@ fn test_if_statement() {
 #[test]
 fn test_for_loop() {
     let cmds = parse("for i in a b c\ndo echo $i\ndone").unwrap();
-    if let Command::Compound(CompoundCommand::For { var, words, .. }) = &cmds[0].list.first.commands[0] {
+    if let Command::Compound(CompoundCommand::For { var, words, .. }) =
+        &cmds[0].list.first.commands[0]
+    {
         assert_eq!(var, "i");
         assert!(words.is_some());
         assert_eq!(words.as_ref().unwrap().len(), 3);

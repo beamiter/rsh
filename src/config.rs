@@ -1,6 +1,5 @@
 /// Config file loading: source ~/.bashrc or ~/.rshrc on startup.
-
-use crate::environment::{ShellState, ConfigSource};
+use crate::environment::{ConfigSource, ShellState};
 use crate::executor;
 use crate::parser;
 use std::path::PathBuf;
@@ -85,7 +84,8 @@ shopt 2>/dev/null || true
     if let Ok(output) = std::process::Command::new("bash")
         .arg("-c")
         .arg(&bash_script)
-        .output() {
+        .output()
+    {
         let stdout = String::from_utf8_lossy(&output.stdout);
         parse_bash_output(&stdout, state);
     }
@@ -125,9 +125,10 @@ fn parse_bash_output(output: &str, state: &mut ShellState) {
                     let key = &line[..eq_pos];
                     let value = &line[eq_pos + 1..];
                     // Remove quotes if present
-                    let value = if (value.starts_with('\'') && value.ends_with('\'')) ||
-                                   (value.starts_with('"') && value.ends_with('"')) {
-                        &value[1..value.len()-1]
+                    let value = if (value.starts_with('\'') && value.ends_with('\''))
+                        || (value.starts_with('"') && value.ends_with('"'))
+                    {
+                        &value[1..value.len() - 1]
                     } else {
                         value
                     };
@@ -223,7 +224,10 @@ alias grep='grep --color=auto'
         parse_bash_output(output, &mut state);
 
         assert_eq!(state.aliases.get("ll"), Some(&"ls -la".to_string()));
-        assert_eq!(state.aliases.get("grep"), Some(&"grep --color=auto".to_string()));
+        assert_eq!(
+            state.aliases.get("grep"),
+            Some(&"grep --color=auto".to_string())
+        );
     }
 
     #[test]
@@ -262,5 +266,3 @@ extglob         on"#;
         assert_eq!(state.shell_opts.extglob, true);
     }
 }
-
-

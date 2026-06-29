@@ -3,7 +3,7 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use rsh::environment::ShellState;
 use rsh::expand::{expand_word, expand_word_to_string};
 use rsh::parser::lexer::tokenize;
-use rsh::parser::parse::{parse, parse_word_parts, is_incomplete};
+use rsh::parser::parse::{is_incomplete, parse, parse_word_parts};
 
 // ---------------------------------------------------------------------------
 // Lexer benchmarks
@@ -17,13 +17,19 @@ fn bench_lexer(c: &mut Criterion) {
     });
 
     group.bench_function("pipeline", |b| {
-        b.iter(|| tokenize(black_box("cat file.txt | grep pattern | sort | uniq -c | head -10")))
+        b.iter(|| {
+            tokenize(black_box(
+                "cat file.txt | grep pattern | sort | uniq -c | head -10",
+            ))
+        })
     });
 
     group.bench_function("redirects_and_vars", |b| {
-        b.iter(|| tokenize(black_box(
-            "FOO=bar cmd --flag \"$HOME/path\" 2>/dev/null <<< 'input'"
-        )))
+        b.iter(|| {
+            tokenize(black_box(
+                "FOO=bar cmd --flag \"$HOME/path\" 2>/dev/null <<< 'input'",
+            ))
+        })
     });
 
     group.bench_function("complex_script", |b| {

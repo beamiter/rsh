@@ -1,16 +1,26 @@
 /// Phase 16 — module `use`, par-each, http, signature hints.
-
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-fn rsh_bin() -> String { env!("CARGO_BIN_EXE_rsh").to_string() }
+fn rsh_bin() -> String {
+    env!("CARGO_BIN_EXE_rsh").to_string()
+}
 
 fn run(script: &str, stdin: &str) -> (String, String, i32) {
     let mut child = Command::new(rsh_bin())
-        .arg("-c").arg(script)
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-        .spawn().expect("spawn");
-    child.stdin.as_mut().unwrap().write_all(stdin.as_bytes()).unwrap();
+        .arg("-c")
+        .arg(script)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(stdin.as_bytes())
+        .unwrap();
     let out = child.wait_with_output().expect("wait");
     (
         String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -32,8 +42,10 @@ fn write_temp(name: &str, content: &str) -> String {
 
 #[test]
 fn use_imports_def_functions_from_file() {
-    let p = write_temp("rsh_phase16_basic.rsh",
-        "def add a:int b:int {|a,b| $a + $b}\ndef mul a:int b:int {|a,b| $a * $b}\n");
+    let p = write_temp(
+        "rsh_phase16_basic.rsh",
+        "def add a:int b:int {|a,b| $a + $b}\ndef mul a:int b:int {|a,b| $a * $b}\n",
+    );
     let (out, _, code) = run(&format!("use {}; add 3 4", p), "");
     assert_eq!(code, 0);
     assert_eq!(out.trim(), "7");
@@ -45,12 +57,17 @@ fn use_imports_def_functions_from_file() {
 
 #[test]
 fn use_selective_keeps_only_named() {
-    let p = write_temp("rsh_phase16_select.rsh",
-        "def add a:int b:int {|a,b| $a + $b}\ndef mul a:int b:int {|a,b| $a * $b}\n");
+    let p = write_temp(
+        "rsh_phase16_select.rsh",
+        "def add a:int b:int {|a,b| $a + $b}\ndef mul a:int b:int {|a,b| $a * $b}\n",
+    );
     let (_, err, code) = run(&format!("use {} add; mul 1 2", p), "");
     assert_ne!(code, 0);
-    assert!(err.contains("mul: command not found") || err.contains("not found"),
-        "stderr was: {}", err);
+    assert!(
+        err.contains("mul: command not found") || err.contains("not found"),
+        "stderr was: {}",
+        err
+    );
 }
 
 #[test]
@@ -66,10 +83,7 @@ fn use_missing_file_errors_cleanly() {
 
 #[test]
 fn par_each_preserves_input_order() {
-    let (out, _, code) = run(
-        "range 1..10 | par-each {|x| $x * $x} | to-json",
-        "",
-    );
+    let (out, _, code) = run("range 1..10 | par-each {|x| $x * $x} | to-json", "");
     assert_eq!(code, 0);
     let compact: String = out.chars().filter(|c| !c.is_whitespace()).collect();
     assert_eq!(compact, "[1,4,9,16,25,36,49,64,81,100]");
@@ -77,20 +91,14 @@ fn par_each_preserves_input_order() {
 
 #[test]
 fn par_each_length_matches_input() {
-    let (out, _, code) = run(
-        "range 1..200 | par-each {|x| $x + 1} | length",
-        "",
-    );
+    let (out, _, code) = run("range 1..200 | par-each {|x| $x + 1} | length", "");
     assert_eq!(code, 0);
     assert_eq!(out.trim(), "200");
 }
 
 #[test]
 fn par_each_with_threads_flag() {
-    let (out, _, code) = run(
-        "range 1..20 | par-each -t 2 {|x| $x * 10} | to-json",
-        "",
-    );
+    let (out, _, code) = run("range 1..20 | par-each -t 2 {|x| $x * 10} | to-json", "");
     assert_eq!(code, 0);
     let compact: String = out.chars().filter(|c| !c.is_whitespace()).collect();
     assert_eq!(
@@ -114,9 +122,10 @@ fn par_each_on_empty_input_returns_empty() {
 use std::io::Read as _;
 use std::net::TcpListener;
 
-fn spawn_stub_server(response_body: &'static str, content_type: &'static str)
-    -> (String, std::thread::JoinHandle<Option<String>>)
-{
+fn spawn_stub_server(
+    response_body: &'static str,
+    content_type: &'static str,
+) -> (String, std::thread::JoinHandle<Option<String>>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().expect("addr");
     let url = format!("http://{}/", addr);
@@ -164,10 +173,7 @@ fn http_get_plain_text_body_kept_as_string() {
 #[test]
 fn http_post_sends_body() {
     let (url, h) = spawn_stub_server(r#"{"ok":1}"#, "application/json");
-    let (_, _, code) = run(
-        &format!("http post {} -d \"abc=123\" --json", url),
-        "",
-    );
+    let (_, _, code) = run(&format!("http post {} -d \"abc=123\" --json", url), "");
     assert_eq!(code, 0);
     let req = h.join().expect("join").expect("request seen");
     assert!(req.starts_with("POST "), "request was: {}", req);
@@ -185,6 +191,9 @@ fn http_unknown_method_errors() {
 fn http_missing_url_errors() {
     let (_, err, code) = run("http get", "");
     assert_ne!(code, 0);
-    assert!(err.contains("missing URL") || err.contains("missing"),
-        "stderr was: {}", err);
+    assert!(
+        err.contains("missing URL") || err.contains("missing"),
+        "stderr was: {}",
+        err
+    );
 }

@@ -1,16 +1,26 @@
 /// Phase 13 — list utilities, histogram + Levenshtein, char/ansi/fill.
-
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-fn rsh_bin() -> String { env!("CARGO_BIN_EXE_rsh").to_string() }
+fn rsh_bin() -> String {
+    env!("CARGO_BIN_EXE_rsh").to_string()
+}
 
 fn run(script: &str, stdin: &str) -> (String, String, i32) {
     let mut child = Command::new(rsh_bin())
-        .arg("-c").arg(script)
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-        .spawn().expect("spawn");
-    child.stdin.as_mut().unwrap().write_all(stdin.as_bytes()).unwrap();
+        .arg("-c")
+        .arg(script)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(stdin.as_bytes())
+        .unwrap();
     let out = child.wait_with_output().expect("wait");
     (
         String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -78,10 +88,7 @@ fn headers_basic() {
 
 #[test]
 fn headers_short_row_gets_null() {
-    let (out, _, _) = run(
-        "from-json | headers | to-json",
-        r#"[["a","b","c"],[1,2]]"#,
-    );
+    let (out, _, _) = run("from-json | headers | to-json", r#"[["a","b","c"],[1,2]]"#);
     assert!(out.contains("\"c\": null"));
 }
 
@@ -91,7 +98,10 @@ fn headers_short_row_gets_null() {
 
 #[test]
 fn histogram_counts_descending() {
-    let (out, _, _) = run("from-json | histogram | to-json", r#"["x","y","x","x","y","z"]"#);
+    let (out, _, _) = run(
+        "from-json | histogram | to-json",
+        r#"["x","y","x","x","y","z"]"#,
+    );
     // x appears 3, y 2, z 1 — sorted desc.
     let pos_x = out.find("\"value\": \"x\"").unwrap();
     let pos_y = out.find("\"value\": \"y\"").unwrap();

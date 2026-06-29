@@ -7,7 +7,6 @@
 /// - OSC 777:  Terminal notification (iTerm2, Kitty)
 /// - OSC 1337: iTerm2 proprietary (CurrentDir)
 /// - OSC 0/2:  Window/tab title
-
 use std::env;
 
 /// Percent-encode a path for use in file:// URIs (OSC 7).
@@ -16,8 +15,7 @@ fn percent_encode_path(path: &str) -> String {
     let mut encoded = String::with_capacity(path.len());
     for byte in path.bytes() {
         match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9'
-            | b'/' | b'.' | b'-' | b'_' | b'~' => {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'.' | b'-' | b'_' | b'~' => {
                 encoded.push(byte as char);
             }
             _ => {

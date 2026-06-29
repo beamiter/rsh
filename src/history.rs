@@ -1,6 +1,5 @@
 /// History management: file I/O, in-memory ring, search.
 /// Supports timestamped entries for rich Ctrl+R panel display.
-
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
@@ -41,7 +40,9 @@ impl History {
             let reader = std::io::BufReader::new(file);
             for line in reader.lines() {
                 if let Ok(line) = line {
-                    if line.is_empty() { continue; }
+                    if line.is_empty() {
+                        continue;
+                    }
                     self.entries.push(Self::parse_line(&line));
                 }
             }
@@ -58,7 +59,11 @@ impl History {
         let parts: Vec<&str> = line.splitn(3, '\t').collect();
         if parts.len() == 3 {
             if let Ok(ts) = parts[0].parse::<u64>() {
-                let cwd = if parts[1].is_empty() { None } else { Some(parts[1].to_string()) };
+                let cwd = if parts[1].is_empty() {
+                    None
+                } else {
+                    Some(parts[1].to_string())
+                };
                 return HistoryEntry {
                     command: parts[2].to_string(),
                     timestamp: ts,
@@ -93,8 +98,12 @@ impl History {
 
     pub fn add_with_cwd(&mut self, entry: &str, cwd: Option<&str>) {
         let command = entry.trim().to_string();
-        if command.is_empty() { return; }
-        if self.entries.last().map(|e| e.command.as_str()) == Some(&command) { return; }
+        if command.is_empty() {
+            return;
+        }
+        if self.entries.last().map(|e| e.command.as_str()) == Some(&command) {
+            return;
+        }
 
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -113,7 +122,11 @@ impl History {
         }
         self.position = self.entries.len();
 
-        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&self.file_path) {
+        if let Ok(mut file) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.file_path)
+        {
             writeln!(file, "{}", Self::format_entry(&he)).ok();
         }
     }
@@ -158,7 +171,9 @@ impl History {
     }
 
     pub fn search_prefix(&self, prefix: &str) -> Option<&str> {
-        if prefix.is_empty() { return None; }
+        if prefix.is_empty() {
+            return None;
+        }
         for entry in self.entries.iter().rev() {
             if entry.command.starts_with(prefix) && entry.command.len() > prefix.len() {
                 return Some(&entry.command);
@@ -168,8 +183,12 @@ impl History {
     }
 
     pub fn search_substring(&self, query: &str) -> Vec<&str> {
-        if query.is_empty() { return Vec::new(); }
-        self.entries.iter().rev()
+        if query.is_empty() {
+            return Vec::new();
+        }
+        self.entries
+            .iter()
+            .rev()
             .filter(|e| e.command.contains(query))
             .map(|e| e.command.as_str())
             .collect()
@@ -177,13 +196,16 @@ impl History {
 
     /// Fuzzy search with metadata: returns (command, matched_indices, timestamp, cwd).
     pub fn search_fuzzy(&self, query: &str) -> Vec<(String, Vec<usize>)> {
-        self.search_fuzzy_rich(query).into_iter()
+        self.search_fuzzy_rich(query)
+            .into_iter()
             .map(|(cmd, idx, _, _)| (cmd, idx))
             .collect()
     }
 
     pub fn search_fuzzy_rich(&self, query: &str) -> Vec<(String, Vec<usize>, u64, Option<String>)> {
-        if query.is_empty() { return Vec::new(); }
+        if query.is_empty() {
+            return Vec::new();
+        }
         let query_lower: Vec<char> = query.to_lowercase().chars().collect();
         let mut results: Vec<(String, Vec<usize>, i32, u64, Option<String>)> = Vec::new();
 
@@ -200,24 +222,39 @@ impl History {
                     ));
                 }
             }
-            if results.len() >= 20 { break; }
+            if results.len() >= 20 {
+                break;
+            }
         }
 
         results.sort_by(|a, b| b.2.cmp(&a.2));
-        results.into_iter().map(|(cmd, idx, _, ts, cwd)| (cmd, idx, ts, cwd)).collect()
+        results
+            .into_iter()
+            .map(|(cmd, idx, _, ts, cwd)| (cmd, idx, ts, cwd))
+            .collect()
     }
 
     pub fn format_relative_time(timestamp: u64) -> String {
-        if timestamp == 0 { return String::new(); }
+        if timestamp == 0 {
+            return String::new();
+        }
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let diff = now.saturating_sub(timestamp);
-        if diff < 60 { return format!("{}s", diff); }
-        if diff < 3600 { return format!("{}m", diff / 60); }
-        if diff < 86400 { return format!("{}h", diff / 3600); }
-        if diff < 604800 { return format!("{}d", diff / 86400); }
+        if diff < 60 {
+            return format!("{}s", diff);
+        }
+        if diff < 3600 {
+            return format!("{}m", diff / 60);
+        }
+        if diff < 86400 {
+            return format!("{}h", diff / 3600);
+        }
+        if diff < 604800 {
+            return format!("{}d", diff / 86400);
+        }
         format!("{}w", diff / 604800)
     }
 }

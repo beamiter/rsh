@@ -72,7 +72,11 @@ fn char_in_class(ch: char, negated: bool, ranges: &[(char, char)]) -> bool {
             break;
         }
     }
-    if negated { !found } else { found }
+    if negated {
+        !found
+    } else {
+        found
+    }
 }
 
 /// Iterative two-pointer glob matching (O(n*m) worst case, no stack overflow).
@@ -242,7 +246,12 @@ fn try_match_subpattern(pattern: &str, value: &[char], start: usize) -> Option<u
 }
 
 /// Helper: Try to match pattern from pi position
-fn try_match_subpattern_from(pattern: &[char], pi: usize, value: &[char], vi: usize) -> Option<usize> {
+fn try_match_subpattern_from(
+    pattern: &[char],
+    pi: usize,
+    value: &[char],
+    vi: usize,
+) -> Option<usize> {
     let mut pi = pi;
     let mut vi = vi;
 
@@ -363,7 +372,9 @@ fn match_extglob_recursive(pattern: &str, value: &str, pi: usize, vi: usize) -> 
                         let mut current_vi = vi;
                         loop {
                             // Try to match one more occurrence
-                            if let Some(matched_len) = matches_any_pattern(&patterns, &v, current_vi) {
+                            if let Some(matched_len) =
+                                matches_any_pattern(&patterns, &v, current_vi)
+                            {
                                 current_vi += matched_len;
                             } else {
                                 break;
@@ -383,7 +394,9 @@ fn match_extglob_recursive(pattern: &str, value: &str, pi: usize, vi: usize) -> 
                             let mut prev_vi = vi;
                             let mut test_vi = vi;
                             while test_vi < current_vi {
-                                if let Some(matched_len) = matches_any_pattern(&patterns, &v, test_vi) {
+                                if let Some(matched_len) =
+                                    matches_any_pattern(&patterns, &v, test_vi)
+                                {
                                     prev_vi = test_vi + matched_len;
                                     test_vi = prev_vi;
                                 } else {
@@ -416,7 +429,9 @@ fn match_extglob_recursive(pattern: &str, value: &str, pi: usize, vi: usize) -> 
 
                         // Keep matching greedily
                         loop {
-                            if let Some(matched_len) = matches_any_pattern(&patterns, &v, current_vi) {
+                            if let Some(matched_len) =
+                                matches_any_pattern(&patterns, &v, current_vi)
+                            {
                                 current_vi += matched_len;
                             } else {
                                 break;
@@ -432,7 +447,9 @@ fn match_extglob_recursive(pattern: &str, value: &str, pi: usize, vi: usize) -> 
                             let mut prev_vi = vi;
                             let mut test_vi = vi;
                             while test_vi < current_vi {
-                                if let Some(matched_len) = matches_any_pattern(&patterns, &v, test_vi) {
+                                if let Some(matched_len) =
+                                    matches_any_pattern(&patterns, &v, test_vi)
+                                {
                                     prev_vi = test_vi + matched_len;
                                     test_vi = prev_vi;
                                 } else {

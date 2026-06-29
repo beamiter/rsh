@@ -1,7 +1,6 @@
 /// AI-powered command suggestions: natural language → shell command.
 /// Supports OpenAI, Anthropic, and Ollama (local) providers.
 /// Runs inference in a background thread, communicates via channels.
-
 use std::sync::mpsc;
 use std::thread;
 
@@ -42,12 +41,16 @@ impl AiConfig {
 
         let (api_key, default_model, default_url) = match &provider {
             AiProvider::OpenAI => (
-                std::env::var("OPENAI_API_KEY").ok().or_else(|| std::env::var("RSH_AI_API_KEY").ok()),
+                std::env::var("OPENAI_API_KEY")
+                    .ok()
+                    .or_else(|| std::env::var("RSH_AI_API_KEY").ok()),
                 "gpt-4o-mini".to_string(),
                 "https://api.openai.com/v1".to_string(),
             ),
             AiProvider::Anthropic => (
-                std::env::var("ANTHROPIC_API_KEY").ok().or_else(|| std::env::var("RSH_AI_API_KEY").ok()),
+                std::env::var("ANTHROPIC_API_KEY")
+                    .ok()
+                    .or_else(|| std::env::var("RSH_AI_API_KEY").ok()),
                 "claude-sonnet-4-20250514".to_string(),
                 "https://api.anthropic.com".to_string(),
             ),
@@ -61,7 +64,12 @@ impl AiConfig {
         let model = std::env::var("RSH_AI_MODEL").unwrap_or(default_model);
         let base_url = std::env::var("RSH_AI_BASE_URL").unwrap_or(default_url);
 
-        Some(AiConfig { provider, api_key, model, base_url })
+        Some(AiConfig {
+            provider,
+            api_key,
+            model,
+            base_url,
+        })
     }
 }
 
@@ -105,7 +113,10 @@ impl AiWorker {
             }
         });
 
-        AiWorker { tx: req_tx, rx: resp_rx }
+        AiWorker {
+            tx: req_tx,
+            rx: resp_rx,
+        }
     }
 
     pub fn request(&self, req: AiRequest) {
@@ -121,7 +132,7 @@ fn build_system_prompt(ctx: &AiContext) -> String {
     let mut sys = String::from(
         "You are a shell command generator. Given a natural language description, \
          output ONLY the shell command. No explanation, no markdown, no quotes around it. \
-         Just the raw command that can be executed directly.\n\n"
+         Just the raw command that can be executed directly.\n\n",
     );
     sys.push_str(&format!("OS: {}\n", ctx.os));
     sys.push_str(&format!("Current directory: {}\n", ctx.cwd));
@@ -141,7 +152,7 @@ fn build_fix_prompt(ctx: &AiContext) -> String {
     let mut sys = String::from(
         "You are a shell command fixer. Given a failed command with its error output, \
          output ONLY the corrected shell command. No explanation, no markdown, no quotes. \
-         Just the raw fixed command.\n\n"
+         Just the raw fixed command.\n\n",
     );
     sys.push_str(&format!("OS: {}\n", ctx.os));
     sys.push_str(&format!("Current directory: {}\n", ctx.cwd));
@@ -201,19 +212,18 @@ fn call_openai(config: &AiConfig, system: &str, user: &str) -> AiResponse {
         "temperature": 0.1
     });
 
-    let mut req = ai_agent().post(&url)
+    let mut req = ai_agent()
+        .post(&url)
         .set("Content-Type", "application/json");
     if let Some(ref key) = config.api_key {
         req = req.set("Authorization", &format!("Bearer {}", key));
     }
 
     match req.send_string(&body.to_string()) {
-        Ok(resp) => {
-            match resp.into_string() {
-                Ok(text) => parse_openai_response(&text),
-                Err(e) => AiResponse::Error(format!("Read error: {}", e)),
-            }
-        }
+        Ok(resp) => match resp.into_string() {
+            Ok(text) => parse_openai_response(&text),
+            Err(e) => AiResponse::Error(format!("Read error: {}", e)),
+        },
         Err(e) => AiResponse::Error(format!("Request failed: {}", e)),
     }
 }
@@ -230,7 +240,8 @@ fn call_anthropic(config: &AiConfig, system: &str, user: &str) -> AiResponse {
         ]
     });
 
-    let mut req = ai_agent().post(&url)
+    let mut req = ai_agent()
+        .post(&url)
         .set("Content-Type", "application/json")
         .set("anthropic-version", "2023-06-01");
     if let Some(ref key) = config.api_key {
@@ -238,12 +249,10 @@ fn call_anthropic(config: &AiConfig, system: &str, user: &str) -> AiResponse {
     }
 
     match req.send_string(&body.to_string()) {
-        Ok(resp) => {
-            match resp.into_string() {
-                Ok(text) => parse_anthropic_response(&text),
-                Err(e) => AiResponse::Error(format!("Read error: {}", e)),
-            }
-        }
+        Ok(resp) => match resp.into_string() {
+            Ok(text) => parse_anthropic_response(&text),
+            Err(e) => AiResponse::Error(format!("Read error: {}", e)),
+        },
         Err(e) => AiResponse::Error(format!("Request failed: {}", e)),
     }
 }
@@ -262,16 +271,15 @@ fn call_ollama(config: &AiConfig, system: &str, user: &str) -> AiResponse {
         }
     });
 
-    match ai_agent().post(&url)
+    match ai_agent()
+        .post(&url)
         .set("Content-Type", "application/json")
         .send_string(&body.to_string())
     {
-        Ok(resp) => {
-            match resp.into_string() {
-                Ok(text) => parse_ollama_response(&text),
-                Err(e) => AiResponse::Error(format!("Read error: {}", e)),
-            }
-        }
+        Ok(resp) => match resp.into_string() {
+            Ok(text) => parse_ollama_response(&text),
+            Err(e) => AiResponse::Error(format!("Read error: {}", e)),
+        },
         Err(e) => AiResponse::Error(format!("Request failed: {}", e)),
     }
 }

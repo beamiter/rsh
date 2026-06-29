@@ -1,5 +1,4 @@
 /// Real-time syntax highlighting via lenient tokenization.
-
 use crate::environment::ShellState;
 use crate::parser::lexer::{self, Token};
 use crossterm::style::Color;
@@ -19,7 +18,9 @@ pub fn highlight(buffer: &str, state: &mut ShellState) -> Vec<StyledSpan> {
     let mut last_end = 0;
 
     for spanned in &tokens {
-        if spanned.token == Token::Eof { break; }
+        if spanned.token == Token::Eof {
+            break;
+        }
 
         let start = spanned.span.0;
         let end = spanned.span.1;
@@ -28,7 +29,9 @@ pub fn highlight(buffer: &str, state: &mut ShellState) -> Vec<StyledSpan> {
         if start > last_end {
             spans.push(StyledSpan {
                 text: buffer[last_end..start].to_string(),
-                fg: None, bold: false, underline: false,
+                fg: None,
+                bold: false,
+                underline: false,
             });
         }
 
@@ -45,51 +48,120 @@ pub fn highlight(buffer: &str, state: &mut ShellState) -> Vec<StyledSpan> {
                 let is_signed = crate::signature::SIGNATURES.contains_key(raw.as_str());
                 let is_user_fn = state.user_signatures.contains_key(&raw)
                     || state.user_typed_fns.contains_key(&raw);
-                if is_builtin_cmd(&raw) || is_signed || is_user_fn || state.command_in_path(&raw)
-                    || state.aliases.contains_key(&raw) || state.functions.contains_key(&raw)
+                if is_builtin_cmd(&raw)
+                    || is_signed
+                    || is_user_fn
+                    || state.command_in_path(&raw)
+                    || state.aliases.contains_key(&raw)
+                    || state.functions.contains_key(&raw)
                 {
-                    StyledSpan { text, fg: Some(Color::Green), bold: true, underline: false }
+                    StyledSpan {
+                        text,
+                        fg: Some(Color::Green),
+                        bold: true,
+                        underline: false,
+                    }
                 } else if raw.contains('/') {
                     // Looks like a path — show as valid (skip stat on every keystroke)
-                    StyledSpan { text, fg: Some(Color::Green), bold: true, underline: true }
+                    StyledSpan {
+                        text,
+                        fg: Some(Color::Green),
+                        bold: true,
+                        underline: true,
+                    }
                 } else {
-                    StyledSpan { text, fg: Some(Color::Red), bold: true, underline: false }
+                    StyledSpan {
+                        text,
+                        fg: Some(Color::Red),
+                        bold: true,
+                        underline: false,
+                    }
                 }
             }
             Token::Word(w) => {
                 let raw = strip_quotes(w);
                 if raw.starts_with('$') {
-                    StyledSpan { text, fg: Some(Color::Cyan), bold: false, underline: false }
+                    StyledSpan {
+                        text,
+                        fg: Some(Color::Cyan),
+                        bold: false,
+                        underline: false,
+                    }
                 } else if raw.starts_with('-') {
-                    StyledSpan { text, fg: Some(Color::White), bold: false, underline: false }
+                    StyledSpan {
+                        text,
+                        fg: Some(Color::White),
+                        bold: false,
+                        underline: false,
+                    }
                 } else if raw.starts_with('\'') || raw.starts_with('"') {
-                    StyledSpan { text, fg: Some(Color::Yellow), bold: false, underline: false }
+                    StyledSpan {
+                        text,
+                        fg: Some(Color::Yellow),
+                        bold: false,
+                        underline: false,
+                    }
                 } else {
-                    StyledSpan { text, fg: None, bold: false, underline: false }
+                    StyledSpan {
+                        text,
+                        fg: None,
+                        bold: false,
+                        underline: false,
+                    }
                 }
             }
             Token::Pipe | Token::PipeAnd | Token::And | Token::Or => {
                 is_command_pos = true;
-                StyledSpan { text, fg: Some(Color::Magenta), bold: true, underline: false }
+                StyledSpan {
+                    text,
+                    fg: Some(Color::Magenta),
+                    bold: true,
+                    underline: false,
+                }
             }
             Token::AmpBang => {
                 is_command_pos = true;
-                StyledSpan { text, fg: Some(Color::Magenta), bold: true, underline: false }
+                StyledSpan {
+                    text,
+                    fg: Some(Color::Magenta),
+                    bold: true,
+                    underline: false,
+                }
             }
             Token::Semi | Token::Amp => {
                 is_command_pos = true;
-                StyledSpan { text, fg: Some(Color::Magenta), bold: false, underline: false }
+                StyledSpan {
+                    text,
+                    fg: Some(Color::Magenta),
+                    bold: false,
+                    underline: false,
+                }
             }
-            Token::RedirectOut | Token::RedirectAppend | Token::RedirectIn |
-            Token::HereDoc | Token::HereDocStrip | Token::HereString | Token::DupFd | Token::RedirectFd(_, _) => {
-                StyledSpan { text, fg: Some(Color::Blue), bold: false, underline: false }
-            }
-            Token::LParen | Token::RParen | Token::LBrace | Token::RBrace => {
-                StyledSpan { text, fg: Some(Color::Yellow), bold: true, underline: false }
-            }
-            _ => {
-                StyledSpan { text, fg: None, bold: false, underline: false }
-            }
+            Token::RedirectOut
+            | Token::RedirectAppend
+            | Token::RedirectIn
+            | Token::HereDoc
+            | Token::HereDocStrip
+            | Token::HereString
+            | Token::DupFd
+            | Token::RedirectFd(_, _) => StyledSpan {
+                text,
+                fg: Some(Color::Blue),
+                bold: false,
+                underline: false,
+            },
+            Token::LParen | Token::RParen | Token::LBrace | Token::RBrace => StyledSpan {
+                text,
+                fg: Some(Color::Yellow),
+                bold: true,
+                underline: false,
+            },
+            _ => StyledSpan {
+                text,
+                fg: None,
+                bold: false,
+                underline: false,
+            },
         };
 
         // Track command position
@@ -105,7 +177,9 @@ pub fn highlight(buffer: &str, state: &mut ShellState) -> Vec<StyledSpan> {
     if last_end < buffer.len() {
         spans.push(StyledSpan {
             text: buffer[last_end..].to_string(),
-            fg: None, bold: false, underline: false,
+            fg: None,
+            bold: false,
+            underline: false,
         });
     }
 
@@ -142,14 +216,20 @@ fn strip_quotes(s: &str) -> String {
         match c {
             '\'' => {
                 while let Some(&c2) = chars.peek() {
-                    if c2 == '\'' { chars.next(); break; }
+                    if c2 == '\'' {
+                        chars.next();
+                        break;
+                    }
                     result.push(c2);
                     chars.next();
                 }
             }
             '"' => {
                 while let Some(&c2) = chars.peek() {
-                    if c2 == '"' { chars.next(); break; }
+                    if c2 == '"' {
+                        chars.next();
+                        break;
+                    }
                     result.push(c2);
                     chars.next();
                 }

@@ -1,5 +1,4 @@
 /// Main shell REPL loop.
-
 use crate::builtins;
 use crate::config;
 use crate::editor::Editor;
@@ -146,7 +145,9 @@ fn expand_history(line: &str, history: &crate::history::History) -> Option<Strin
                     }
                 }
                 let n: usize = num_str.parse().unwrap_or(0);
-                if n == 0 { return None; }
+                if n == 0 {
+                    return None;
+                }
                 result.push_str(history.get(n - 1)?);
             }
             Some(&'-') => {
@@ -161,7 +162,9 @@ fn expand_history(line: &str, history: &crate::history::History) -> Option<Strin
                     }
                 }
                 let n: usize = num_str.parse().unwrap_or(0);
-                if n == 0 || n > history.len() { return None; }
+                if n == 0 || n > history.len() {
+                    return None;
+                }
                 result.push_str(history.get(history.len() - n)?);
             }
             _ => {
@@ -267,7 +270,9 @@ impl Shell {
         loop {
             // Check background jobs
             self.state.jobs.check_background();
-            self.state.jobs.notify_done_with_notification(self.state.notification_threshold);
+            self.state
+                .jobs
+                .notify_done_with_notification(self.state.notification_threshold);
 
             // Run precmd hooks
             let precmd = self.state.hooks.precmd.clone();
@@ -285,7 +290,9 @@ impl Shell {
             match self.editor.read_line(&mut self.state, &mut self.history) {
                 Ok(Some(line)) => {
                     let line = line.trim().to_string();
-                    if line.is_empty() { continue; }
+                    if line.is_empty() {
+                        continue;
+                    }
 
                     // History expansion
                     let line = match expand_history(&line, &self.history) {
@@ -301,7 +308,14 @@ impl Shell {
                         }
                     };
 
-                    self.history.add_with_cwd(&line, std::env::current_dir().ok().as_ref().map(|p| p.to_string_lossy().as_ref().to_string()).as_deref());
+                    self.history.add_with_cwd(
+                        &line,
+                        std::env::current_dir()
+                            .ok()
+                            .as_ref()
+                            .map(|p| p.to_string_lossy().as_ref().to_string())
+                            .as_deref(),
+                    );
                     self.state.last_command = Some(line.clone());
 
                     // Run preexec hooks
@@ -378,11 +392,17 @@ impl Shell {
     fn run_from_stdin(&mut self) {
         // Read all lines from stdin first to avoid holding the lock during execution
         let stdin = io::stdin();
-        let lines: Vec<String> = stdin.lock().lines().collect::<Result<_, _>>().unwrap_or_default();
+        let lines: Vec<String> = stdin
+            .lock()
+            .lines()
+            .collect::<Result<_, _>>()
+            .unwrap_or_default();
 
         for line in lines {
             let line = line.trim().to_string();
-            if line.is_empty() { continue; }
+            if line.is_empty() {
+                continue;
+            }
 
             // History expansion
             let line = match expand_history(&line, &self.history) {
@@ -398,7 +418,14 @@ impl Shell {
                 }
             };
 
-            self.history.add_with_cwd(&line, std::env::current_dir().ok().as_ref().map(|p| p.to_string_lossy().as_ref().to_string()).as_deref());
+            self.history.add_with_cwd(
+                &line,
+                std::env::current_dir()
+                    .ok()
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().as_ref().to_string())
+                    .as_deref(),
+            );
 
             // Run preexec hooks
             let preexec = self.state.hooks.preexec.clone();

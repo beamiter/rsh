@@ -1,8 +1,7 @@
 /// Job control: process groups, fg/bg, job table, async notifications.
-
 use nix::sys::signal::{kill, Signal};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
-use nix::unistd::{Pid, tcsetpgrp};
+use nix::unistd::{tcsetpgrp, Pid};
 use std::fmt;
 use std::time::{Duration, Instant};
 
@@ -39,7 +38,10 @@ pub struct JobTable {
 
 impl JobTable {
     pub fn new() -> Self {
-        JobTable { jobs: Vec::new(), next_id: 1 }
+        JobTable {
+            jobs: Vec::new(),
+            next_id: 1,
+        }
     }
 
     pub fn add(&mut self, pid: Pid, command: String) -> usize {
@@ -60,16 +62,22 @@ impl JobTable {
     }
 
     pub fn get_last_stopped(&mut self) -> Option<&mut Job> {
-        self.jobs.iter_mut().rev().find(|j| j.status == JobStatus::Stopped)
+        self.jobs
+            .iter_mut()
+            .rev()
+            .find(|j| j.status == JobStatus::Stopped)
     }
 
     pub fn get_last(&mut self) -> Option<&mut Job> {
-        self.jobs.iter_mut().rev()
+        self.jobs
+            .iter_mut()
+            .rev()
             .find(|j| j.status == JobStatus::Running || j.status == JobStatus::Stopped)
     }
 
     pub fn remove_done(&mut self) {
-        self.jobs.retain(|j| !matches!(j.status, JobStatus::Done(_)));
+        self.jobs
+            .retain(|j| !matches!(j.status, JobStatus::Done(_)));
     }
 
     pub fn notify_done(&mut self) {
@@ -84,7 +92,10 @@ impl JobTable {
                 if code == 0 {
                     eprintln!("[{}]+  Done  ({})  {}", job.id, dur, job.command);
                 } else {
-                    eprintln!("[{}]+  Failed({})  ({})  {}", job.id, code, dur, job.command);
+                    eprintln!(
+                        "[{}]+  Failed({})  ({})  {}",
+                        job.id, code, dur, job.command
+                    );
                 }
                 if elapsed > threshold {
                     send_notification(&job.command, code, elapsed);
@@ -116,7 +127,13 @@ impl JobTable {
     pub fn print_jobs(&self) {
         for job in &self.jobs {
             let elapsed = job.start_time.elapsed();
-            println!("[{}]+  {}  ({:.1}s)  {}", job.id, job.status, elapsed.as_secs_f64(), job.command);
+            println!(
+                "[{}]+  {}  ({:.1}s)  {}",
+                job.id,
+                job.status,
+                elapsed.as_secs_f64(),
+                job.command
+            );
         }
     }
 
@@ -128,7 +145,10 @@ impl JobTable {
                 Ok(WaitStatus::Stopped(_, _)) => {
                     if let Some(job) = self.jobs.iter_mut().find(|j| j.pid == pid) {
                         job.status = JobStatus::Stopped;
-                        eprintln!("\n[{}]+  Stopped                    {}", job.id, job.command);
+                        eprintln!(
+                            "\n[{}]+  Stopped                    {}",
+                            job.id, job.command
+                        );
                     }
                     return 148;
                 }
@@ -171,9 +191,15 @@ impl JobTable {
 fn send_notification(command: &str, exit_code: i32, elapsed: Duration) {
     let dur = format_job_duration(elapsed);
     let (summary, body) = if exit_code == 0 {
-        ("Command completed".to_string(), format!("{} ({})", command, dur))
+        (
+            "Command completed".to_string(),
+            format!("{} ({})", command, dur),
+        )
     } else {
-        (format!("Command failed (exit {})", exit_code), format!("{} ({})", command, dur))
+        (
+            format!("Command failed (exit {})", exit_code),
+            format!("{} ({})", command, dur),
+        )
     };
 
     // OSC 777 terminal notification (iTerm2, Kitty, etc.)

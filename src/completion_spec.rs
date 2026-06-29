@@ -1,6 +1,5 @@
 /// Extensible completion spec system: data-driven CLI completion definitions.
 /// Supports JSON specs for 500+ CLI tools, compatible with Fig spec subset.
-
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -111,7 +110,9 @@ impl SpecRegistry {
     }
 
     fn load_user_specs(&mut self) {
-        if !self.user_dir.exists() { return; }
+        if !self.user_dir.exists() {
+            return;
+        }
         if let Ok(entries) = std::fs::read_dir(&self.user_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -136,7 +137,11 @@ impl SpecRegistry {
 
     /// Resolve completion context: walk the spec tree based on typed words.
     /// Returns the active node (subcommand or root) and remaining args.
-    pub fn resolve_context<'a>(&'a self, command: &str, words: &[&str]) -> Option<CompletionContext<'a>> {
+    pub fn resolve_context<'a>(
+        &'a self,
+        command: &str,
+        words: &[&str],
+    ) -> Option<CompletionContext<'a>> {
         let spec = self.specs.get(command)?;
 
         let mut current_options = &spec.options;
@@ -179,7 +184,10 @@ pub struct CompletionContext<'a> {
 }
 
 impl<'a> CompletionContext<'a> {
-    pub fn complete_prefix(&self, prefix: &str) -> Vec<(String, Option<String>, SpecCompletionKind)> {
+    pub fn complete_prefix(
+        &self,
+        prefix: &str,
+    ) -> Vec<(String, Option<String>, SpecCompletionKind)> {
         let mut results = Vec::new();
 
         // If prefix starts with -, complete options

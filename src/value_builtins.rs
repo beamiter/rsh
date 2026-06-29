@@ -2,7 +2,6 @@
 ///
 /// Each fn takes `PipelineData` input and returns `PipelineData`, threading
 /// typed `Value`s through the pipeline without forking.
-
 use crate::environment::ShellState;
 use crate::pipeline_data::PipelineData;
 use crate::value::{render_table, ClosureData, Value};
@@ -145,7 +144,11 @@ fn is_context_only(name: &str) -> bool {
 // Individual builtins
 // ---------------------------------------------------------------------------
 
-fn vb_from_json(input: PipelineData, _args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_from_json(
+    input: PipelineData,
+    _args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let vs = input.into_values()?;
     Ok(PipelineData::Values(vs))
 }
@@ -153,19 +156,33 @@ fn vb_from_json(input: PipelineData, _args: &[String], _state: &mut ShellState) 
 /// Phase 15b — streaming NDJSON parser. Parses one JSON value per line
 /// lazily, so `from-ndjson big.jsonl | take 5 | ...` doesn't need to
 /// touch every line of the file.
-fn vb_from_ndjson(input: PipelineData, _args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_from_ndjson(
+    input: PipelineData,
+    _args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let bytes: Vec<u8> = match input {
         PipelineData::Empty => Vec::new(),
         PipelineData::Bytes(b) => b,
-        PipelineData::Values(vs) => vs.iter().map(|v| v.to_display_string()).collect::<Vec<_>>().join("\n").into_bytes(),
-        PipelineData::Stream(it) => it.map(|v| v.to_display_string()).collect::<Vec<_>>().join("\n").into_bytes(),
+        PipelineData::Values(vs) => vs
+            .iter()
+            .map(|v| v.to_display_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+            .into_bytes(),
+        PipelineData::Stream(it) => it
+            .map(|v| v.to_display_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+            .into_bytes(),
     };
     let s = String::from_utf8_lossy(&bytes).into_owned();
     // Owned String → owned iterator (deferred parse, line-by-line).
     let it = s.into_bytes();
     let s = unsafe { String::from_utf8_unchecked(it) };
     // Split now (cheap) and parse lazily.
-    let lines: Vec<String> = s.lines()
+    let lines: Vec<String> = s
+        .lines()
         .filter(|l| !l.trim().is_empty())
         .map(|l| l.to_string())
         .collect();
@@ -177,18 +194,30 @@ fn vb_from_ndjson(input: PipelineData, _args: &[String], _state: &mut ShellState
     Ok(PipelineData::Stream(Box::new(iter)))
 }
 
-fn vb_to_json(input: PipelineData, _args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_to_json(
+    input: PipelineData,
+    _args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let vs = input.into_values()?;
     let bytes = PipelineData::Values(vs).into_bytes();
     Ok(PipelineData::Bytes(bytes))
 }
 
-fn vb_to_table(input: PipelineData, _args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_to_table(
+    input: PipelineData,
+    _args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let vs = input.into_values()?;
     Ok(PipelineData::Bytes(render_table(&vs).into_bytes()))
 }
 
-fn vb_where(input: PipelineData, args: &[String], state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_where(
+    input: PipelineData,
+    args: &[String],
+    state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     // Closure form: `where {|r| ...}` or `where $f` where f is a Value::Closure.
     if let Some(closure) = lookup_closure(args.first(), state) {
         let vs = input.into_values()?;
@@ -216,7 +245,11 @@ fn vb_where(input: PipelineData, args: &[String], state: &mut ShellState) -> Res
     Ok(PipelineData::Values(out))
 }
 
-fn vb_each(input: PipelineData, args: &[String], state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_each(
+    input: PipelineData,
+    args: &[String],
+    state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     // Split flags out from the closure argument: `each [-k|--keep-empty] {|x| ...}`.
     // Without -k, closure results that are Null are dropped (matches nushell's
     // default of treating Null as "skip this row").
@@ -225,7 +258,11 @@ fn vb_each(input: PipelineData, args: &[String], state: &mut ShellState) -> Resu
     for a in args {
         match a.as_str() {
             "-k" | "--keep-empty" => keep_empty = true,
-            _ => { if closure_arg.is_none() { closure_arg = Some(a); } }
+            _ => {
+                if closure_arg.is_none() {
+                    closure_arg = Some(a);
+                }
+            }
         }
     }
     let closure = match lookup_closure(closure_arg, state) {
@@ -239,7 +276,9 @@ fn vb_each(input: PipelineData, args: &[String], state: &mut ShellState) -> Resu
     let mut out = Vec::with_capacity(vs.len());
     for v in vs {
         let r = crate::executor::apply_closure(&closure, std::slice::from_ref(&v), state)?;
-        if !keep_empty && matches!(r, Value::Null) { continue; }
+        if !keep_empty && matches!(r, Value::Null) {
+            continue;
+        }
         out.push(r);
     }
     Ok(PipelineData::Values(out))
@@ -249,7 +288,11 @@ fn vb_each(input: PipelineData, args: &[String], state: &mut ShellState) -> Resu
 /// preserving input order. Restricted to *pure-expression* closures (the same
 /// fast path used by closure_expr::try_eval) so the workers never touch
 /// ShellState. Non-pure bodies fall back to sequential `each` for correctness.
-fn vb_par_each(input: PipelineData, args: &[String], state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_par_each(
+    input: PipelineData,
+    args: &[String],
+    state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     use std::sync::{Arc, Mutex};
     let mut keep_empty = false;
     let mut closure_arg: Option<&String> = None;
@@ -262,7 +305,11 @@ fn vb_par_each(input: PipelineData, args: &[String], state: &mut ShellState) -> 
                 threads_override = args.get(i + 1).and_then(|s| s.parse().ok());
                 i += 1;
             }
-            _ => { if closure_arg.is_none() { closure_arg = Some(&args[i]); } }
+            _ => {
+                if closure_arg.is_none() {
+                    closure_arg = Some(&args[i]);
+                }
+            }
         }
         i += 1;
     }
@@ -278,7 +325,10 @@ fn vb_par_each(input: PipelineData, args: &[String], state: &mut ShellState) -> 
     // preserved. We probe with an empty var map — try_eval doesn't need the
     // real params to decide if the body is parseable as an expression.
     let probe_vars: std::collections::HashMap<String, Value> = closure.captured.clone();
-    let is_pure = matches!(crate::closure_expr::try_eval(&closure.body_src, &probe_vars), Ok(Some(_)) | Err(_));
+    let is_pure = matches!(
+        crate::closure_expr::try_eval(&closure.body_src, &probe_vars),
+        Ok(Some(_)) | Err(_)
+    );
     if !is_pure {
         // Fall back: defer to vb_each by re-dispatching with the same args.
         return vb_each(input, args, state);
@@ -286,14 +336,24 @@ fn vb_par_each(input: PipelineData, args: &[String], state: &mut ShellState) -> 
 
     let vs = input.into_values()?;
     let n = vs.len();
-    if n == 0 { return Ok(PipelineData::Values(Vec::new())); }
+    if n == 0 {
+        return Ok(PipelineData::Values(Vec::new()));
+    }
 
     let workers = threads_override
-        .unwrap_or_else(|| std::thread::available_parallelism()
-            .map(|p| p.get()).unwrap_or(4))
-        .max(1).min(n);
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|p| p.get())
+                .unwrap_or(4)
+        })
+        .max(1)
+        .min(n);
 
-    let param = closure.params.first().cloned().unwrap_or_else(|| "in".to_string());
+    let param = closure
+        .params
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "in".to_string());
     let body = Arc::new(closure.body_src.clone());
     let captured = Arc::new(closure.captured.clone());
     let param = Arc::new(param);
@@ -309,7 +369,9 @@ fn vb_par_each(input: PipelineData, args: &[String], state: &mut ShellState) -> 
     for w in 0..workers {
         let start = w * chunk;
         let end = (start + chunk).min(n);
-        if start >= end { break; }
+        if start >= end {
+            break;
+        }
         let slice = work[start..end].to_vec();
         let results = results.clone();
         let err_slot = err_slot.clone();
@@ -318,14 +380,19 @@ fn vb_par_each(input: PipelineData, args: &[String], state: &mut ShellState) -> 
         let param = param.clone();
         handles.push(std::thread::spawn(move || {
             for (idx, val) in slice {
-                if err_slot.lock().unwrap().is_some() { return; }
+                if err_slot.lock().unwrap().is_some() {
+                    return;
+                }
                 let mut vars: std::collections::HashMap<String, Value> = (*captured).clone();
                 vars.insert((*param).clone(), val.clone());
                 vars.insert("in".to_string(), val);
                 match crate::closure_expr::try_eval(&body, &vars) {
-                    Ok(Some(v)) => { results.lock().unwrap()[idx] = v; }
+                    Ok(Some(v)) => {
+                        results.lock().unwrap()[idx] = v;
+                    }
                     Ok(None) => {
-                        *err_slot.lock().unwrap() = Some("par-each: closure body is not a pure expression".to_string());
+                        *err_slot.lock().unwrap() =
+                            Some("par-each: closure body is not a pure expression".to_string());
                         return;
                     }
                     Err(msg) => {
@@ -336,7 +403,9 @@ fn vb_par_each(input: PipelineData, args: &[String], state: &mut ShellState) -> 
             }
         }));
     }
-    for h in handles { let _ = h.join(); }
+    for h in handles {
+        let _ = h.join();
+    }
 
     if let Some(msg) = err_slot.lock().unwrap().take() {
         eprintln!("rsh: {}", msg);
@@ -350,12 +419,19 @@ fn vb_par_each(input: PipelineData, args: &[String], state: &mut ShellState) -> 
     let final_out: Vec<Value> = if keep_empty {
         out_vec
     } else {
-        out_vec.into_iter().filter(|v| !matches!(v, Value::Null)).collect()
+        out_vec
+            .into_iter()
+            .filter(|v| !matches!(v, Value::Null))
+            .collect()
     };
     Ok(PipelineData::Values(final_out))
 }
 
-fn vb_sort_by(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_sort_by(
+    input: PipelineData,
+    args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     if args.is_empty() {
         eprintln!("Usage: sort-by <field> [-r]");
         return Err(1);
@@ -367,12 +443,20 @@ fn vb_sort_by(input: PipelineData, args: &[String], _state: &mut ShellState) -> 
         let va = a.get(field);
         let vb = b.get(field);
         let cmp = compare_opt(va, vb);
-        if reverse { cmp.reverse() } else { cmp }
+        if reverse {
+            cmp.reverse()
+        } else {
+            cmp
+        }
     });
     Ok(PipelineData::Values(vs))
 }
 
-fn vb_select(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_select(
+    input: PipelineData,
+    args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     if args.is_empty() {
         eprintln!("Usage: select <field1> [field2] ...");
         return Err(1);
@@ -396,7 +480,11 @@ fn vb_select(input: PipelineData, args: &[String], _state: &mut ShellState) -> R
     Ok(PipelineData::Values(out))
 }
 
-fn vb_group_by(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_group_by(
+    input: PipelineData,
+    args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     if args.is_empty() {
         eprintln!("Usage: group-by <field>");
         return Err(1);
@@ -405,7 +493,10 @@ fn vb_group_by(input: PipelineData, args: &[String], _state: &mut ShellState) ->
     let vs = input.into_values()?;
     let mut groups: IndexMap<String, Vec<Value>> = IndexMap::new();
     for v in vs {
-        let key = v.get(field).map(|fv| fv.to_display_string()).unwrap_or_else(|| "null".to_string());
+        let key = v
+            .get(field)
+            .map(|fv| fv.to_display_string())
+            .unwrap_or_else(|| "null".to_string());
         groups.entry(key).or_default().push(v);
     }
     let mut rec = IndexMap::new();
@@ -415,7 +506,11 @@ fn vb_group_by(input: PipelineData, args: &[String], _state: &mut ShellState) ->
     Ok(PipelineData::Values(vec![Value::Record(rec)]))
 }
 
-fn vb_unique(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_unique(
+    input: PipelineData,
+    args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     // `unique [-c|--count] [field]`. With -c the output is a list of
     // {value, count} records sorted by descending count.
     let mut count_mode = false;
@@ -429,10 +524,14 @@ fn vb_unique(input: PipelineData, args: &[String], _state: &mut ShellState) -> R
     let vs = input.into_values()?;
     if count_mode {
         let mut order: Vec<String> = Vec::new();
-        let mut counts: std::collections::HashMap<String, (Value, i64)> = std::collections::HashMap::new();
+        let mut counts: std::collections::HashMap<String, (Value, i64)> =
+            std::collections::HashMap::new();
         for v in vs {
             let key = match field {
-                Some(f) => v.get(f).map(|fv| fv.to_display_string()).unwrap_or_default(),
+                Some(f) => v
+                    .get(f)
+                    .map(|fv| fv.to_display_string())
+                    .unwrap_or_default(),
                 None => v.to_display_string(),
             };
             let entry = counts.entry(key.clone()).or_insert_with(|| {
@@ -441,13 +540,16 @@ fn vb_unique(input: PipelineData, args: &[String], _state: &mut ShellState) -> R
             });
             entry.1 += 1;
         }
-        let mut rows: Vec<Value> = order.into_iter().map(|k| {
-            let (val, n) = counts.remove(&k).unwrap();
-            let mut rec = IndexMap::new();
-            rec.insert("value".to_string(), val);
-            rec.insert("count".to_string(), Value::Int(n));
-            Value::Record(rec)
-        }).collect();
+        let mut rows: Vec<Value> = order
+            .into_iter()
+            .map(|k| {
+                let (val, n) = counts.remove(&k).unwrap();
+                let mut rec = IndexMap::new();
+                rec.insert("value".to_string(), val);
+                rec.insert("count".to_string(), Value::Int(n));
+                Value::Record(rec)
+            })
+            .collect();
         rows.sort_by(|a, b| {
             let ac = a.get("count").and_then(|v| v.as_f64()).unwrap_or(0.0);
             let bc = b.get("count").and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -459,7 +561,10 @@ fn vb_unique(input: PipelineData, args: &[String], _state: &mut ShellState) -> R
     let mut out = Vec::new();
     for v in vs {
         let key = match field {
-            Some(f) => v.get(f).map(|fv| fv.to_display_string()).unwrap_or_default(),
+            Some(f) => v
+                .get(f)
+                .map(|fv| fv.to_display_string())
+                .unwrap_or_default(),
             None => v.to_display_string(),
         };
         if seen.insert(key) {
@@ -469,12 +574,20 @@ fn vb_unique(input: PipelineData, args: &[String], _state: &mut ShellState) -> R
     Ok(PipelineData::Values(out))
 }
 
-fn vb_count(input: PipelineData, _args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_count(
+    input: PipelineData,
+    _args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let vs = input.into_values()?;
     Ok(PipelineData::Values(vec![Value::Int(vs.len() as i64)]))
 }
 
-fn vb_math(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_math(
+    input: PipelineData,
+    args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     if args.is_empty() {
         eprintln!("Usage: math <op> [field]  (aggregations: sum|avg|min|max|stddev|median|product;  per-element: abs|ceil|floor|round|sqrt|log|log2|log10)");
         return Err(1);
@@ -483,7 +596,10 @@ fn vb_math(input: PipelineData, args: &[String], _state: &mut ShellState) -> Res
     let field = args.get(1);
 
     // Per-element scalar operations: map over the input rather than aggregate.
-    let elementwise = matches!(op, "abs" | "ceil" | "floor" | "round" | "sqrt" | "log" | "log2" | "log10");
+    let elementwise = matches!(
+        op,
+        "abs" | "ceil" | "floor" | "round" | "sqrt" | "log" | "log2" | "log10"
+    );
     if elementwise {
         let apply = |x: f64| -> f64 {
             match op {
@@ -521,7 +637,9 @@ fn vb_math(input: PipelineData, args: &[String], _state: &mut ShellState) -> Res
     // Aggregations: `math sum field` (extract field from records) OR
     // `math sum` (pipeline is a list of numbers).
     let nums: Vec<f64> = if let Some(f) = field {
-        vs.iter().filter_map(|v| v.get(f).and_then(|fv| fv.as_f64())).collect()
+        vs.iter()
+            .filter_map(|v| v.get(f).and_then(|fv| fv.as_f64()))
+            .collect()
     } else {
         vs.iter().filter_map(|v| v.as_f64()).collect()
     };
@@ -539,7 +657,11 @@ fn vb_math(input: PipelineData, args: &[String], _state: &mut ShellState) -> Res
             let mut sorted = nums.clone();
             sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             let n = sorted.len();
-            if n % 2 == 0 { (sorted[n/2 - 1] + sorted[n/2]) / 2.0 } else { sorted[n/2] }
+            if n % 2 == 0 {
+                (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
+            } else {
+                sorted[n / 2]
+            }
         }
         "stddev" | "std" => {
             let mean = nums.iter().sum::<f64>() / nums.len() as f64;
@@ -563,7 +685,11 @@ fn vb_math(input: PipelineData, args: &[String], _state: &mut ShellState) -> Res
     Ok(PipelineData::Values(vec![out]))
 }
 
-fn vb_from_csv(input: PipelineData, _args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_from_csv(
+    input: PipelineData,
+    _args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let bytes = match input {
         PipelineData::Empty => Vec::new(),
         PipelineData::Bytes(b) => b,
@@ -602,12 +728,20 @@ fn vb_from_csv(input: PipelineData, _args: &[String], _state: &mut ShellState) -
     Ok(PipelineData::Values(out))
 }
 
-fn vb_length(input: PipelineData, _args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_length(
+    input: PipelineData,
+    _args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let vs = input.into_values()?;
     Ok(PipelineData::Values(vec![Value::Int(vs.len() as i64)]))
 }
 
-fn vb_first(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_first(
+    input: PipelineData,
+    args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let n: usize = args.first().and_then(|s| s.parse().ok()).unwrap_or(1);
     if input.is_stream() {
         let vs: Vec<Value> = input.into_value_iter()?.take(n).collect();
@@ -618,14 +752,22 @@ fn vb_first(input: PipelineData, args: &[String], _state: &mut ShellState) -> Re
     Ok(PipelineData::Values(vs))
 }
 
-fn vb_last(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_last(
+    input: PipelineData,
+    args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let n: usize = args.first().and_then(|s| s.parse().ok()).unwrap_or(1);
     let vs = input.into_values()?;
     let start = vs.len().saturating_sub(n);
     Ok(PipelineData::Values(vs[start..].to_vec()))
 }
 
-fn vb_reverse(input: PipelineData, _args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_reverse(
+    input: PipelineData,
+    _args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let mut vs = input.into_values()?;
     vs.reverse();
     Ok(PipelineData::Values(vs))
@@ -635,7 +777,11 @@ fn vb_reverse(input: PipelineData, _args: &[String], _state: &mut ShellState) ->
 // Phase 5d — format converters
 // ---------------------------------------------------------------------------
 
-fn vb_from_yaml(input: PipelineData, _args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_from_yaml(
+    input: PipelineData,
+    _args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let bytes = match input {
         PipelineData::Empty => Vec::new(),
         PipelineData::Bytes(b) => b,
@@ -658,7 +804,11 @@ fn vb_from_yaml(input: PipelineData, _args: &[String], _state: &mut ShellState) 
     Ok(PipelineData::Values(out))
 }
 
-fn vb_to_yaml(input: PipelineData, _args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_to_yaml(
+    input: PipelineData,
+    _args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let vs = input.into_values()?;
     let jval = if vs.len() == 1 {
         vs.into_iter().next().unwrap().to_json()
@@ -672,7 +822,11 @@ fn vb_to_yaml(input: PipelineData, _args: &[String], _state: &mut ShellState) ->
     Ok(PipelineData::Bytes(s.into_bytes()))
 }
 
-fn vb_from_toml(input: PipelineData, _args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_from_toml(
+    input: PipelineData,
+    _args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let bytes = match input {
         PipelineData::Empty => Vec::new(),
         PipelineData::Bytes(b) => b,
@@ -690,7 +844,11 @@ fn vb_from_toml(input: PipelineData, _args: &[String], _state: &mut ShellState) 
     Ok(PipelineData::Values(vec![v]))
 }
 
-fn vb_to_toml(input: PipelineData, _args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_to_toml(
+    input: PipelineData,
+    _args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let vs = input.into_values()?;
     if vs.len() != 1 || !vs[0].is_record() {
         eprintln!("to-toml: expects a single record");
@@ -704,7 +862,11 @@ fn vb_to_toml(input: PipelineData, _args: &[String], _state: &mut ShellState) ->
     Ok(PipelineData::Bytes(s.into_bytes()))
 }
 
-fn vb_from_xml(input: PipelineData, _args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_from_xml(
+    input: PipelineData,
+    _args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     use quick_xml::events::Event;
     use quick_xml::reader::Reader;
 
@@ -744,7 +906,12 @@ fn vb_from_xml(input: PipelineData, _args: &[String], _state: &mut ShellState) -
                     let v = String::from_utf8_lossy(&a.value).to_string();
                     attrs.insert(k, Value::String(v));
                 }
-                let opened = Open { tag, attrs, children: Vec::new(), text: String::new() };
+                let opened = Open {
+                    tag,
+                    attrs,
+                    children: Vec::new(),
+                    text: String::new(),
+                };
                 stack.push(opened);
                 if is_empty {
                     // Synthesize an End event by popping immediately.
@@ -801,7 +968,11 @@ fn vb_from_xml(input: PipelineData, _args: &[String], _state: &mut ShellState) -
     Ok(PipelineData::Values(top_level))
 }
 
-fn vb_to_xml(input: PipelineData, _args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_to_xml(
+    input: PipelineData,
+    _args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let vs = input.into_values()?;
     let mut out = String::new();
     for v in &vs {
@@ -818,7 +989,10 @@ fn render_xml_node(v: &Value, out: &mut String) {
             return;
         }
     };
-    let tag = rec.get("tag").map(|t| t.to_display_string()).unwrap_or_else(|| "item".to_string());
+    let tag = rec
+        .get("tag")
+        .map(|t| t.to_display_string())
+        .unwrap_or_else(|| "item".to_string());
     out.push('<');
     out.push_str(&tag);
     if let Some(Value::Record(attrs)) = rec.get("attrs") {
@@ -855,7 +1029,10 @@ fn render_xml_node(v: &Value, out: &mut String) {
 }
 
 fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 fn yaml_to_json(y: serde_yaml::Value) -> serde_json::Value {
@@ -867,7 +1044,9 @@ fn yaml_to_json(y: serde_yaml::Value) -> serde_json::Value {
             if let Some(i) = n.as_i64() {
                 serde_json::Value::Number(i.into())
             } else if let Some(f) = n.as_f64() {
-                serde_json::Number::from_f64(f).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null)
+                serde_json::Number::from_f64(f)
+                    .map(serde_json::Value::Number)
+                    .unwrap_or(serde_json::Value::Null)
             } else {
                 serde_json::Value::Null
             }
@@ -879,7 +1058,10 @@ fn yaml_to_json(y: serde_yaml::Value) -> serde_json::Value {
             for (k, v) in map {
                 let key = match k {
                     Y::String(s) => s,
-                    other => serde_yaml::to_string(&other).unwrap_or_default().trim().to_string(),
+                    other => serde_yaml::to_string(&other)
+                        .unwrap_or_default()
+                        .trim()
+                        .to_string(),
                 };
                 obj.insert(key, yaml_to_json(v));
             }
@@ -894,7 +1076,9 @@ fn toml_to_json(t: toml::Value) -> serde_json::Value {
     match t {
         T::String(s) => serde_json::Value::String(s),
         T::Integer(i) => serde_json::Value::Number(i.into()),
-        T::Float(f) => serde_json::Number::from_f64(f).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null),
+        T::Float(f) => serde_json::Number::from_f64(f)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
         T::Boolean(b) => serde_json::Value::Bool(b),
         T::Datetime(d) => serde_json::Value::String(d.to_string()),
         T::Array(arr) => serde_json::Value::Array(arr.into_iter().map(toml_to_json).collect()),
@@ -912,7 +1096,11 @@ fn toml_to_json(t: toml::Value) -> serde_json::Value {
 // Phase 5d — structured `ls` and `ps`
 // ---------------------------------------------------------------------------
 
-fn vb_ls(_input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_ls(
+    _input: PipelineData,
+    args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     use std::fs;
     let path = args.first().map(|s| s.as_str()).unwrap_or(".");
     let cwd = std::path::PathBuf::from(path);
@@ -933,9 +1121,17 @@ fn vb_ls(_input: PipelineData, args: &[String], _state: &mut ShellState) -> Resu
             Ok(m) => m,
             Err(_) => continue,
         };
-        let kind = if md.is_dir() { "dir" } else if md.is_symlink() { "link" } else { "file" };
+        let kind = if md.is_dir() {
+            "dir"
+        } else if md.is_symlink() {
+            "link"
+        } else {
+            "file"
+        };
         let size = md.len() as i64;
-        let modified = md.modified().ok()
+        let modified = md
+            .modified()
+            .ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
@@ -947,13 +1143,18 @@ fn vb_ls(_input: PipelineData, args: &[String], _state: &mut ShellState) -> Resu
         out.push(Value::Record(rec));
     }
     out.sort_by(|a, b| {
-        a.get("name").map(|v| v.to_display_string())
+        a.get("name")
+            .map(|v| v.to_display_string())
             .cmp(&b.get("name").map(|v| v.to_display_string()))
     });
     Ok(PipelineData::Values(out))
 }
 
-fn vb_ps(_input: PipelineData, _args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_ps(
+    _input: PipelineData,
+    _args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     use std::fs;
     let mut out = Vec::new();
     let entries = match fs::read_dir("/proc") {
@@ -1001,7 +1202,12 @@ fn vb_ps(_input: PipelineData, _args: &[String], _state: &mut ShellState) -> Res
         rec.insert("cmd".to_string(), Value::String(cmdline));
         out.push(Value::Record(rec));
     }
-    out.sort_by_key(|v| v.get("pid").and_then(|x| x.as_f64()).map(|f| f as i64).unwrap_or(0));
+    out.sort_by_key(|v| {
+        v.get("pid")
+            .and_then(|x| x.as_f64())
+            .map(|f| f as i64)
+            .unwrap_or(0)
+    });
     Ok(PipelineData::Values(out))
 }
 
@@ -1013,8 +1219,14 @@ fn vb_ps(_input: PipelineData, _args: &[String], _state: &mut ShellState) -> Res
 /// `\x01rsh-closure:<idx>\x02` or a let-bound `Value::Closure`.
 fn lookup_closure(arg: Option<&String>, state: &ShellState) -> Option<Arc<ClosureData>> {
     let a = arg?;
-    if let Some(rest) = a.strip_prefix('\u{01}').and_then(|s| s.strip_suffix('\u{02}')) {
-        if let Some(idx) = rest.strip_prefix("rsh-closure:").and_then(|s| s.parse::<usize>().ok()) {
+    if let Some(rest) = a
+        .strip_prefix('\u{01}')
+        .and_then(|s| s.strip_suffix('\u{02}'))
+    {
+        if let Some(idx) = rest
+            .strip_prefix("rsh-closure:")
+            .and_then(|s| s.parse::<usize>().ok())
+        {
             return state.inline_closures.get(idx).cloned();
         }
     }
@@ -1119,16 +1331,28 @@ fn parse_csv_line(line: &str) -> Vec<String> {
 
 fn detect_format(path: &str) -> &'static str {
     let lower = path.to_ascii_lowercase();
-    if lower.ends_with(".json") { "json" }
-    else if lower.ends_with(".yaml") || lower.ends_with(".yml") { "yaml" }
-    else if lower.ends_with(".toml") { "toml" }
-    else if lower.ends_with(".xml") { "xml" }
-    else if lower.ends_with(".csv") { "csv" }
-    else if lower.ends_with(".txt") || lower.ends_with(".md") || lower.ends_with(".log") { "text" }
-    else { "raw" }
+    if lower.ends_with(".json") {
+        "json"
+    } else if lower.ends_with(".yaml") || lower.ends_with(".yml") {
+        "yaml"
+    } else if lower.ends_with(".toml") {
+        "toml"
+    } else if lower.ends_with(".xml") {
+        "xml"
+    } else if lower.ends_with(".csv") {
+        "csv"
+    } else if lower.ends_with(".txt") || lower.ends_with(".md") || lower.ends_with(".log") {
+        "text"
+    } else {
+        "raw"
+    }
 }
 
-fn vb_open(_input: PipelineData, args: &[String], state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_open(
+    _input: PipelineData,
+    args: &[String],
+    state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let path = match args.first() {
         Some(p) => p,
         None => {
@@ -1149,8 +1373,8 @@ fn vb_open(_input: PipelineData, args: &[String], state: &mut ShellState) -> Res
         "json" => vb_from_json(input, &[], state),
         "yaml" => vb_from_yaml(input, &[], state),
         "toml" => vb_from_toml(input, &[], state),
-        "xml"  => vb_from_xml(input, &[], state),
-        "csv"  => vb_from_csv(input, &[], state),
+        "xml" => vb_from_xml(input, &[], state),
+        "csv" => vb_from_csv(input, &[], state),
         // Plain text: surface as a single String value so it can be piped to
         // `lines` / `parse` / `str ...` in Phase 6b.
         "text" => {
@@ -1165,12 +1389,19 @@ fn vb_open(_input: PipelineData, args: &[String], state: &mut ShellState) -> Res
     }
 }
 
-fn vb_save(input: PipelineData, args: &[String], state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_save(
+    input: PipelineData,
+    args: &[String],
+    state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let mut append = false;
     let mut path: Option<&str> = None;
     for a in args {
-        if a == "--append" || a == "-a" { append = true; }
-        else if path.is_none() { path = Some(a.as_str()); }
+        if a == "--append" || a == "-a" {
+            append = true;
+        } else if path.is_none() {
+            path = Some(a.as_str());
+        }
     }
     let path = match path {
         Some(p) => p,
@@ -1185,7 +1416,7 @@ fn vb_save(input: PipelineData, args: &[String], state: &mut ShellState) -> Resu
         "json" => vb_to_json(input, &[], state)?,
         "yaml" => vb_to_yaml(input, &[], state)?,
         "toml" => vb_to_toml(input, &[], state)?,
-        "xml"  => vb_to_xml(input, &[], state)?,
+        "xml" => vb_to_xml(input, &[], state)?,
         // text/raw/csv-fallback: write Bytes as-is; for Values, render Display.
         _ => match input {
             PipelineData::Bytes(b) => PipelineData::Bytes(b),
@@ -1193,7 +1424,9 @@ fn vb_save(input: PipelineData, args: &[String], state: &mut ShellState) -> Resu
             PipelineData::Values(vs) => {
                 let mut s = String::new();
                 for (i, v) in vs.iter().enumerate() {
-                    if i > 0 { s.push('\n'); }
+                    if i > 0 {
+                        s.push('\n');
+                    }
                     s.push_str(&v.to_display_string());
                 }
                 PipelineData::Bytes(s.into_bytes())
@@ -1202,7 +1435,9 @@ fn vb_save(input: PipelineData, args: &[String], state: &mut ShellState) -> Resu
                 let vs: Vec<_> = it.collect();
                 let mut s = String::new();
                 for (i, v) in vs.iter().enumerate() {
-                    if i > 0 { s.push('\n'); }
+                    if i > 0 {
+                        s.push('\n');
+                    }
                     s.push_str(&v.to_display_string());
                 }
                 PipelineData::Bytes(s.into_bytes())
@@ -1217,7 +1452,11 @@ fn vb_save(input: PipelineData, args: &[String], state: &mut ShellState) -> Resu
     use std::io::Write as IoWrite;
     let mut opts = OpenOptions::new();
     opts.write(true).create(true);
-    if append { opts.append(true); } else { opts.truncate(true); }
+    if append {
+        opts.append(true);
+    } else {
+        opts.truncate(true);
+    }
     match opts.open(path) {
         Ok(mut f) => {
             if let Err(e) = f.write_all(&bytes) {
@@ -1247,11 +1486,15 @@ fn input_as_string(input: PipelineData) -> Result<String, i32> {
         PipelineData::Bytes(b) => Ok(String::from_utf8_lossy(&b).into_owned()),
         PipelineData::Values(vs) => {
             if vs.len() == 1 {
-                if let Value::String(s) = &vs[0] { return Ok(s.clone()); }
+                if let Value::String(s) = &vs[0] {
+                    return Ok(s.clone());
+                }
             }
             let mut s = String::new();
             for (i, v) in vs.iter().enumerate() {
-                if i > 0 { s.push('\n'); }
+                if i > 0 {
+                    s.push('\n');
+                }
                 s.push_str(&v.to_display_string());
             }
             Ok(s)
@@ -1260,10 +1503,17 @@ fn input_as_string(input: PipelineData) -> Result<String, i32> {
     }
 }
 
-fn vb_lines(input: PipelineData, _args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_lines(
+    input: PipelineData,
+    _args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let s = input_as_string(input)?;
     // Drop trailing empty line so `echo "a\nb\n"` yields ["a","b"], not ["a","b",""].
-    let mut out: Vec<Value> = s.split('\n').map(|l| Value::String(l.to_string())).collect();
+    let mut out: Vec<Value> = s
+        .split('\n')
+        .map(|l| Value::String(l.to_string()))
+        .collect();
     if let Some(Value::String(last)) = out.last() {
         if last.is_empty() {
             out.pop();
@@ -1272,7 +1522,11 @@ fn vb_lines(input: PipelineData, _args: &[String], _state: &mut ShellState) -> R
     Ok(PipelineData::Values(out))
 }
 
-fn vb_split(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_split(
+    input: PipelineData,
+    args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let sub = match args.first().map(|s| s.as_str()) {
         Some("row") => "row",
         Some("column") => "column",
@@ -1298,7 +1552,11 @@ fn vb_split(input: PipelineData, args: &[String], _state: &mut ShellState) -> Re
             PipelineData::Empty => Ok(PipelineData::Values(Vec::new())),
             PipelineData::Bytes(b) => {
                 let s = String::from_utf8_lossy(&b);
-                Ok(PipelineData::Values(s.split(sep.as_str()).map(|x| Value::String(x.to_string())).collect()))
+                Ok(PipelineData::Values(
+                    s.split(sep.as_str())
+                        .map(|x| Value::String(x.to_string()))
+                        .collect(),
+                ))
             }
             PipelineData::Values(vs) => {
                 let mut out = Vec::new();
@@ -1319,7 +1577,10 @@ fn vb_split(input: PipelineData, args: &[String], _state: &mut ShellState) -> Re
             let parts: Vec<&str> = line.split(sep.as_str()).collect();
             let mut rec = IndexMap::new();
             for (i, p) in parts.iter().enumerate() {
-                let key = names.get(i).cloned().unwrap_or_else(|| format!("column{}", i + 1));
+                let key = names
+                    .get(i)
+                    .cloned()
+                    .unwrap_or_else(|| format!("column{}", i + 1));
                 rec.insert(key, Value::String(p.to_string()));
             }
             Value::Record(rec)
@@ -1339,7 +1600,11 @@ fn vb_split(input: PipelineData, args: &[String], _state: &mut ShellState) -> Re
     }
 }
 
-fn vb_parse(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_parse(
+    input: PipelineData,
+    args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     // `parse [-r|--regex] <pattern>`. With -r the pattern is a raw regex with
     // named captures; without -r the pattern uses `{field}` templates.
     let mut use_regex = false;
@@ -1360,23 +1625,40 @@ fn vb_parse(input: PipelineData, args: &[String], _state: &mut ShellState) -> Re
     let (rx, names) = if use_regex {
         let rx = match regex::Regex::new(pat) {
             Ok(r) => r,
-            Err(e) => { eprintln!("parse: bad regex: {}", e); return Err(1); }
+            Err(e) => {
+                eprintln!("parse: bad regex: {}", e);
+                return Err(1);
+            }
         };
         let names: Vec<String> = rx
             .capture_names()
             .enumerate()
-            .filter_map(|(i, n)| n.map(|s| s.to_string()).or_else(|| if i > 0 { Some(format!("capture{}", i)) } else { None }))
+            .filter_map(|(i, n)| {
+                n.map(|s| s.to_string()).or_else(|| {
+                    if i > 0 {
+                        Some(format!("capture{}", i))
+                    } else {
+                        None
+                    }
+                })
+            })
             .collect();
         (rx, names)
     } else {
         match template_to_regex(pat) {
             Ok(p) => p,
-            Err(e) => { eprintln!("parse: bad template: {}", e); return Err(1); }
+            Err(e) => {
+                eprintln!("parse: bad template: {}", e);
+                return Err(1);
+            }
         }
     };
     let lines: Vec<String> = match input {
         PipelineData::Empty => Vec::new(),
-        PipelineData::Bytes(b) => String::from_utf8_lossy(&b).lines().map(|s| s.to_string()).collect(),
+        PipelineData::Bytes(b) => String::from_utf8_lossy(&b)
+            .lines()
+            .map(|s| s.to_string())
+            .collect(),
         PipelineData::Values(vs) => vs.iter().map(|v| v.to_display_string()).collect(),
         PipelineData::Stream(it) => it.map(|v| v.to_display_string()).collect(),
     };
@@ -1409,7 +1691,9 @@ fn template_to_regex(template: &str) -> Result<(regex::Regex, Vec<String>), Stri
             let mut name = String::new();
             while let Some(&nc) = chars.peek() {
                 chars.next();
-                if nc == '}' { break; }
+                if nc == '}' {
+                    break;
+                }
                 name.push(nc);
             }
             if name.is_empty() {
@@ -1426,13 +1710,22 @@ fn template_to_regex(template: &str) -> Result<(regex::Regex, Vec<String>), Stri
         }
     }
     rx.push('$');
-    regex::Regex::new(&rx).map(|r| (r, names)).map_err(|e| e.to_string())
+    regex::Regex::new(&rx)
+        .map(|r| (r, names))
+        .map_err(|e| e.to_string())
 }
 
-fn vb_str(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_str(
+    input: PipelineData,
+    args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let sub = match args.first().map(|s| s.as_str()) {
         Some(s) => s,
-        None => { eprintln!("str: missing subcommand"); return Err(1); }
+        None => {
+            eprintln!("str: missing subcommand");
+            return Err(1);
+        }
     };
     let rest = &args[1..];
     let map_str = |s: &str| -> Result<String, i32> {
@@ -1467,7 +1760,10 @@ fn vb_str(input: PipelineData, args: &[String], _state: &mut ShellState) -> Resu
                 if use_regex {
                     let rx = match regex::Regex::new(positional[0]) {
                         Ok(r) => r,
-                        Err(e) => { eprintln!("str replace: bad regex: {}", e); return Err(1); }
+                        Err(e) => {
+                            eprintln!("str replace: bad regex: {}", e);
+                            return Err(1);
+                        }
                     };
                     if all {
                         rx.replace_all(s, positional[1].as_str()).into_owned()
@@ -1480,7 +1776,10 @@ fn vb_str(input: PipelineData, args: &[String], _state: &mut ShellState) -> Resu
             }
             "split" => {
                 let sep = rest.first().map(|x| x.as_str()).unwrap_or(" ");
-                return Ok(format!("__rsh_split__{}", s.split(sep).collect::<Vec<_>>().join("\x1f")));
+                return Ok(format!(
+                    "__rsh_split__{}",
+                    s.split(sep).collect::<Vec<_>>().join("\x1f")
+                ));
             }
             "starts-with" => {
                 let p = rest.first().map(|x| x.as_str()).unwrap_or("");
@@ -1499,20 +1798,32 @@ fn vb_str(input: PipelineData, args: &[String], _state: &mut ShellState) -> Resu
                 let ch = rest.get(1).and_then(|x| x.chars().next()).unwrap_or(' ');
                 let need = width.saturating_sub(s.chars().count());
                 let pad: String = std::iter::repeat(ch).take(need).collect();
-                if sub == "pad-left" { format!("{}{}", pad, s) } else { format!("{}{}", s, pad) }
+                if sub == "pad-left" {
+                    format!("{}{}", pad, s)
+                } else {
+                    format!("{}{}", s, pad)
+                }
             }
             "reverse" => s.chars().rev().collect(),
             "distance" => {
                 let other = rest.first().map(|x| x.as_str()).unwrap_or("");
                 return Ok(levenshtein(s, other).to_string());
             }
-            _ => { eprintln!("str: unknown subcommand '{}'", sub); return Err(1); }
+            _ => {
+                eprintln!("str: unknown subcommand '{}'", sub);
+                return Err(1);
+            }
         })
     };
     // Apply per-Value. For Bytes, treat as single string.
     let coerce = |r: String| -> Value {
         if let Some(rest_s) = r.strip_prefix("__rsh_split__") {
-            Value::List(rest_s.split('\x1f').map(|p| Value::String(p.to_string())).collect())
+            Value::List(
+                rest_s
+                    .split('\x1f')
+                    .map(|p| Value::String(p.to_string()))
+                    .collect(),
+            )
         } else if matches!(sub, "length" | "index-of" | "distance") {
             Value::Int(r.parse().unwrap_or(0))
         } else if matches!(sub, "contains" | "starts-with" | "ends-with") {
@@ -1522,7 +1833,10 @@ fn vb_str(input: PipelineData, args: &[String], _state: &mut ShellState) -> Resu
         }
     };
     let convert = |v: Value| -> Result<Value, i32> {
-        let s = match v { Value::String(s) => s, other => other.to_display_string() };
+        let s = match v {
+            Value::String(s) => s,
+            other => other.to_display_string(),
+        };
         Ok(coerce(map_str(&s)?))
     };
     match input {
@@ -1538,12 +1852,16 @@ fn vb_str(input: PipelineData, args: &[String], _state: &mut ShellState) -> Resu
         }
         PipelineData::Values(vs) => {
             let mut out = Vec::with_capacity(vs.len());
-            for v in vs { out.push(convert(v)?); }
+            for v in vs {
+                out.push(convert(v)?);
+            }
             Ok(PipelineData::Values(out))
         }
         PipelineData::Stream(it) => {
             let mut out = Vec::new();
-            for v in it { out.push(convert(v)?); }
+            for v in it {
+                out.push(convert(v)?);
+            }
             Ok(PipelineData::Values(out))
         }
     }
@@ -1560,7 +1878,9 @@ fn parse_cell_path(s: &str) -> Vec<crate::parser::ast::PathSeg> {
     let mut cur = String::new();
     let mut in_bracket = false;
     let flush = |cur: &mut String, out: &mut Vec<PathSeg>| {
-        if cur.is_empty() { return; }
+        if cur.is_empty() {
+            return;
+        }
         // Bare integer segment → Index (nushell-style `0.a.b`).
         if let Ok(n) = cur.parse::<i64>() {
             out.push(PathSeg::Index(n));
@@ -1572,10 +1892,15 @@ fn parse_cell_path(s: &str) -> Vec<crate::parser::ast::PathSeg> {
     for c in s.chars() {
         match c {
             '.' if !in_bracket => flush(&mut cur, &mut out),
-            '[' => { flush(&mut cur, &mut out); in_bracket = true; }
+            '[' => {
+                flush(&mut cur, &mut out);
+                in_bracket = true;
+            }
             ']' => {
                 if in_bracket {
-                    if let Ok(n) = cur.parse::<i64>() { out.push(PathSeg::Index(n)); }
+                    if let Ok(n) = cur.parse::<i64>() {
+                        out.push(PathSeg::Index(n));
+                    }
                     cur.clear();
                     in_bracket = false;
                 }
@@ -1596,7 +1921,9 @@ fn resolve_cell_path<'a>(v: &'a Value, path: &[crate::parser::ast::PathSeg]) -> 
             (PathSeg::Index(i), Value::List(items)) => {
                 let len = items.len() as i64;
                 let idx = if *i < 0 { len + *i } else { *i };
-                if idx < 0 || idx as usize >= items.len() { return None; }
+                if idx < 0 || idx as usize >= items.len() {
+                    return None;
+                }
                 items[idx as usize].clone()
             }
             _ => return None,
@@ -1605,7 +1932,11 @@ fn resolve_cell_path<'a>(v: &'a Value, path: &[crate::parser::ast::PathSeg]) -> 
     Some(cur)
 }
 
-fn vb_get(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_get(
+    input: PipelineData,
+    args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     use crate::parser::ast::PathSeg;
     // `get [-i|--ignore-errors] <path>` — with -i, missing path returns Null
     // instead of erroring (matches nushell's `get -i` / `get --optional`).
@@ -1614,12 +1945,19 @@ fn vb_get(input: PipelineData, args: &[String], _state: &mut ShellState) -> Resu
     for a in args {
         match a.as_str() {
             "-i" | "--ignore-errors" | "--optional" => ignore = true,
-            _ => { if path_arg.is_none() { path_arg = Some(a); } }
+            _ => {
+                if path_arg.is_none() {
+                    path_arg = Some(a);
+                }
+            }
         }
     }
     let path_str = match path_arg {
         Some(p) => p,
-        None => { eprintln!("get: missing cell-path"); return Err(1); }
+        None => {
+            eprintln!("get: missing cell-path");
+            return Err(1);
+        }
     };
     let path = parse_cell_path(path_str);
     let vs = input.into_values()?;
@@ -1636,7 +1974,10 @@ fn vb_get(input: PipelineData, args: &[String], _state: &mut ShellState) -> Resu
         if let Some(typed) = first_key {
             let keys = record_keys_from_input(vs);
             if let Some(sug) = closest_match(typed, keys.iter().map(|s| s.as_str())) {
-                let msg = format!("get: path '{}' not found, did you mean '{}'?", path_str, sug);
+                let msg = format!(
+                    "get: path '{}' not found, did you mean '{}'?",
+                    path_str, sug
+                );
                 eprintln!("{}", msg);
                 state.set_error(msg, 1);
                 return;
@@ -1651,16 +1992,24 @@ fn vb_get(input: PipelineData, args: &[String], _state: &mut ShellState) -> Resu
         match resolve_cell_path(&v, &path) {
             Some(r) => Ok(PipelineData::Values(vec![r])),
             None => {
-                if ignore { Ok(PipelineData::Values(vec![Value::Null])) }
-                else { suggest_field(_state, &vs); Err(1) }
+                if ignore {
+                    Ok(PipelineData::Values(vec![Value::Null]))
+                } else {
+                    suggest_field(_state, &vs);
+                    Err(1)
+                }
             }
         }
     } else if vs.len() == 1 {
         match resolve_cell_path(&vs[0], &path) {
             Some(v) => Ok(PipelineData::Values(vec![v])),
             None => {
-                if ignore { Ok(PipelineData::Values(vec![Value::Null])) }
-                else { suggest_field(_state, &vs); Err(1) }
+                if ignore {
+                    Ok(PipelineData::Values(vec![Value::Null]))
+                } else {
+                    suggest_field(_state, &vs);
+                    Err(1)
+                }
             }
         }
     } else {
@@ -1675,7 +2024,11 @@ fn vb_get(input: PipelineData, args: &[String], _state: &mut ShellState) -> Resu
     }
 }
 
-fn vb_update(input: PipelineData, args: &[String], state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_update(
+    input: PipelineData,
+    args: &[String],
+    state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     if args.len() < 2 {
         eprintln!("update: usage `update <col> <value-or-closure>`");
         return Err(1);
@@ -1704,8 +2057,12 @@ fn vb_update(input: PipelineData, args: &[String], state: &mut ShellState) -> Re
 }
 
 fn parse_literal_value(s: &str) -> Value {
-    if let Ok(n) = s.parse::<i64>() { return Value::Int(n); }
-    if let Ok(f) = s.parse::<f64>() { return Value::Float(f); }
+    if let Ok(n) = s.parse::<i64>() {
+        return Value::Int(n);
+    }
+    if let Ok(f) = s.parse::<f64>() {
+        return Value::Float(f);
+    }
     match s {
         "true" => Value::Bool(true),
         "false" => Value::Bool(false),
@@ -1714,7 +2071,11 @@ fn parse_literal_value(s: &str) -> Value {
     }
 }
 
-fn vb_insert(input: PipelineData, args: &[String], state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_insert(
+    input: PipelineData,
+    args: &[String],
+    state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     // Same as update but errors if column already exists. Closure form supported.
     if args.len() < 2 {
         eprintln!("insert: usage `insert <col> <value-or-closure>`");
@@ -1747,7 +2108,11 @@ fn vb_insert(input: PipelineData, args: &[String], state: &mut ShellState) -> Re
     Ok(PipelineData::Values(out))
 }
 
-fn vb_reject(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_reject(
+    input: PipelineData,
+    args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     if args.is_empty() {
         eprintln!("reject: missing column names");
         return Err(1);
@@ -1756,29 +2121,47 @@ fn vb_reject(input: PipelineData, args: &[String], _state: &mut ShellState) -> R
     let mut out = Vec::with_capacity(vs.len());
     for v in vs {
         let pruned = if let Value::Record(mut r) = v {
-            for col in args { r.shift_remove(col); }
+            for col in args {
+                r.shift_remove(col);
+            }
             Value::Record(r)
-        } else { v };
+        } else {
+            v
+        };
         out.push(pruned);
     }
     Ok(PipelineData::Values(out))
 }
 
-fn vb_wrap(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_wrap(
+    input: PipelineData,
+    args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let col = match args.first() {
         Some(c) => c.clone(),
-        None => { eprintln!("wrap: missing column name"); return Err(1); }
+        None => {
+            eprintln!("wrap: missing column name");
+            return Err(1);
+        }
     };
     let vs = input.into_values()?;
-    let out: Vec<Value> = vs.into_iter().map(|v| {
-        let mut r = IndexMap::new();
-        r.insert(col.clone(), v);
-        Value::Record(r)
-    }).collect();
+    let out: Vec<Value> = vs
+        .into_iter()
+        .map(|v| {
+            let mut r = IndexMap::new();
+            r.insert(col.clone(), v);
+            Value::Record(r)
+        })
+        .collect();
     Ok(PipelineData::Values(out))
 }
 
-fn vb_flatten(input: PipelineData, _args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_flatten(
+    input: PipelineData,
+    _args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let vs = input.into_values()?;
     let mut out = Vec::new();
     for v in vs {
@@ -1794,10 +2177,17 @@ fn vb_flatten(input: PipelineData, _args: &[String], _state: &mut ShellState) ->
 // Phase 6d — type conversions and ranges
 // ---------------------------------------------------------------------------
 
-fn vb_into(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_into(
+    input: PipelineData,
+    args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let target = match args.first().map(|s| s.as_str()) {
         Some(t) => t,
-        None => { eprintln!("into: missing type (int|float|string|bool)"); return Err(1); }
+        None => {
+            eprintln!("into: missing type (int|float|string|bool)");
+            return Err(1);
+        }
     };
     let col = args.get(1).map(|s| s.as_str());
     let convert = |v: &Value| -> Value {
@@ -1806,15 +2196,24 @@ fn vb_into(input: PipelineData, args: &[String], _state: &mut ShellState) -> Res
                 Value::Int(n) => Value::Int(*n),
                 Value::Float(f) => Value::Int(*f as i64),
                 Value::Bool(b) => Value::Int(if *b { 1 } else { 0 }),
-                Value::String(s) => s.trim().parse::<i64>().ok()
+                Value::String(s) => s
+                    .trim()
+                    .parse::<i64>()
+                    .ok()
                     .or_else(|| s.trim().parse::<f64>().ok().map(|f| f as i64))
-                    .map(Value::Int).unwrap_or(Value::Null),
+                    .map(Value::Int)
+                    .unwrap_or(Value::Null),
                 _ => Value::Null,
             },
             "float" => match v {
                 Value::Int(n) => Value::Float(*n as f64),
                 Value::Float(f) => Value::Float(*f),
-                Value::String(s) => s.trim().parse::<f64>().ok().map(Value::Float).unwrap_or(Value::Null),
+                Value::String(s) => s
+                    .trim()
+                    .parse::<f64>()
+                    .ok()
+                    .map(Value::Float)
+                    .unwrap_or(Value::Null),
                 _ => Value::Null,
             },
             "string" => Value::String(v.to_display_string()),
@@ -1830,8 +2229,9 @@ fn vb_into(input: PipelineData, args: &[String], _state: &mut ShellState) -> Res
         }
     };
     let vs = input.into_values()?;
-    let out: Vec<Value> = vs.into_iter().map(|v| {
-        match (col, &v) {
+    let out: Vec<Value> = vs
+        .into_iter()
+        .map(|v| match (col, &v) {
             (Some(c), Value::Record(r)) => {
                 let mut new_r = r.clone();
                 if let Some(cell) = r.get(c) {
@@ -1840,15 +2240,22 @@ fn vb_into(input: PipelineData, args: &[String], _state: &mut ShellState) -> Res
                 Value::Record(new_r)
             }
             _ => convert(&v),
-        }
-    }).collect();
+        })
+        .collect();
     Ok(PipelineData::Values(out))
 }
 
-fn vb_range(_input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_range(
+    _input: PipelineData,
+    args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let spec = match args.first() {
         Some(s) => s,
-        None => { eprintln!("range: usage `range N..M` (inclusive) or `range N..<M` (exclusive)"); return Err(1); }
+        None => {
+            eprintln!("range: usage `range N..M` (inclusive) or `range N..<M` (exclusive)");
+            return Err(1);
+        }
     };
     let (lo, hi, inclusive) = if let Some((a, b)) = spec.split_once("..<") {
         (a.parse::<i64>().ok(), b.parse::<i64>().ok(), false)
@@ -1860,7 +2267,10 @@ fn vb_range(_input: PipelineData, args: &[String], _state: &mut ShellState) -> R
     };
     let (lo, hi) = match (lo, hi) {
         (Some(a), Some(b)) => (a, b),
-        _ => { eprintln!("range: bounds must be integers"); return Err(1); }
+        _ => {
+            eprintln!("range: bounds must be integers");
+            return Err(1);
+        }
     };
     let end = if inclusive { hi + 1 } else { hi };
     // Phase 15b: return a lazy stream so `range 1..10_000_000 | take 5`
@@ -1873,7 +2283,11 @@ fn vb_range(_input: PipelineData, args: &[String], _state: &mut ShellState) -> R
 // Phase 7a — iteration combinators
 // ---------------------------------------------------------------------------
 
-fn vb_reduce(input: PipelineData, args: &[String], state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_reduce(
+    input: PipelineData,
+    args: &[String],
+    state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     // Forms: `reduce {|acc, it| ...}` (no init; first element is acc)
     //        `reduce -i <init> {|acc, it| ...}` (with literal initial value)
     let (init, closure_arg) = if args.first().map(|s| s.as_str()) == Some("-i") {
@@ -1887,7 +2301,10 @@ fn vb_reduce(input: PipelineData, args: &[String], state: &mut ShellState) -> Re
     };
     let closure = match lookup_closure(closure_arg, state) {
         Some(c) => c,
-        None => { eprintln!("reduce: missing closure"); return Err(1); }
+        None => {
+            eprintln!("reduce: missing closure");
+            return Err(1);
+        }
     };
     let vs = input.into_values()?;
     let mut iter = vs.into_iter();
@@ -1904,7 +2321,11 @@ fn vb_reduce(input: PipelineData, args: &[String], state: &mut ShellState) -> Re
     Ok(PipelineData::Values(vec![acc]))
 }
 
-fn vb_take(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_take(
+    input: PipelineData,
+    args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let n: usize = args.first().and_then(|s| s.parse().ok()).unwrap_or(1);
     // Phase 15b: short-circuit on Stream — pull only N items.
     if input.is_stream() {
@@ -1917,35 +2338,59 @@ fn vb_take(input: PipelineData, args: &[String], _state: &mut ShellState) -> Res
     Ok(PipelineData::Values(vs))
 }
 
-fn vb_skip(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_skip(
+    input: PipelineData,
+    args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let n: usize = args.first().and_then(|s| s.parse().ok()).unwrap_or(1);
     let vs = input.into_values()?;
     Ok(PipelineData::Values(vs.into_iter().skip(n).collect()))
 }
 
-fn vb_enumerate(input: PipelineData, _args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_enumerate(
+    input: PipelineData,
+    _args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let vs = input.into_values()?;
-    let out: Vec<Value> = vs.into_iter().enumerate().map(|(i, item)| {
-        let mut r = IndexMap::new();
-        r.insert("index".to_string(), Value::Int(i as i64));
-        r.insert("item".to_string(), item);
-        Value::Record(r)
-    }).collect();
+    let out: Vec<Value> = vs
+        .into_iter()
+        .enumerate()
+        .map(|(i, item)| {
+            let mut r = IndexMap::new();
+            r.insert("index".to_string(), Value::Int(i as i64));
+            r.insert("item".to_string(), item);
+            Value::Record(r)
+        })
+        .collect();
     Ok(PipelineData::Values(out))
 }
 
-fn vb_zip(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_zip(
+    input: PipelineData,
+    args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     // `zip <json-list>` — pair pipeline values with values from a literal JSON list.
     let other_arg = match args.first() {
         Some(s) => s,
-        None => { eprintln!("zip: missing other list (JSON literal)"); return Err(1); }
+        None => {
+            eprintln!("zip: missing other list (JSON literal)");
+            return Err(1);
+        }
     };
     let other: Vec<Value> = match serde_json::from_str::<serde_json::Value>(other_arg) {
         Ok(serde_json::Value::Array(arr)) => arr.into_iter().map(Value::from_json).collect(),
-        _ => { eprintln!("zip: argument must be a JSON list"); return Err(1); }
+        _ => {
+            eprintln!("zip: argument must be a JSON list");
+            return Err(1);
+        }
     };
     let vs = input.into_values()?;
-    let out: Vec<Value> = vs.into_iter().zip(other.into_iter())
+    let out: Vec<Value> = vs
+        .into_iter()
+        .zip(other.into_iter())
         .map(|(a, b)| Value::List(vec![a, b]))
         .collect();
     Ok(PipelineData::Values(out))
@@ -1955,7 +2400,11 @@ fn vb_zip(input: PipelineData, args: &[String], _state: &mut ShellState) -> Resu
 // Phase 7b — record/table shaping
 // ---------------------------------------------------------------------------
 
-fn vb_columns(input: PipelineData, _args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_columns(
+    input: PipelineData,
+    _args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let vs = input.into_values()?;
     // Use first record (or only value) as the column source.
     let first = vs.into_iter().next().unwrap_or(Value::Null);
@@ -1966,7 +2415,11 @@ fn vb_columns(input: PipelineData, _args: &[String], _state: &mut ShellState) ->
     Ok(PipelineData::Values(cols))
 }
 
-fn vb_values(input: PipelineData, _args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_values(
+    input: PipelineData,
+    _args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let vs = input.into_values()?;
     let first = vs.into_iter().next().unwrap_or(Value::Null);
     let out: Vec<Value> = match first {
@@ -1977,7 +2430,11 @@ fn vb_values(input: PipelineData, _args: &[String], _state: &mut ShellState) -> 
     Ok(PipelineData::Values(out))
 }
 
-fn vb_rename(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_rename(
+    input: PipelineData,
+    args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     if args.len() < 2 {
         eprintln!("rename: usage `rename <old> <new>`");
         return Err(1);
@@ -1985,21 +2442,31 @@ fn vb_rename(input: PipelineData, args: &[String], _state: &mut ShellState) -> R
     let old = &args[0];
     let new = &args[1];
     let vs = input.into_values()?;
-    let out: Vec<Value> = vs.into_iter().map(|v| match v {
-        Value::Record(m) => {
-            let mut nm = IndexMap::new();
-            for (k, val) in m {
-                if &k == old { nm.insert(new.clone(), val); }
-                else { nm.insert(k, val); }
+    let out: Vec<Value> = vs
+        .into_iter()
+        .map(|v| match v {
+            Value::Record(m) => {
+                let mut nm = IndexMap::new();
+                for (k, val) in m {
+                    if &k == old {
+                        nm.insert(new.clone(), val);
+                    } else {
+                        nm.insert(k, val);
+                    }
+                }
+                Value::Record(nm)
             }
-            Value::Record(nm)
-        }
-        other => other,
-    }).collect();
+            other => other,
+        })
+        .collect();
     Ok(PipelineData::Values(out))
 }
 
-fn vb_move(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_move(
+    input: PipelineData,
+    args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     // `move <col> --before <other>` or `move <col> --after <other>`
     if args.len() < 3 {
         eprintln!("move: usage `move <col> --before|--after <other>`");
@@ -2011,53 +2478,73 @@ fn vb_move(input: PipelineData, args: &[String], _state: &mut ShellState) -> Res
     let before = match mode.as_str() {
         "--before" => true,
         "--after" => false,
-        _ => { eprintln!("move: expected --before or --after"); return Err(1); }
+        _ => {
+            eprintln!("move: expected --before or --after");
+            return Err(1);
+        }
     };
     let vs = input.into_values()?;
-    let out: Vec<Value> = vs.into_iter().map(|v| match v {
-        Value::Record(mut m) => {
-            let val = match m.shift_remove(col) {
-                Some(v) => v,
-                None => return Value::Record(m),
-            };
-            let mut nm = IndexMap::new();
-            let mut inserted = false;
-            for (k, v) in m {
-                if !inserted && &k == anchor && before {
-                    nm.insert(col.clone(), val.clone());
-                    inserted = true;
+    let out: Vec<Value> = vs
+        .into_iter()
+        .map(|v| match v {
+            Value::Record(mut m) => {
+                let val = match m.shift_remove(col) {
+                    Some(v) => v,
+                    None => return Value::Record(m),
+                };
+                let mut nm = IndexMap::new();
+                let mut inserted = false;
+                for (k, v) in m {
+                    if !inserted && &k == anchor && before {
+                        nm.insert(col.clone(), val.clone());
+                        inserted = true;
+                    }
+                    let is_anchor = &k == anchor;
+                    nm.insert(k, v);
+                    if !inserted && is_anchor && !before {
+                        nm.insert(col.clone(), val.clone());
+                        inserted = true;
+                    }
                 }
-                let is_anchor = &k == anchor;
-                nm.insert(k, v);
-                if !inserted && is_anchor && !before {
-                    nm.insert(col.clone(), val.clone());
-                    inserted = true;
+                if !inserted {
+                    nm.insert(col.clone(), val);
                 }
+                Value::Record(nm)
             }
-            if !inserted { nm.insert(col.clone(), val); }
-            Value::Record(nm)
-        }
-        other => other,
-    }).collect();
+            other => other,
+        })
+        .collect();
     Ok(PipelineData::Values(out))
 }
 
-fn vb_merge(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_merge(
+    input: PipelineData,
+    args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     // `merge <json-record-or-table>` — per-row merge for table inputs;
     // for a single record input, merge the literal record into it.
     let other_arg = match args.first() {
         Some(s) => s,
-        None => { eprintln!("merge: missing other (JSON record or table)"); return Err(1); }
+        None => {
+            eprintln!("merge: missing other (JSON record or table)");
+            return Err(1);
+        }
     };
     let other_json: serde_json::Value = match serde_json::from_str(other_arg) {
         Ok(v) => v,
-        Err(_) => { eprintln!("merge: argument must be JSON"); return Err(1); }
+        Err(_) => {
+            eprintln!("merge: argument must be JSON");
+            return Err(1);
+        }
     };
     let vs = input.into_values()?;
     let merge_one = |a: Value, b: &Value| -> Value {
         match (a, b) {
             (Value::Record(mut ma), Value::Record(mb)) => {
-                for (k, v) in mb { ma.insert(k.clone(), v.clone()); }
+                for (k, v) in mb {
+                    ma.insert(k.clone(), v.clone());
+                }
                 Value::Record(ma)
             }
             (a, _) => a,
@@ -2066,7 +2553,8 @@ fn vb_merge(input: PipelineData, args: &[String], _state: &mut ShellState) -> Re
     let out: Vec<Value> = match other_json {
         serde_json::Value::Array(arr) => {
             let others: Vec<Value> = arr.into_iter().map(Value::from_json).collect();
-            vs.into_iter().zip(others.into_iter())
+            vs.into_iter()
+                .zip(others.into_iter())
                 .map(|(a, b)| merge_one(a, &b))
                 .collect()
         }
@@ -2078,7 +2566,11 @@ fn vb_merge(input: PipelineData, args: &[String], _state: &mut ShellState) -> Re
     Ok(PipelineData::Values(out))
 }
 
-fn vb_upsert(input: PipelineData, args: &[String], state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_upsert(
+    input: PipelineData,
+    args: &[String],
+    state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     if args.len() < 2 {
         eprintln!("upsert: usage `upsert <col> <value-or-closure>`");
         return Err(1);
@@ -2098,27 +2590,37 @@ fn vb_upsert(input: PipelineData, args: &[String], state: &mut ShellState) -> Re
             };
             r.insert(col.clone(), new_val);
             Value::Record(r)
-        } else { v };
+        } else {
+            v
+        };
         out.push(upserted);
     }
     Ok(PipelineData::Values(out))
 }
 
-fn vb_compact(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_compact(
+    input: PipelineData,
+    args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     // Without args: drop records containing any Null value, and drop Null elements
     // from lists. With column args: drop records where any named column is Null/missing.
     let vs = input.into_values()?;
-    let out: Vec<Value> = vs.into_iter().filter(|v| match v {
-        Value::Null => false,
-        Value::Record(m) => {
-            if args.is_empty() {
-                m.values().all(|x| !matches!(x, Value::Null))
-            } else {
-                args.iter().all(|c| matches!(m.get(c), Some(x) if !matches!(x, Value::Null)))
+    let out: Vec<Value> = vs
+        .into_iter()
+        .filter(|v| match v {
+            Value::Null => false,
+            Value::Record(m) => {
+                if args.is_empty() {
+                    m.values().all(|x| !matches!(x, Value::Null))
+                } else {
+                    args.iter()
+                        .all(|c| matches!(m.get(c), Some(x) if !matches!(x, Value::Null)))
+                }
             }
-        }
-        _ => true,
-    }).collect();
+            _ => true,
+        })
+        .collect();
     Ok(PipelineData::Values(out))
 }
 
@@ -2126,10 +2628,17 @@ fn vb_compact(input: PipelineData, args: &[String], _state: &mut ShellState) -> 
 // Phase 7c — predicates / reflection
 // ---------------------------------------------------------------------------
 
-fn vb_any(input: PipelineData, args: &[String], state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_any(
+    input: PipelineData,
+    args: &[String],
+    state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let closure = match lookup_closure(args.first(), state) {
         Some(c) => c,
-        None => { eprintln!("any: usage `any {{|r| ...}}`"); return Err(1); }
+        None => {
+            eprintln!("any: usage `any {{|r| ...}}`");
+            return Err(1);
+        }
     };
     let vs = input.into_values()?;
     for v in vs {
@@ -2141,10 +2650,17 @@ fn vb_any(input: PipelineData, args: &[String], state: &mut ShellState) -> Resul
     Ok(PipelineData::Values(vec![Value::Bool(false)]))
 }
 
-fn vb_all(input: PipelineData, args: &[String], state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_all(
+    input: PipelineData,
+    args: &[String],
+    state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let closure = match lookup_closure(args.first(), state) {
         Some(c) => c,
-        None => { eprintln!("all: usage `all {{|r| ...}}`"); return Err(1); }
+        None => {
+            eprintln!("all: usage `all {{|r| ...}}`");
+            return Err(1);
+        }
     };
     let vs = input.into_values()?;
     for v in vs {
@@ -2156,7 +2672,11 @@ fn vb_all(input: PipelineData, args: &[String], state: &mut ShellState) -> Resul
     Ok(PipelineData::Values(vec![Value::Bool(true)]))
 }
 
-fn vb_is_empty(input: PipelineData, _args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_is_empty(
+    input: PipelineData,
+    _args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let vs = input.into_values()?;
     let empty = match vs.as_slice() {
         [] => true,
@@ -2173,7 +2693,11 @@ fn vb_is_empty(input: PipelineData, _args: &[String], _state: &mut ShellState) -
     Ok(PipelineData::Values(vec![Value::Bool(empty)]))
 }
 
-fn vb_describe(input: PipelineData, _args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_describe(
+    input: PipelineData,
+    _args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let vs = input.into_values()?;
     // The pipeline model unwraps top-level JSON arrays into multiple Values, so
     // `[{"a":1}]` and `{"a":1}` both arrive here as `[Record]`. Disambiguate by
@@ -2200,7 +2724,8 @@ fn vb_describe(input: PipelineData, _args: &[String], _state: &mut ShellState) -
                 }
             }
             Value::Record(_) => "record",
-        }.to_string()
+        }
+        .to_string()
     } else {
         "list".to_string()
     };
@@ -2211,20 +2736,28 @@ fn vb_describe(input: PipelineData, _args: &[String], _state: &mut ShellState) -
 // Phase 7d — path / date
 // ---------------------------------------------------------------------------
 
-fn vb_path(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_path(
+    input: PipelineData,
+    args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let sub = match args.first().map(|s| s.as_str()) {
         Some(s) => s,
-        None => { eprintln!("path: usage `path <join|basename|dirname|parse|exists> ...`"); return Err(1); }
+        None => {
+            eprintln!("path: usage `path <join|basename|dirname|parse|exists> ...`");
+            return Err(1);
+        }
     };
     let rest = &args[1..];
     // Helper: derive the input string(s) — either from rest args or from pipeline.
-    let from_input_or_args = |input: PipelineData, fallback: &[String]| -> Result<Vec<String>, i32> {
-        if !fallback.is_empty() {
-            return Ok(fallback.iter().cloned().collect());
-        }
-        let vs = input.into_values()?;
-        Ok(vs.into_iter().map(|v| v.to_display_string()).collect())
-    };
+    let from_input_or_args =
+        |input: PipelineData, fallback: &[String]| -> Result<Vec<String>, i32> {
+            if !fallback.is_empty() {
+                return Ok(fallback.iter().cloned().collect());
+            }
+            let vs = input.into_values()?;
+            Ok(vs.into_iter().map(|v| v.to_display_string()).collect())
+        };
     match sub {
         "join" => {
             // `path join a b c` → "a/b/c"
@@ -2235,55 +2768,109 @@ fn vb_path(input: PipelineData, args: &[String], _state: &mut ShellState) -> Res
                 vs.into_iter().map(|v| v.to_display_string()).collect()
             };
             let mut p = std::path::PathBuf::new();
-            for piece in &pieces { p.push(piece); }
-            Ok(PipelineData::Values(vec![Value::String(p.to_string_lossy().to_string())]))
+            for piece in &pieces {
+                p.push(piece);
+            }
+            Ok(PipelineData::Values(vec![Value::String(
+                p.to_string_lossy().to_string(),
+            )]))
         }
         "basename" => {
             let inputs = from_input_or_args(input, rest)?;
-            let out: Vec<Value> = inputs.into_iter().map(|s| {
-                let p = std::path::Path::new(&s);
-                Value::String(p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default())
-            }).collect();
-            if out.len() == 1 { Ok(PipelineData::Values(out)) } else { Ok(PipelineData::Values(out)) }
+            let out: Vec<Value> = inputs
+                .into_iter()
+                .map(|s| {
+                    let p = std::path::Path::new(&s);
+                    Value::String(
+                        p.file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default(),
+                    )
+                })
+                .collect();
+            if out.len() == 1 {
+                Ok(PipelineData::Values(out))
+            } else {
+                Ok(PipelineData::Values(out))
+            }
         }
         "dirname" => {
             let inputs = from_input_or_args(input, rest)?;
-            let out: Vec<Value> = inputs.into_iter().map(|s| {
-                let p = std::path::Path::new(&s);
-                Value::String(p.parent().map(|n| n.to_string_lossy().to_string()).unwrap_or_default())
-            }).collect();
+            let out: Vec<Value> = inputs
+                .into_iter()
+                .map(|s| {
+                    let p = std::path::Path::new(&s);
+                    Value::String(
+                        p.parent()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default(),
+                    )
+                })
+                .collect();
             Ok(PipelineData::Values(out))
         }
         "exists" => {
             let inputs = from_input_or_args(input, rest)?;
-            let out: Vec<Value> = inputs.into_iter()
+            let out: Vec<Value> = inputs
+                .into_iter()
                 .map(|s| Value::Bool(std::path::Path::new(&s).exists()))
                 .collect();
             Ok(PipelineData::Values(out))
         }
         "parse" => {
             let inputs = from_input_or_args(input, rest)?;
-            let out: Vec<Value> = inputs.into_iter().map(|s| {
-                let p = std::path::Path::new(&s);
-                let mut r = IndexMap::new();
-                r.insert("parent".to_string(),
-                    Value::String(p.parent().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()));
-                r.insert("stem".to_string(),
-                    Value::String(p.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()));
-                r.insert("extension".to_string(),
-                    Value::String(p.extension().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()));
-                Value::Record(r)
-            }).collect();
+            let out: Vec<Value> = inputs
+                .into_iter()
+                .map(|s| {
+                    let p = std::path::Path::new(&s);
+                    let mut r = IndexMap::new();
+                    r.insert(
+                        "parent".to_string(),
+                        Value::String(
+                            p.parent()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_default(),
+                        ),
+                    );
+                    r.insert(
+                        "stem".to_string(),
+                        Value::String(
+                            p.file_stem()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_default(),
+                        ),
+                    );
+                    r.insert(
+                        "extension".to_string(),
+                        Value::String(
+                            p.extension()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_default(),
+                        ),
+                    );
+                    Value::Record(r)
+                })
+                .collect();
             Ok(PipelineData::Values(out))
         }
-        _ => { eprintln!("path: unknown subcommand '{}'", sub); Err(1) }
+        _ => {
+            eprintln!("path: unknown subcommand '{}'", sub);
+            Err(1)
+        }
     }
 }
 
-fn vb_date(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_date(
+    input: PipelineData,
+    args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let sub = match args.first().map(|s| s.as_str()) {
         Some(s) => s,
-        None => { eprintln!("date: usage `date now | date format <fmt>`"); return Err(1); }
+        None => {
+            eprintln!("date: usage `date now | date format <fmt>`");
+            return Err(1);
+        }
     };
     match sub {
         "now" => {
@@ -2293,38 +2880,54 @@ fn vb_date(input: PipelineData, args: &[String], _state: &mut ShellState) -> Res
                 .map_err(|_| 1_i32)?;
             let secs = now.as_secs() as i64;
             let nanos = now.subsec_nanos();
-            Ok(PipelineData::Values(vec![Value::String(format_rfc3339(secs, nanos))]))
+            Ok(PipelineData::Values(vec![Value::String(format_rfc3339(
+                secs, nanos,
+            ))]))
         }
         "format" => {
             // `date format <fmt>` — accepts a few simple specifiers on UTC now or
             // on the input string (which must be an integer epoch second).
-            let fmt = args.get(1).map(|s| s.as_str()).unwrap_or("%Y-%m-%d %H:%M:%S");
+            let fmt = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or("%Y-%m-%d %H:%M:%S");
             // Determine the source seconds: pipeline if non-empty, else now.
             let inputs = input.into_values().unwrap_or_default();
             let secs_list: Vec<i64> = if inputs.is_empty() {
                 let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH).map_err(|_| 1_i32)?;
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_err(|_| 1_i32)?;
                 vec![now.as_secs() as i64]
             } else {
-                inputs.iter().filter_map(|v| match v {
-                    Value::Int(i) => Some(*i),
-                    Value::String(s) => s.parse().ok(),
-                    _ => None,
-                }).collect()
+                inputs
+                    .iter()
+                    .filter_map(|v| match v {
+                        Value::Int(i) => Some(*i),
+                        Value::String(s) => s.parse().ok(),
+                        _ => None,
+                    })
+                    .collect()
             };
-            let out: Vec<Value> = secs_list.into_iter()
+            let out: Vec<Value> = secs_list
+                .into_iter()
                 .map(|s| Value::String(format_date(s, fmt)))
                 .collect();
             Ok(PipelineData::Values(out))
         }
-        _ => { eprintln!("date: unknown subcommand '{}'", sub); Err(1) }
+        _ => {
+            eprintln!("date: unknown subcommand '{}'", sub);
+            Err(1)
+        }
     }
 }
 
 // Format seconds-since-epoch as RFC3339 (UTC), no external deps.
 fn format_rfc3339(secs: i64, nanos: u32) -> String {
     let (y, mo, d, h, mi, se) = epoch_to_ymdhms(secs);
-    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:09}Z", y, mo, d, h, mi, se, nanos)
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:09}Z",
+        y, mo, d, h, mi, se, nanos
+    )
 }
 
 fn format_date(secs: i64, fmt: &str) -> String {
@@ -2341,10 +2944,15 @@ fn format_date(secs: i64, fmt: &str) -> String {
                 Some('M') => out.push_str(&format!("{:02}", mi)),
                 Some('S') => out.push_str(&format!("{:02}", se)),
                 Some('%') => out.push('%'),
-                Some(other) => { out.push('%'); out.push(other); }
+                Some(other) => {
+                    out.push('%');
+                    out.push(other);
+                }
                 None => out.push('%'),
             }
-        } else { out.push(c); }
+        } else {
+            out.push(c);
+        }
     }
     out
 }
@@ -2376,10 +2984,17 @@ fn epoch_to_ymdhms(secs: i64) -> (i32, u32, u32, u32, u32, u32) {
 /// `format "{name}: {age}"` — for each record, replace each `{field}` token
 /// (with optional dotted/indexed path) with that field's display value.
 /// For a non-record value, `{}` (or `{$it}`) refers to the value itself.
-fn vb_format(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_format(
+    input: PipelineData,
+    args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let tmpl = match args.first() {
         Some(s) => s.clone(),
-        None => { eprintln!("format: missing template"); return Err(1); }
+        None => {
+            eprintln!("format: missing template");
+            return Err(1);
+        }
     };
     let vs = input.into_values()?;
     let render = |v: &Value| -> String {
@@ -2389,13 +3004,15 @@ fn vb_format(input: PipelineData, args: &[String], _state: &mut ShellState) -> R
         while i < bytes.len() {
             if bytes[i] == b'{' {
                 let mut j = i + 1;
-                while j < bytes.len() && bytes[j] != b'}' { j += 1; }
+                while j < bytes.len() && bytes[j] != b'}' {
+                    j += 1;
+                }
                 if j >= bytes.len() {
                     out.push('{');
                     i += 1;
                     continue;
                 }
-                let key = std::str::from_utf8(&bytes[i+1..j]).unwrap_or("");
+                let key = std::str::from_utf8(&bytes[i + 1..j]).unwrap_or("");
                 if key.is_empty() || key == "$it" {
                     out.push_str(&v.to_display_string());
                 } else {
@@ -2419,19 +3036,32 @@ fn vb_format(input: PipelineData, args: &[String], _state: &mut ShellState) -> R
 // Phase 9c — do (execute closure inline)
 // ---------------------------------------------------------------------------
 
-fn vb_do(input: PipelineData, args: &[String], state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_do(
+    input: PipelineData,
+    args: &[String],
+    state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let closure = match lookup_closure(args.first(), state) {
         Some(c) => c,
-        None => { eprintln!("do: missing closure argument"); return Err(1); }
+        None => {
+            eprintln!("do: missing closure argument");
+            return Err(1);
+        }
     };
     // Closure positional args come from args[1..]. If no extra args are given
     // and the pipeline has input, pass the input as a single value.
-    let mut call_args: Vec<Value> = args.iter().skip(1).map(|s| Value::String(s.clone())).collect();
+    let mut call_args: Vec<Value> = args
+        .iter()
+        .skip(1)
+        .map(|s| Value::String(s.clone()))
+        .collect();
     if call_args.is_empty() {
         match input {
             PipelineData::Empty => {}
             PipelineData::Bytes(b) => {
-                let s = String::from_utf8_lossy(&b).trim_end_matches('\n').to_string();
+                let s = String::from_utf8_lossy(&b)
+                    .trim_end_matches('\n')
+                    .to_string();
                 if !s.is_empty() {
                     call_args.push(Value::String(s));
                 }
@@ -2470,10 +3100,17 @@ fn vb_do(input: PipelineData, args: &[String], state: &mut ShellState) -> Result
 /// `default <value> [field]` — replace Null with `value`. With `field`, only
 /// touch that field on Record inputs; without it, apply to each pipeline
 /// value (scalar replacement).
-fn vb_default(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_default(
+    input: PipelineData,
+    args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let default_str = match args.first() {
         Some(s) => s.clone(),
-        None => { eprintln!("default: missing value"); return Err(1); }
+        None => {
+            eprintln!("default: missing value");
+            return Err(1);
+        }
     };
     let field = args.get(1).cloned();
     let default_val = coerce_string_to_value(&default_str);
@@ -2483,7 +3120,9 @@ fn vb_default(input: PipelineData, args: &[String], _state: &mut ShellState) -> 
         let new_v = match (&field, v) {
             (Some(f), Value::Record(mut rec)) => {
                 let is_missing = rec.get(f).map(|x| matches!(x, Value::Null)).unwrap_or(true);
-                if is_missing { rec.insert(f.clone(), default_val.clone()); }
+                if is_missing {
+                    rec.insert(f.clone(), default_val.clone());
+                }
                 Value::Record(rec)
             }
             (None, Value::Null) => default_val.clone(),
@@ -2495,8 +3134,12 @@ fn vb_default(input: PipelineData, args: &[String], _state: &mut ShellState) -> 
 }
 
 pub fn coerce_string_to_value(s: &str) -> Value {
-    if let Ok(i) = s.parse::<i64>() { return Value::Int(i); }
-    if let Ok(f) = s.parse::<f64>() { return Value::Float(f); }
+    if let Ok(i) = s.parse::<i64>() {
+        return Value::Int(i);
+    }
+    if let Ok(f) = s.parse::<f64>() {
+        return Value::Float(f);
+    }
     match s {
         "true" => Value::Bool(true),
         "false" => Value::Bool(false),
@@ -2508,7 +3151,11 @@ pub fn coerce_string_to_value(s: &str) -> Value {
 /// `transpose` — flip rows/columns. Input: list of records → list of
 /// {column, row1, row2, ...} records. With positional names, those replace
 /// the default "column"/"row0"/"row1"/... labels.
-fn vb_transpose(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_transpose(
+    input: PipelineData,
+    args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let vs = input.into_values()?;
     // Collect column order from the first record; later records contribute
     // missing keys at the end.
@@ -2517,17 +3164,26 @@ fn vb_transpose(input: PipelineData, args: &[String], _state: &mut ShellState) -
     for v in &vs {
         if let Value::Record(rec) = v {
             for k in rec.keys() {
-                if seen.insert(k.clone()) { cols.push(k.clone()); }
+                if seen.insert(k.clone()) {
+                    cols.push(k.clone());
+                }
             }
         }
     }
     if cols.is_empty() {
         return Ok(PipelineData::Values(Vec::new()));
     }
-    let header_label = args.first().cloned().unwrap_or_else(|| "column".to_string());
+    let header_label = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "column".to_string());
     let n_rows = vs.len();
     let row_labels: Vec<String> = (0..n_rows)
-        .map(|i| args.get(i + 1).cloned().unwrap_or_else(|| format!("row{}", i)))
+        .map(|i| {
+            args.get(i + 1)
+                .cloned()
+                .unwrap_or_else(|| format!("row{}", i))
+        })
         .collect();
     let mut out = Vec::with_capacity(cols.len());
     for c in &cols {
@@ -2543,12 +3199,19 @@ fn vb_transpose(input: PipelineData, args: &[String], _state: &mut ShellState) -
 }
 
 /// `shuffle` — random permutation of the input list.
-fn vb_shuffle(input: PipelineData, _args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_shuffle(
+    input: PipelineData,
+    _args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let mut vs = input.into_values()?;
     // Lightweight Fisher–Yates with a hash-of-time seed; no external rand
     // dep needed for what is essentially a convenience tool.
     use std::time::{SystemTime, UNIX_EPOCH};
-    let seed = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0) as u64;
+    let seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0) as u64;
     let mut state = seed ^ 0x9E3779B97F4A7C15u64;
     let mut next = || -> u64 {
         // xorshift64
@@ -2590,25 +3253,37 @@ fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
 
 /// `sort [-r|--reverse]` — sort the pipeline values. Use `sort-by <field>`
 /// for record-keyed sorting (already exists).
-fn vb_sort(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_sort(
+    input: PipelineData,
+    args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let reverse = args.iter().any(|a| a == "-r" || a == "--reverse");
     let mut vs = input.into_values()?;
     vs.sort_by(compare_values);
-    if reverse { vs.reverse(); }
+    if reverse {
+        vs.reverse();
+    }
     Ok(PipelineData::Values(vs))
 }
 
 /// `to-csv` — serialize a list of records to CSV bytes. Column order is
 /// taken from the first record; later records contribute any new keys at
 /// the end.
-fn vb_to_csv(input: PipelineData, _args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_to_csv(
+    input: PipelineData,
+    _args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let vs = input.into_values()?;
     let mut cols: Vec<String> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for v in &vs {
         if let Value::Record(rec) = v {
             for k in rec.keys() {
-                if seen.insert(k.clone()) { cols.push(k.clone()); }
+                if seen.insert(k.clone()) {
+                    cols.push(k.clone());
+                }
             }
         }
     }
@@ -2624,10 +3299,16 @@ fn vb_to_csv(input: PipelineData, _args: &[String], _state: &mut ShellState) -> 
     out.push_str(&cols.iter().map(|c| escape(c)).collect::<Vec<_>>().join(","));
     out.push('\n');
     for v in &vs {
-        let row: Vec<String> = cols.iter().map(|c| {
-            let cell = v.get(c).map(|fv| fv.to_display_string()).unwrap_or_default();
-            escape(&cell)
-        }).collect();
+        let row: Vec<String> = cols
+            .iter()
+            .map(|c| {
+                let cell = v
+                    .get(c)
+                    .map(|fv| fv.to_display_string())
+                    .unwrap_or_default();
+                escape(&cell)
+            })
+            .collect();
         out.push_str(&row.join(","));
         out.push('\n');
     }
@@ -2636,9 +3317,16 @@ fn vb_to_csv(input: PipelineData, _args: &[String], _state: &mut ShellState) -> 
 
 /// `chunks <size>` — split the pipeline list into fixed-size chunks. The
 /// last chunk may be shorter.
-fn vb_chunks(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_chunks(
+    input: PipelineData,
+    args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let size: usize = args.first().and_then(|s| s.parse().ok()).unwrap_or(0);
-    if size == 0 { eprintln!("chunks: size must be a positive integer"); return Err(1); }
+    if size == 0 {
+        eprintln!("chunks: size must be a positive integer");
+        return Err(1);
+    }
     let vs = input.into_values()?;
     let out: Vec<Value> = vs.chunks(size).map(|c| Value::List(c.to_vec())).collect();
     Ok(PipelineData::Values(out))
@@ -2646,7 +3334,11 @@ fn vb_chunks(input: PipelineData, args: &[String], _state: &mut ShellState) -> R
 
 /// `window <size> [--stride N]` — sliding window of `size` over the input.
 /// Default stride is 1. The last window is dropped if it would be short.
-fn vb_window(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_window(
+    input: PipelineData,
+    args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let mut size: usize = 0;
     let mut stride: usize = 1;
     let mut i = 0;
@@ -2656,12 +3348,19 @@ fn vb_window(input: PipelineData, args: &[String], _state: &mut ShellState) -> R
                 i += 1;
                 stride = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(1);
             }
-            other => { size = other.parse().unwrap_or(size); }
+            other => {
+                size = other.parse().unwrap_or(size);
+            }
         }
         i += 1;
     }
-    if size == 0 { eprintln!("window: size must be a positive integer"); return Err(1); }
-    if stride == 0 { stride = 1; }
+    if size == 0 {
+        eprintln!("window: size must be a positive integer");
+        return Err(1);
+    }
+    if stride == 0 {
+        stride = 1;
+    }
     let vs = input.into_values()?;
     let mut out = Vec::new();
     let mut start = 0;
@@ -2675,15 +3374,25 @@ fn vb_window(input: PipelineData, args: &[String], _state: &mut ShellState) -> R
 /// `split-by <field>` — group records by `field` value, producing a Record
 /// keyed by group values (vs. group-by which returns key/items records).
 /// Useful when downstream needs `$grouped.<key>` access.
-fn vb_split_by(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_split_by(
+    input: PipelineData,
+    args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let field = match args.first() {
         Some(f) => f,
-        None => { eprintln!("split-by: missing field"); return Err(1); }
+        None => {
+            eprintln!("split-by: missing field");
+            return Err(1);
+        }
     };
     let vs = input.into_values()?;
     let mut groups: IndexMap<String, Vec<Value>> = IndexMap::new();
     for v in vs {
-        let key = v.get(field).map(|fv| fv.to_display_string()).unwrap_or_default();
+        let key = v
+            .get(field)
+            .map(|fv| fv.to_display_string())
+            .unwrap_or_default();
         groups.entry(key).or_default().push(v);
     }
     let mut rec = IndexMap::new();
@@ -2708,7 +3417,11 @@ fn input_as_bytes(input: PipelineData) -> Vec<u8> {
             // Strip one trailing newline so `echo foo | encode hex` doesn't
             // include the implicit newline from echo. Matches the str-builtin
             // convention adopted in Phase 9b.
-            if b.last() == Some(&b'\n') { b[..b.len() - 1].to_vec() } else { b }
+            if b.last() == Some(&b'\n') {
+                b[..b.len() - 1].to_vec()
+            } else {
+                b
+            }
         }
         PipelineData::Stream(_) => unreachable!("normalized above"),
         PipelineData::Values(vs) => {
@@ -2719,7 +3432,11 @@ fn input_as_bytes(input: PipelineData) -> Vec<u8> {
                     other => other.to_display_string().into_bytes(),
                 }
             } else {
-                vs.iter().map(|v| v.to_display_string()).collect::<Vec<_>>().join("\n").into_bytes()
+                vs.iter()
+                    .map(|v| v.to_display_string())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    .into_bytes()
             }
         }
     }
@@ -2760,16 +3477,23 @@ fn b64_encode(input: &[u8]) -> String {
 
 fn b64_decode(input: &str) -> Result<Vec<u8>, String> {
     let mut lut = [255u8; 256];
-    for (i, &b) in B64_TABLE.iter().enumerate() { lut[b as usize] = i as u8; }
+    for (i, &b) in B64_TABLE.iter().enumerate() {
+        lut[b as usize] = i as u8;
+    }
     let clean: Vec<u8> = input.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
     // Strip padding chars; bit-accumulator naturally drops the partial byte.
-    let trimmed: &[u8] = clean.strip_suffix(b"==").or_else(|| clean.strip_suffix(b"=")).unwrap_or(&clean);
+    let trimmed: &[u8] = clean
+        .strip_suffix(b"==")
+        .or_else(|| clean.strip_suffix(b"="))
+        .unwrap_or(&clean);
     let mut out = Vec::with_capacity(trimmed.len() / 4 * 3);
     let mut buf: u32 = 0;
     let mut bits = 0;
     for &b in trimmed {
         let v = lut[b as usize];
-        if v == 255 { return Err(format!("invalid base64 char: {}", b as char)); }
+        if v == 255 {
+            return Err(format!("invalid base64 char: {}", b as char));
+        }
         buf = (buf << 6) | (v as u32);
         bits += 6;
         if bits >= 8 {
@@ -2792,7 +3516,9 @@ fn hex_encode(input: &[u8]) -> String {
 
 fn hex_decode(input: &str) -> Result<Vec<u8>, String> {
     let clean: Vec<u8> = input.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
-    if clean.len() % 2 != 0 { return Err("odd number of hex digits".into()); }
+    if clean.len() % 2 != 0 {
+        return Err("odd number of hex digits".into());
+    }
     let from_hex = |b: u8| -> Result<u8, String> {
         match b {
             b'0'..=b'9' => Ok(b - b'0'),
@@ -2809,33 +3535,59 @@ fn hex_decode(input: &str) -> Result<Vec<u8>, String> {
 }
 
 /// `encode <base64|hex>` — encode pipeline bytes to a string.
-fn vb_encode(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_encode(
+    input: PipelineData,
+    args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let scheme = match args.first().map(|s| s.as_str()) {
         Some(s) => s,
-        None => { eprintln!("encode: missing scheme (base64|hex)"); return Err(1); }
+        None => {
+            eprintln!("encode: missing scheme (base64|hex)");
+            return Err(1);
+        }
     };
     let bytes = input_as_bytes(input);
     let s = match scheme {
         "base64" | "b64" => b64_encode(&bytes),
         "hex" => hex_encode(&bytes),
-        other => { eprintln!("encode: unknown scheme '{}'", other); return Err(1); }
+        other => {
+            eprintln!("encode: unknown scheme '{}'", other);
+            return Err(1);
+        }
     };
     Ok(PipelineData::Values(vec![Value::String(s)]))
 }
 
 /// `decode <base64|hex>` — decode a string into bytes. Output is a String
 /// when the result is valid UTF-8, otherwise Binary.
-fn vb_decode(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_decode(
+    input: PipelineData,
+    args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let scheme = match args.first().map(|s| s.as_str()) {
         Some(s) => s,
-        None => { eprintln!("decode: missing scheme (base64|hex)"); return Err(1); }
+        None => {
+            eprintln!("decode: missing scheme (base64|hex)");
+            return Err(1);
+        }
     };
     let bytes = input_as_bytes(input);
     let s = String::from_utf8_lossy(&bytes).into_owned();
     let decoded = match scheme {
-        "base64" | "b64" => b64_decode(&s).map_err(|e| { eprintln!("decode: {}", e); 1 })?,
-        "hex" => hex_decode(&s).map_err(|e| { eprintln!("decode: {}", e); 1 })?,
-        other => { eprintln!("decode: unknown scheme '{}'", other); return Err(1); }
+        "base64" | "b64" => b64_decode(&s).map_err(|e| {
+            eprintln!("decode: {}", e);
+            1
+        })?,
+        "hex" => hex_decode(&s).map_err(|e| {
+            eprintln!("decode: {}", e);
+            1
+        })?,
+        other => {
+            eprintln!("decode: unknown scheme '{}'", other);
+            return Err(1);
+        }
     };
     let v = match String::from_utf8(decoded.clone()) {
         Ok(s) => Value::String(s),
@@ -2855,10 +3607,17 @@ fn vb_decode(input: PipelineData, args: &[String], _state: &mut ShellState) -> R
 ///
 /// `url join <record>` — opposite: serialize a Record back to a URL string.
 /// Missing/empty fields are omitted (no `:port`, no `?`, no `#`).
-fn vb_url(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_url(
+    input: PipelineData,
+    args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let sub = match args.first().map(|s| s.as_str()) {
         Some(s) => s,
-        None => { eprintln!("url: missing subcommand (parse|join)"); return Err(1); }
+        None => {
+            eprintln!("url: missing subcommand (parse|join)");
+            return Err(1);
+        }
     };
     let rest = &args[1..];
     match sub {
@@ -2878,21 +3637,33 @@ fn vb_url(input: PipelineData, args: &[String], _state: &mut ShellState) -> Resu
                 match serde_json::from_str::<serde_json::Value>(&txt) {
                     Ok(j) => match Value::from_json(j) {
                         Value::Record(r) => r,
-                        _ => { eprintln!("url join: argument must be a Record"); return Err(1); }
+                        _ => {
+                            eprintln!("url join: argument must be a Record");
+                            return Err(1);
+                        }
                     },
-                    Err(_) => { eprintln!("url join: argument must be a JSON Record"); return Err(1); }
+                    Err(_) => {
+                        eprintln!("url join: argument must be a JSON Record");
+                        return Err(1);
+                    }
                 }
             } else {
                 let vs = input.into_values()?;
                 match vs.into_iter().next() {
                     Some(Value::Record(r)) => r,
-                    _ => { eprintln!("url join: pipeline input must be a Record"); return Err(1); }
+                    _ => {
+                        eprintln!("url join: pipeline input must be a Record");
+                        return Err(1);
+                    }
                 }
             };
             let s = join_url(&rec);
             Ok(PipelineData::Values(vec![Value::String(s)]))
         }
-        other => { eprintln!("url: unknown subcommand '{}'", other); Err(1) }
+        other => {
+            eprintln!("url: unknown subcommand '{}'", other);
+            Err(1)
+        }
     }
 }
 
@@ -2905,21 +3676,27 @@ fn parse_url(input: &str) -> IndexMap<String, Value> {
         let s = &rest[..idx];
         rest = &rest[idx + 3..];
         s.to_string()
-    } else { String::new() };
+    } else {
+        String::new()
+    };
 
     // fragment (split first so it's never confused with query)
     let fragment = if let Some(idx) = rest.find('#') {
         let f = rest[idx + 1..].to_string();
         rest = &rest[..idx];
         f
-    } else { String::new() };
+    } else {
+        String::new()
+    };
 
     // query
     let query = if let Some(idx) = rest.find('?') {
         let q = rest[idx + 1..].to_string();
         rest = &rest[..idx];
         q
-    } else { String::new() };
+    } else {
+        String::new()
+    };
 
     // path (everything from first '/')
     let (authority, path) = if let Some(idx) = rest.find('/') {
@@ -2948,7 +3725,9 @@ fn parse_url(input: &str) -> IndexMap<String, Value> {
             let after = &stripped[end + 1..];
             let p = after.strip_prefix(':').unwrap_or("").to_string();
             (h, p)
-        } else { (hostport.to_string(), String::new()) }
+        } else {
+            (hostport.to_string(), String::new())
+        }
     } else if let Some(idx) = hostport.rfind(':') {
         (hostport[..idx].to_string(), hostport[idx + 1..].to_string())
     } else {
@@ -2959,7 +3738,9 @@ fn parse_url(input: &str) -> IndexMap<String, Value> {
     let mut params: IndexMap<String, Value> = IndexMap::new();
     if !query.is_empty() {
         for kv in query.split('&') {
-            if kv.is_empty() { continue; }
+            if kv.is_empty() {
+                continue;
+            }
             let (k, v) = match kv.find('=') {
                 Some(i) => (&kv[..i], &kv[i + 1..]),
                 None => (kv, ""),
@@ -2997,27 +3778,43 @@ fn join_url(rec: &IndexMap<String, Value>) -> String {
     let fragment = get("fragment");
     // Prefer params (Record) when present, else fall back to literal query.
     let query = match rec.get("params") {
-        Some(Value::Record(p)) if !p.is_empty() => {
-            p.iter()
-                .map(|(k, v)| format!("{}={}", k, v.to_display_string()))
-                .collect::<Vec<_>>()
-                .join("&")
-        }
+        Some(Value::Record(p)) if !p.is_empty() => p
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v.to_display_string()))
+            .collect::<Vec<_>>()
+            .join("&"),
         _ => get("query"),
     };
 
     let mut out = String::new();
-    if !scheme.is_empty() { out.push_str(&scheme); out.push_str("://"); }
+    if !scheme.is_empty() {
+        out.push_str(&scheme);
+        out.push_str("://");
+    }
     if !username.is_empty() {
         out.push_str(&username);
-        if !password.is_empty() { out.push(':'); out.push_str(&password); }
+        if !password.is_empty() {
+            out.push(':');
+            out.push_str(&password);
+        }
         out.push('@');
     }
     out.push_str(&host);
-    if !port.is_empty() { out.push(':'); out.push_str(&port); }
-    if !path.is_empty() { out.push_str(&path); }
-    if !query.is_empty() { out.push('?'); out.push_str(&query); }
-    if !fragment.is_empty() { out.push('#'); out.push_str(&fragment); }
+    if !port.is_empty() {
+        out.push(':');
+        out.push_str(&port);
+    }
+    if !path.is_empty() {
+        out.push_str(&path);
+    }
+    if !query.is_empty() {
+        out.push('?');
+        out.push_str(&query);
+    }
+    if !fragment.is_empty() {
+        out.push('#');
+        out.push_str(&fragment);
+    }
     out
 }
 
@@ -3028,7 +3825,11 @@ fn join_url(rec: &IndexMap<String, Value>) -> String {
 /// `prepend <val>` — push a single value to the front of the pipeline list.
 /// `<val>` is coerced via `coerce_string_to_value` (int / float / bool / null /
 /// string), or accepted as a JSON literal for structured values.
-fn vb_prepend(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_prepend(
+    input: PipelineData,
+    args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let v = arg_to_value(args)?;
     let mut vs = input.into_values()?;
     vs.insert(0, v);
@@ -3036,7 +3837,11 @@ fn vb_prepend(input: PipelineData, args: &[String], _state: &mut ShellState) -> 
 }
 
 /// `append <val>` — push a single value to the back of the pipeline list.
-fn vb_append(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_append(
+    input: PipelineData,
+    args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let v = arg_to_value(args)?;
     let mut vs = input.into_values()?;
     vs.push(v);
@@ -3046,7 +3851,10 @@ fn vb_append(input: PipelineData, args: &[String], _state: &mut ShellState) -> R
 fn arg_to_value(args: &[String]) -> Result<Value, i32> {
     let a = match args.first() {
         Some(a) => a,
-        None => { eprintln!("expected a value argument"); return Err(1); }
+        None => {
+            eprintln!("expected a value argument");
+            return Err(1);
+        }
     };
     // Try JSON first (so `[1,2,3]` / `{"a":1}` work); fall back to coercion.
     if let Ok(j) = serde_json::from_str::<serde_json::Value>(a) {
@@ -3056,7 +3864,11 @@ fn arg_to_value(args: &[String]) -> Result<Value, i32> {
 }
 
 /// `drop [n]` — drop the last `n` rows (default 1). Complementary to `last n`.
-fn vb_drop(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_drop(
+    input: PipelineData,
+    args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let n: usize = args.first().and_then(|s| s.parse().ok()).unwrap_or(1);
     let mut vs = input.into_values()?;
     let keep = vs.len().saturating_sub(n);
@@ -3067,12 +3879,21 @@ fn vb_drop(input: PipelineData, args: &[String], _state: &mut ShellState) -> Res
 /// `headers` — interpret a list-of-lists as a table with the first row as
 /// column headers, producing a list of records. Trailing rows that are shorter
 /// than the header row get Null in the missing columns.
-fn vb_headers(input: PipelineData, _args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_headers(
+    input: PipelineData,
+    _args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let vs = input.into_values()?;
-    if vs.is_empty() { return Ok(PipelineData::Values(vec![])); }
+    if vs.is_empty() {
+        return Ok(PipelineData::Values(vec![]));
+    }
     let header_row = match &vs[0] {
         Value::List(xs) => xs.iter().map(|v| v.to_display_string()).collect::<Vec<_>>(),
-        _ => { eprintln!("headers: first row must be a list of column names"); return Err(1); }
+        _ => {
+            eprintln!("headers: first row must be a list of column names");
+            return Err(1);
+        }
     };
     let mut out = Vec::with_capacity(vs.len().saturating_sub(1));
     for row in vs.into_iter().skip(1) {
@@ -3095,11 +3916,17 @@ fn vb_headers(input: PipelineData, _args: &[String], _state: &mut ShellState) ->
 
 /// `histogram [field]` — like `unique -c` but adds a `freq` ratio and a
 /// rendered ASCII `bar`. With `field`, counts grouped by `<row>.<field>`.
-fn vb_histogram(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_histogram(
+    input: PipelineData,
+    args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let field = args.first().cloned();
     let vs = input.into_values()?;
     let total = vs.len();
-    if total == 0 { return Ok(PipelineData::Values(vec![])); }
+    if total == 0 {
+        return Ok(PipelineData::Values(vec![]));
+    }
     let mut buckets: IndexMap<String, (Value, usize)> = IndexMap::new();
     for v in vs {
         let key_val = match &field {
@@ -3135,13 +3962,18 @@ fn vb_histogram(input: PipelineData, args: &[String], _state: &mut ShellState) -
 /// Phase 15d: return the best did-you-mean candidate (edit distance ≤ 2 and
 /// strictly smaller than the typed length) from a list of names.
 pub fn closest_match<'a, I>(typed: &str, candidates: I) -> Option<String>
-where I: IntoIterator<Item = &'a str>
+where
+    I: IntoIterator<Item = &'a str>,
 {
     let mut best: Option<(String, usize)> = None;
     for c in candidates {
-        if c.is_empty() { continue; }
+        if c.is_empty() {
+            continue;
+        }
         let d = levenshtein(typed, c);
-        if d == 0 || d > 2 || d >= typed.len() { continue; }
+        if d == 0 || d > 2 || d >= typed.len() {
+            continue;
+        }
         match &best {
             Some((_, bd)) if d < *bd => best = Some((c.to_string(), d)),
             None => best = Some((c.to_string(), d)),
@@ -3170,8 +4002,12 @@ fn record_keys_from_input(vs: &[Value]) -> Vec<String> {
 fn levenshtein(a: &str, b: &str) -> usize {
     let av: Vec<char> = a.chars().collect();
     let bv: Vec<char> = b.chars().collect();
-    if av.is_empty() { return bv.len(); }
-    if bv.is_empty() { return av.len(); }
+    if av.is_empty() {
+        return bv.len();
+    }
+    if bv.is_empty() {
+        return av.len();
+    }
     let mut prev: Vec<usize> = (0..=bv.len()).collect();
     let mut cur: Vec<usize> = vec![0; bv.len() + 1];
     for i in 1..=av.len() {
@@ -3191,10 +4027,17 @@ fn levenshtein(a: &str, b: &str) -> usize {
 
 /// `char <name>` — emit a single character or short escape sequence by name.
 /// Aligns with nushell's `char` for common cases.
-fn vb_char(_input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_char(
+    _input: PipelineData,
+    args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let name = match args.first() {
         Some(s) => s.as_str(),
-        None => { eprintln!("char: missing name"); return Err(1); }
+        None => {
+            eprintln!("char: missing name");
+            return Err(1);
+        }
     };
     let s = match name {
         "newline" | "nl" | "lf" => "\n".to_string(),
@@ -3209,24 +4052,40 @@ fn vb_char(_input: PipelineData, args: &[String], _state: &mut ShellState) -> Re
         // Hex codepoint: `char 0x41` → "A". Also accepts plain `41` if it
         // parses as hex but not decimal-only — keep it strict for safety.
         s if s.starts_with("0x") || s.starts_with("0X") => {
-            match u32::from_str_radix(&s[2..], 16).ok().and_then(char::from_u32) {
+            match u32::from_str_radix(&s[2..], 16)
+                .ok()
+                .and_then(char::from_u32)
+            {
                 Some(c) => c.to_string(),
-                None => { eprintln!("char: bad hex codepoint '{}'", s); return Err(1); }
+                None => {
+                    eprintln!("char: bad hex codepoint '{}'", s);
+                    return Err(1);
+                }
             }
         }
         // Single-char passthrough.
         s if s.chars().count() == 1 => s.to_string(),
-        other => { eprintln!("char: unknown name '{}'", other); return Err(1); }
+        other => {
+            eprintln!("char: unknown name '{}'", other);
+            return Err(1);
+        }
     };
     Ok(PipelineData::Values(vec![Value::String(s)]))
 }
 
 /// `ansi <code>` — emit an ANSI escape sequence. Names cover the common
 /// colors plus `reset`. Use `ansi 0` for plain reset.
-fn vb_ansi(_input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_ansi(
+    _input: PipelineData,
+    args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let name = match args.first() {
         Some(s) => s.as_str(),
-        None => { eprintln!("ansi: missing color/code"); return Err(1); }
+        None => {
+            eprintln!("ansi: missing color/code");
+            return Err(1);
+        }
     };
     let code = match name {
         "reset" | "rst" => "0",
@@ -3234,23 +4093,43 @@ fn vb_ansi(_input: PipelineData, args: &[String], _state: &mut ShellState) -> Re
         "dim" => "2",
         "italic" => "3",
         "underline" | "u" => "4",
-        "black" => "30", "red" | "r" => "31", "green" | "g" => "32",
-        "yellow" | "y" => "33", "blue" | "b" => "34", "magenta" | "m" | "purple" => "35",
-        "cyan" | "c" => "36", "white" | "w" => "37",
-        "bg_black" => "40", "bg_red" => "41", "bg_green" => "42",
-        "bg_yellow" => "43", "bg_blue" => "44", "bg_magenta" => "45",
-        "bg_cyan" => "46", "bg_white" => "47",
+        "black" => "30",
+        "red" | "r" => "31",
+        "green" | "g" => "32",
+        "yellow" | "y" => "33",
+        "blue" | "b" => "34",
+        "magenta" | "m" | "purple" => "35",
+        "cyan" | "c" => "36",
+        "white" | "w" => "37",
+        "bg_black" => "40",
+        "bg_red" => "41",
+        "bg_green" => "42",
+        "bg_yellow" => "43",
+        "bg_blue" => "44",
+        "bg_magenta" => "45",
+        "bg_cyan" => "46",
+        "bg_white" => "47",
         // Numeric passthrough: `ansi 91` → bright red.
         s if s.bytes().all(|b| b.is_ascii_digit() || b == b';') => s,
-        other => { eprintln!("ansi: unknown code '{}'", other); return Err(1); }
+        other => {
+            eprintln!("ansi: unknown code '{}'", other);
+            return Err(1);
+        }
     };
-    Ok(PipelineData::Values(vec![Value::String(format!("\x1b[{}m", code))]))
+    Ok(PipelineData::Values(vec![Value::String(format!(
+        "\x1b[{}m",
+        code
+    ))]))
 }
 
 /// `fill -c <char> -w <width> [-a left|right|center]` — pad each input value
 /// to `width` using `char` (default space). Alignment defaults to `left`
 /// (pad on the right, matches nushell).
-fn vb_fill(input: PipelineData, args: &[String], _state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_fill(
+    input: PipelineData,
+    args: &[String],
+    _state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let mut ch = ' ';
     let mut width: usize = 0;
     let mut align = "left".to_string();
@@ -3259,24 +4138,36 @@ fn vb_fill(input: PipelineData, args: &[String], _state: &mut ShellState) -> Res
         match args[i].as_str() {
             "-c" | "--character" => {
                 if let Some(v) = args.get(i + 1) {
-                    ch = v.chars().next().unwrap_or(' '); i += 2;
-                } else { i += 1; }
+                    ch = v.chars().next().unwrap_or(' ');
+                    i += 2;
+                } else {
+                    i += 1;
+                }
             }
             "-w" | "--width" => {
                 if let Some(v) = args.get(i + 1) {
-                    width = v.parse().unwrap_or(0); i += 2;
-                } else { i += 1; }
+                    width = v.parse().unwrap_or(0);
+                    i += 2;
+                } else {
+                    i += 1;
+                }
             }
             "-a" | "--alignment" => {
-                if let Some(v) = args.get(i + 1) { align = v.clone(); i += 2; }
-                else { i += 1; }
+                if let Some(v) = args.get(i + 1) {
+                    align = v.clone();
+                    i += 2;
+                } else {
+                    i += 1;
+                }
             }
             _ => i += 1,
         }
     }
     let pad_one = |s: &str| -> String {
         let n = s.chars().count();
-        if n >= width { return s.to_string(); }
+        if n >= width {
+            return s.to_string();
+        }
         let need = width - n;
         match align.as_str() {
             "right" | "r" => {
@@ -3304,7 +4195,8 @@ fn vb_fill(input: PipelineData, args: &[String], _state: &mut ShellState) -> Res
             Ok(PipelineData::Values(vec![Value::String(pad_one(trimmed))]))
         }
         PipelineData::Values(vs) => {
-            let out: Vec<Value> = vs.into_iter()
+            let out: Vec<Value> = vs
+                .into_iter()
                 .map(|v| Value::String(pad_one(&v.to_display_string())))
                 .collect();
             Ok(PipelineData::Values(out))
@@ -3333,15 +4225,23 @@ fn input_to_value(input: PipelineData) -> Value {
             Value::String(s.trim_end_matches('\n').to_string())
         }
         PipelineData::Values(mut vs) => {
-            if vs.is_empty() { Value::Null }
-            else if vs.len() == 1 { vs.remove(0) }
-            else { Value::List(vs) }
+            if vs.is_empty() {
+                Value::Null
+            } else if vs.len() == 1 {
+                vs.remove(0)
+            } else {
+                Value::List(vs)
+            }
         }
         PipelineData::Stream(it) => {
             let mut vs: Vec<Value> = it.collect();
-            if vs.is_empty() { Value::Null }
-            else if vs.len() == 1 { vs.remove(0) }
-            else { Value::List(vs) }
+            if vs.is_empty() {
+                Value::Null
+            } else if vs.len() == 1 {
+                vs.remove(0)
+            } else {
+                Value::List(vs)
+            }
         }
     }
 }
@@ -3362,7 +4262,11 @@ fn value_to_pipeline(v: Value) -> PipelineData {
 /// argument. On success, returns the closure's value. On error, consumes
 /// `state.last_error` (or synthesizes a generic record if none was set) and
 /// either invokes the catch closure with it, or — if no catch — returns Null.
-fn vb_try(input: PipelineData, args: &[String], state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_try(
+    input: PipelineData,
+    args: &[String],
+    state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let try_closure = match lookup_closure(args.first(), state) {
         Some(c) => c,
         None => {
@@ -3383,7 +4287,11 @@ fn vb_try(input: PipelineData, args: &[String], state: &mut ShellState) -> Resul
     };
 
     let in_val = input_to_value(input);
-    let call_args: Vec<Value> = if matches!(in_val, Value::Null) { Vec::new() } else { vec![in_val] };
+    let call_args: Vec<Value> = if matches!(in_val, Value::Null) {
+        Vec::new()
+    } else {
+        vec![in_val]
+    };
 
     // Clear any stale error so the try block starts from a known state.
     state.last_error = None;
@@ -3397,7 +4305,10 @@ fn vb_try(input: PipelineData, args: &[String], state: &mut ShellState) -> Resul
         Err(code) => {
             let err_rec = state.take_error().unwrap_or_else(|| {
                 let mut rec = indexmap::IndexMap::new();
-                rec.insert("msg".to_string(), Value::String(format!("exit code {}", code)));
+                rec.insert(
+                    "msg".to_string(),
+                    Value::String(format!("exit code {}", code)),
+                );
                 rec.insert("code".to_string(), Value::Int(code as i64));
                 Value::Record(rec)
             });
@@ -3417,7 +4328,11 @@ fn vb_try(input: PipelineData, args: &[String], state: &mut ShellState) -> Resul
 /// `error make <msg>` — raise a structured error with the given message.
 /// The error is stored in `state.last_error` so an enclosing `try` can catch
 /// it; the builtin itself returns Err(1) to interrupt the pipeline.
-fn vb_error(_input: PipelineData, args: &[String], state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_error(
+    _input: PipelineData,
+    args: &[String],
+    state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     if args.first().map(|s| s.as_str()) != Some("make") {
         eprintln!("Usage: error make <msg>");
         return Err(1);
@@ -3437,10 +4352,17 @@ fn vb_error(_input: PipelineData, args: &[String], state: &mut ShellState) -> Re
 /// any `def`-registered functions land in `state.user_signatures` /
 /// `state.user_typed_fns`. If extra NAMEs are supplied, only those newly
 /// defined functions are kept; the rest are rolled back.
-fn vb_use(_input: PipelineData, args: &[String], state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_use(
+    _input: PipelineData,
+    args: &[String],
+    state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let path = match args.first() {
         Some(p) => p,
-        None => { eprintln!("Usage: use PATH [name ...]"); return Err(1); }
+        None => {
+            eprintln!("Usage: use PATH [name ...]");
+            return Err(1);
+        }
     };
     let content = match std::fs::read_to_string(path) {
         Ok(s) => s,
@@ -3464,7 +4386,9 @@ fn vb_use(_input: PipelineData, args: &[String], state: &mut ShellState) -> Resu
     for c in &parsed {
         let _ = crate::executor::execute_complete_command(c, state);
     }
-    let added: Vec<String> = state.user_signatures.keys()
+    let added: Vec<String> = state
+        .user_signatures
+        .keys()
         .filter(|k| !before.contains(k.as_str()))
         .cloned()
         .collect();
@@ -3490,7 +4414,11 @@ fn vb_use(_input: PipelineData, args: &[String], state: &mut ShellState) -> Resu
 /// invoked through `apply_closure`. The parameter list is captured as a
 /// `RuntimeSignature` so calls validate arity, `help NAME` works, completion
 /// surfaces it, and the highlighter recognises it as a known command.
-fn vb_def(_input: PipelineData, args: &[String], state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_def(
+    _input: PipelineData,
+    args: &[String],
+    state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     if args.is_empty() {
         eprintln!("Usage: def NAME [params...] {{ |params| body }}");
         return Err(1);
@@ -3545,13 +4473,21 @@ fn vb_def(_input: PipelineData, args: &[String], state: &mut ShellState) -> Resu
 
 /// `help <cmd>` — print the human-readable signature, or with `-r` return
 /// the signature as a Record so it can flow through a pipeline.
-fn vb_help(_input: PipelineData, args: &[String], state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_help(
+    _input: PipelineData,
+    args: &[String],
+    state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let mut as_record = false;
     let mut cmd: Option<&str> = None;
     for a in args {
         match a.as_str() {
             "-r" | "--record" => as_record = true,
-            other => { if cmd.is_none() { cmd = Some(other); } }
+            other => {
+                if cmd.is_none() {
+                    cmd = Some(other);
+                }
+            }
         }
     }
     let name = match cmd {
@@ -3559,7 +4495,8 @@ fn vb_help(_input: PipelineData, args: &[String], state: &mut ShellState) -> Res
         None => {
             // No command given — list every signed command (one per line),
             // including any user-defined functions registered via `def`.
-            let mut names: Vec<String> = crate::signature::SIGNATURES.keys()
+            let mut names: Vec<String> = crate::signature::SIGNATURES
+                .keys()
                 .map(|s| s.to_string())
                 .chain(state.user_signatures.keys().cloned())
                 .collect();
@@ -3576,14 +4513,18 @@ fn vb_help(_input: PipelineData, args: &[String], state: &mut ShellState) -> Res
             rec.insert("name".to_string(), Value::String(rsig.name.clone()));
             rec.insert("desc".to_string(), Value::String(rsig.desc.clone()));
             rec.insert("user_defined".to_string(), Value::Bool(true));
-            let params: Vec<Value> = rsig.params.iter().map(|p| {
-                let mut r = indexmap::IndexMap::new();
-                r.insert("name".to_string(), Value::String(p.name.clone()));
-                r.insert("type".to_string(), Value::String(p.kind.render()));
-                r.insert("optional".to_string(), Value::Bool(p.optional));
-                r.insert("rest".to_string(), Value::Bool(p.rest));
-                Value::Record(r)
-            }).collect();
+            let params: Vec<Value> = rsig
+                .params
+                .iter()
+                .map(|p| {
+                    let mut r = indexmap::IndexMap::new();
+                    r.insert("name".to_string(), Value::String(p.name.clone()));
+                    r.insert("type".to_string(), Value::String(p.kind.render()));
+                    r.insert("optional".to_string(), Value::Bool(p.optional));
+                    r.insert("rest".to_string(), Value::Bool(p.rest));
+                    Value::Record(r)
+                })
+                .collect();
             rec.insert("params".to_string(), Value::List(params));
             return Ok(PipelineData::Values(vec![Value::Record(rec)]));
         }
@@ -3613,7 +4554,11 @@ fn vb_help(_input: PipelineData, args: &[String], state: &mut ShellState) -> Res
 /// Returns a record `{status: int, headers: record, body: string|value}`. If
 /// the response content type is JSON the body is auto-parsed into a Value.
 #[cfg(feature = "ai")]
-fn vb_http(input: PipelineData, args: &[String], state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_http(
+    input: PipelineData,
+    args: &[String],
+    state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let method = match args.first().map(|s| s.as_str()) {
         Some("get") => "GET",
         Some("post") => "POST",
@@ -3621,7 +4566,9 @@ fn vb_http(input: PipelineData, args: &[String], state: &mut ShellState) -> Resu
         Some("delete") => "DELETE",
         Some(other) => {
             let msg = format!("http: unknown method `{}`", other);
-            eprintln!("{}", msg); state.set_error(msg, 1); return Err(1);
+            eprintln!("{}", msg);
+            state.set_error(msg, 1);
+            return Err(1);
         }
         None => {
             eprintln!("Usage: http get|post|put|delete URL [-H \"K: V\"] [-d body] [--json]");
@@ -3630,7 +4577,10 @@ fn vb_http(input: PipelineData, args: &[String], state: &mut ShellState) -> Resu
     };
     let url = match args.get(1) {
         Some(u) => u.clone(),
-        None => { eprintln!("http: missing URL"); return Err(1); }
+        None => {
+            eprintln!("http: missing URL");
+            return Err(1);
+        }
     };
 
     let mut headers: Vec<(String, String)> = Vec::new();
@@ -3648,8 +4598,13 @@ fn vb_http(input: PipelineData, args: &[String], state: &mut ShellState) -> Resu
                     i += 1;
                 }
             }
-            "-d" | "--data" => { body_arg = args.get(i + 1).cloned(); i += 1; }
-            "--json" => { as_json = true; }
+            "-d" | "--data" => {
+                body_arg = args.get(i + 1).cloned();
+                i += 1;
+            }
+            "--json" => {
+                as_json = true;
+            }
             "--query" => {
                 if let Some(q) = args.get(i + 1) {
                     if let Some((k, v)) = q.split_once('=') {
@@ -3677,7 +4632,11 @@ fn vb_http(input: PipelineData, args: &[String], state: &mut ShellState) -> Resu
             PipelineData::Values(_) => None,
             PipelineData::Stream(it) => {
                 let vs: Vec<Value> = it.collect();
-                if vs.is_empty() { None } else { Some(PipelineData::Values(vs).into_bytes()) }
+                if vs.is_empty() {
+                    None
+                } else {
+                    Some(PipelineData::Values(vs).into_bytes())
+                }
             }
         }
     };
@@ -3687,8 +4646,12 @@ fn vb_http(input: PipelineData, args: &[String], state: &mut ShellState) -> Resu
         .timeout_read(std::time::Duration::from_secs(30))
         .build();
     let mut req = agent.request(method, &url);
-    for (k, v) in &query { req = req.query(k, v); }
-    for (k, v) in &headers { req = req.set(k, v); }
+    for (k, v) in &query {
+        req = req.query(k, v);
+    }
+    for (k, v) in &headers {
+        req = req.set(k, v);
+    }
     if as_json && body_bytes.is_none() {
         // no-op — kept for symmetry with --json on POSTs
     }
@@ -3722,9 +4685,16 @@ fn vb_http(input: PipelineData, args: &[String], state: &mut ShellState) -> Resu
             header_rec.insert(name, Value::String(v.to_string()));
         }
     }
-    let content_type = header_rec.get("content-type")
+    let content_type = header_rec
+        .get("content-type")
         .or_else(|| header_rec.get("Content-Type"))
-        .and_then(|v| if let Value::String(s) = v { Some(s.clone()) } else { None })
+        .and_then(|v| {
+            if let Value::String(s) = v {
+                Some(s.clone())
+            } else {
+                None
+            }
+        })
         .unwrap_or_default();
     let body_string = match resp.into_string() {
         Ok(s) => s,
@@ -3752,7 +4722,11 @@ fn vb_http(input: PipelineData, args: &[String], state: &mut ShellState) -> Resu
 }
 
 #[cfg(not(feature = "ai"))]
-fn vb_http(_input: PipelineData, _args: &[String], state: &mut ShellState) -> Result<PipelineData, i32> {
+fn vb_http(
+    _input: PipelineData,
+    _args: &[String],
+    state: &mut ShellState,
+) -> Result<PipelineData, i32> {
     let msg = "http: not available — rsh was built without the `ai` feature".to_string();
     eprintln!("{}", msg);
     state.set_error(msg, 1);

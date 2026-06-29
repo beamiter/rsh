@@ -4,30 +4,30 @@
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
     Word(String),
-    Pipe,         // |
-    PipeAnd,      // |&
-    And,          // &&
-    Or,           // ||
-    Semi,         // ;
-    Amp,          // &
-    AmpBang,      // &!  (background + disown)
-    RedirectOut,  // >
-    RedirectAppend, // >>
-    RedirectIn,   // <
-    HereDoc,      // <<
-    HereDocStrip, // <<-
-    HereString,   // <<<
-    DupFd,        // >&
-    RedirectAllOut, // &> (redirect stdout and stderr)
+    Pipe,              // |
+    PipeAnd,           // |&
+    And,               // &&
+    Or,                // ||
+    Semi,              // ;
+    Amp,               // &
+    AmpBang,           // &!  (background + disown)
+    RedirectOut,       // >
+    RedirectAppend,    // >>
+    RedirectIn,        // <
+    HereDoc,           // <<
+    HereDocStrip,      // <<-
+    HereString,        // <<<
+    DupFd,             // >&
+    RedirectAllOut,    // &> (redirect stdout and stderr)
     RedirectAllAppend, // &>> (append stdout and stderr)
     RedirectFd(i32, RedirectOp),
-    LParen,       // (
-    RParen,       // )
-    LBrace,       // {   (reserved word)
-    RBrace,       // }   (reserved word)
-    DoubleSemi,   // ;;
-    SemiAmp,      // ;&   (case fall-through)
-    DoubleSemiAmp,// ;;&  (case continue-match)
+    LParen,        // (
+    RParen,        // )
+    LBrace,        // {   (reserved word)
+    RBrace,        // }   (reserved word)
+    DoubleSemi,    // ;;
+    SemiAmp,       // ;&   (case fall-through)
+    DoubleSemiAmp, // ;;&  (case continue-match)
     Newline,
     Eof,
 }
@@ -55,11 +55,19 @@ pub struct Lexer<'a> {
 
 impl<'a> Lexer<'a> {
     pub fn new(input: &'a str) -> Self {
-        Lexer { input, pos: 0, lenient: false }
+        Lexer {
+            input,
+            pos: 0,
+            lenient: false,
+        }
     }
 
     pub fn new_lenient(input: &'a str) -> Self {
-        Lexer { input, pos: 0, lenient: true }
+        Lexer {
+            input,
+            pos: 0,
+            lenient: true,
+        }
     }
 
     fn peek_char(&self) -> Option<char> {
@@ -83,7 +91,9 @@ impl<'a> Lexer<'a> {
             } else if c == '#' {
                 // Skip comment to end of line
                 while let Some(c) = self.peek_char() {
-                    if c == '\n' { break; }
+                    if c == '\n' {
+                        break;
+                    }
                     self.next_char();
                 }
             } else {
@@ -120,8 +130,14 @@ impl<'a> Lexer<'a> {
                 Some('\\') => {
                     match self.next_char() {
                         Some('\n') => {} // line continuation
-                        Some(c) => { s.push('\\'); s.push(c); }
-                        None => { s.push('\\'); break; }
+                        Some(c) => {
+                            s.push('\\');
+                            s.push(c);
+                        }
+                        None => {
+                            s.push('\\');
+                            break;
+                        }
                     }
                 }
                 Some(c) => s.push(c),
@@ -146,16 +162,29 @@ impl<'a> Lexer<'a> {
             while let Some(c) = self.next_char() {
                 word.push(c);
                 if c == '\\' {
-                    if let Some(nc) = self.next_char() { word.push(nc); }
+                    if let Some(nc) = self.next_char() {
+                        word.push(nc);
+                    }
                     continue;
                 }
-                if !in_double && c == '\'' { in_single = !in_single; continue; }
-                if !in_single && c == '"' { in_double = !in_double; continue; }
-                if in_single || in_double { continue; }
-                if c == '{' { depth += 1; }
-                else if c == '}' {
+                if !in_double && c == '\'' {
+                    in_single = !in_single;
+                    continue;
+                }
+                if !in_single && c == '"' {
+                    in_double = !in_double;
+                    continue;
+                }
+                if in_single || in_double {
+                    continue;
+                }
+                if c == '{' {
+                    depth += 1;
+                } else if c == '}' {
                     depth -= 1;
-                    if depth == 0 { break; }
+                    if depth == 0 {
+                        break;
+                    }
                 }
             }
             return word;
@@ -201,10 +230,14 @@ impl<'a> Lexer<'a> {
                             let mut depth = 1;
                             while let Some(c2) = self.next_char() {
                                 word.push(c2);
-                                if c2 == '(' { depth += 1; }
+                                if c2 == '(' {
+                                    depth += 1;
+                                }
                                 if c2 == ')' {
                                     depth -= 1;
-                                    if depth == 0 { break; }
+                                    if depth == 0 {
+                                        break;
+                                    }
                                 }
                             }
                         } else {
@@ -220,10 +253,15 @@ impl<'a> Lexer<'a> {
                         word.push('\'');
                         loop {
                             match self.next_char() {
-                                Some('\'') => { word.push('\''); break; }
+                                Some('\'') => {
+                                    word.push('\'');
+                                    break;
+                                }
                                 Some('\\') => {
                                     word.push('\\');
-                                    if let Some(c2) = self.next_char() { word.push(c2); }
+                                    if let Some(c2) = self.next_char() {
+                                        word.push(c2);
+                                    }
                                 }
                                 Some(c2) => word.push(c2),
                                 None => break,
@@ -242,10 +280,14 @@ impl<'a> Lexer<'a> {
                         let mut depth = 1;
                         while let Some(c2) = self.next_char() {
                             word.push(c2);
-                            if c2 == '(' { depth += 1; }
+                            if c2 == '(' {
+                                depth += 1;
+                            }
                             if c2 == ')' {
                                 depth -= 1;
-                                if depth == 0 { break; }
+                                if depth == 0 {
+                                    break;
+                                }
                             }
                         }
                     }
@@ -275,7 +317,7 @@ impl<'a> Lexer<'a> {
                         self.next_char();
                         word.push(c);
                     }
-                }
+                },
             }
         }
         word
@@ -294,20 +336,35 @@ impl<'a> Lexer<'a> {
             Some('|') => {
                 self.next_char();
                 match self.peek_char() {
-                    Some('|') => { self.next_char(); Token::Or }
-                    Some('&') => { self.next_char(); Token::PipeAnd }
+                    Some('|') => {
+                        self.next_char();
+                        Token::Or
+                    }
+                    Some('&') => {
+                        self.next_char();
+                        Token::PipeAnd
+                    }
                     _ => Token::Pipe,
                 }
             }
             Some('&') => {
                 self.next_char();
                 match self.peek_char() {
-                    Some('&') => { self.next_char(); Token::And }
-                    Some('!') => { self.next_char(); Token::AmpBang }
+                    Some('&') => {
+                        self.next_char();
+                        Token::And
+                    }
+                    Some('!') => {
+                        self.next_char();
+                        Token::AmpBang
+                    }
                     Some('>') => {
                         self.next_char();
                         match self.peek_char() {
-                            Some('>') => { self.next_char(); Token::RedirectAllAppend }
+                            Some('>') => {
+                                self.next_char();
+                                Token::RedirectAllAppend
+                            }
                             _ => Token::RedirectAllOut,
                         }
                     }
@@ -320,21 +377,39 @@ impl<'a> Lexer<'a> {
                     Some(';') => {
                         self.next_char();
                         match self.peek_char() {
-                            Some('&') => { self.next_char(); Token::DoubleSemiAmp }
+                            Some('&') => {
+                                self.next_char();
+                                Token::DoubleSemiAmp
+                            }
                             _ => Token::DoubleSemi,
                         }
                     }
-                    Some('&') => { self.next_char(); Token::SemiAmp }
+                    Some('&') => {
+                        self.next_char();
+                        Token::SemiAmp
+                    }
                     _ => Token::Semi,
                 }
             }
-            Some('(') => { self.next_char(); Token::LParen }
-            Some(')') => { self.next_char(); Token::RParen }
+            Some('(') => {
+                self.next_char();
+                Token::LParen
+            }
+            Some(')') => {
+                self.next_char();
+                Token::RParen
+            }
             Some('>') => {
                 self.next_char();
                 match self.peek_char() {
-                    Some('>') => { self.next_char(); Token::RedirectAppend }
-                    Some('&') => { self.next_char(); Token::DupFd }
+                    Some('>') => {
+                        self.next_char();
+                        Token::RedirectAppend
+                    }
+                    Some('&') => {
+                        self.next_char();
+                        Token::DupFd
+                    }
                     Some('(') => {
                         // Process substitution >(cmd) -- back up and read as word
                         self.pos = start;
@@ -350,8 +425,14 @@ impl<'a> Lexer<'a> {
                     Some('<') => {
                         self.next_char();
                         match self.peek_char() {
-                            Some('<') => { self.next_char(); Token::HereString }
-                            Some('-') => { self.next_char(); Token::HereDocStrip }
+                            Some('<') => {
+                                self.next_char();
+                                Token::HereString
+                            }
+                            Some('-') => {
+                                self.next_char();
+                                Token::HereDocStrip
+                            }
                             _ => Token::HereDoc,
                         }
                     }
@@ -381,8 +462,14 @@ impl<'a> Lexer<'a> {
                         let fd: i32 = num_str.parse().unwrap_or(1);
                         self.next_char();
                         match self.peek_char() {
-                            Some('>') => { self.next_char(); Token::RedirectFd(fd, RedirectOp::Append) }
-                            Some('&') => { self.next_char(); Token::RedirectFd(fd, RedirectOp::DupOutput) }
+                            Some('>') => {
+                                self.next_char();
+                                Token::RedirectFd(fd, RedirectOp::Append)
+                            }
+                            Some('&') => {
+                                self.next_char();
+                                Token::RedirectFd(fd, RedirectOp::DupOutput)
+                            }
                             _ => Token::RedirectFd(fd, RedirectOp::Output),
                         }
                     }
@@ -390,7 +477,10 @@ impl<'a> Lexer<'a> {
                         let fd: i32 = num_str.parse().unwrap_or(0);
                         self.next_char();
                         match self.peek_char() {
-                            Some('&') => { self.next_char(); Token::RedirectFd(fd, RedirectOp::DupInput) }
+                            Some('&') => {
+                                self.next_char();
+                                Token::RedirectFd(fd, RedirectOp::DupInput)
+                            }
                             _ => Token::RedirectFd(fd, RedirectOp::Input),
                         }
                     }
@@ -398,9 +488,13 @@ impl<'a> Lexer<'a> {
                         // Not a redirect, read as word
                         self.pos = saved_pos;
                         let w = self.read_word();
-                        if w == "{" { Token::LBrace }
-                        else if w == "}" { Token::RBrace }
-                        else { Token::Word(w) }
+                        if w == "{" {
+                            Token::LBrace
+                        } else if w == "}" {
+                            Token::RBrace
+                        } else {
+                            Token::Word(w)
+                        }
                     }
                 }
             }
@@ -420,7 +514,10 @@ impl<'a> Lexer<'a> {
             }
         };
 
-        SpannedToken { token, span: (start, self.pos) }
+        SpannedToken {
+            token,
+            span: (start, self.pos),
+        }
     }
 
     pub fn tokenize_all(&mut self) -> Vec<SpannedToken> {

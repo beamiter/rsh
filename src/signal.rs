@@ -1,5 +1,4 @@
 /// Signal handling for the shell.
-
 use nix::libc;
 use nix::sys::signal::{self, SaFlags, SigAction, SigHandler, SigSet, Signal};
 use std::sync::atomic::{AtomicBool, Ordering};

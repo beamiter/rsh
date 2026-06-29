@@ -1,5 +1,4 @@
 /// Directory bookmarks: named shortcuts to directories.
-
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
@@ -26,7 +25,9 @@ impl BookmarkDB {
         if let Ok(content) = std::fs::read_to_string(&self.file_path) {
             for line in content.lines() {
                 let line = line.trim();
-                if line.is_empty() { continue; }
+                if line.is_empty() {
+                    continue;
+                }
                 if let Some((name, path)) = line.split_once('|') {
                     self.bookmarks.insert(name.to_string(), path.to_string());
                 }
@@ -55,7 +56,9 @@ impl BookmarkDB {
 
     pub fn remove(&mut self, name: &str) -> bool {
         let removed = self.bookmarks.remove(name).is_some();
-        if removed { self.save(); }
+        if removed {
+            self.save();
+        }
         removed
     }
 

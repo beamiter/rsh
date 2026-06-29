@@ -1,3 +1,4 @@
+use crate::parser::ast::PathSeg;
 /// Phase 8a — minimal expression evaluator for closure bodies.
 ///
 /// Sits between the "literal JSON body" shortcut and the full command-pipeline
@@ -13,23 +14,35 @@
 ///   mul := unary (('*'|'/'|'%') unary)*
 ///   unary := ('!'|'-') unary | primary
 ///   primary := number | string | true|false|null | '$' name path? | '(' or ')'
-
 use crate::value::Value;
-use crate::parser::ast::PathSeg;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq)]
 enum Tok {
     Num(f64, bool), // value, is_int
     Str(String),
-    Ident(String),       // true|false|null
+    Ident(String), // true|false|null
     Var(String, Vec<PathSeg>),
-    Plus, Minus, Star, Slash, Percent,
-    Eq, Ne, Lt, Gt, Le, Ge,
-    AndAnd, OrOr, Bang,
-    LParen, RParen,
-    LBrace, RBrace,
-    Comma, FatArrow,
+    Plus,
+    Minus,
+    Star,
+    Slash,
+    Percent,
+    Eq,
+    Ne,
+    Lt,
+    Gt,
+    Le,
+    Ge,
+    AndAnd,
+    OrOr,
+    Bang,
+    LParen,
+    RParen,
+    LBrace,
+    RBrace,
+    Comma,
+    FatArrow,
 }
 
 fn tokenize(src: &str) -> Result<Vec<Tok>, String> {
@@ -39,40 +52,105 @@ fn tokenize(src: &str) -> Result<Vec<Tok>, String> {
     while i < bytes.len() {
         let c = bytes[i];
         match c {
-            b' ' | b'\t' | b'\n' | b'\r' => { i += 1; }
-            b'+' => { out.push(Tok::Plus); i += 1; }
-            b'-' => { out.push(Tok::Minus); i += 1; }
-            b'*' => { out.push(Tok::Star); i += 1; }
-            b'/' => { out.push(Tok::Slash); i += 1; }
-            b'%' => { out.push(Tok::Percent); i += 1; }
-            b'(' => { out.push(Tok::LParen); i += 1; }
-            b')' => { out.push(Tok::RParen); i += 1; }
-            b'{' => { out.push(Tok::LBrace); i += 1; }
-            b'}' => { out.push(Tok::RBrace); i += 1; }
-            b'=' if i + 1 < bytes.len() && bytes[i+1] == b'=' => { out.push(Tok::Eq); i += 2; }
-            b'=' if i + 1 < bytes.len() && bytes[i+1] == b'>' => { out.push(Tok::FatArrow); i += 2; }
-            b',' => { out.push(Tok::Comma); i += 1; }
-            b'!' if i + 1 < bytes.len() && bytes[i+1] == b'=' => { out.push(Tok::Ne); i += 2; }
-            b'<' if i + 1 < bytes.len() && bytes[i+1] == b'=' => { out.push(Tok::Le); i += 2; }
-            b'>' if i + 1 < bytes.len() && bytes[i+1] == b'=' => { out.push(Tok::Ge); i += 2; }
-            b'<' => { out.push(Tok::Lt); i += 1; }
-            b'>' => { out.push(Tok::Gt); i += 1; }
-            b'&' if i + 1 < bytes.len() && bytes[i+1] == b'&' => { out.push(Tok::AndAnd); i += 2; }
-            b'|' if i + 1 < bytes.len() && bytes[i+1] == b'|' => { out.push(Tok::OrOr); i += 2; }
-            b'!' => { out.push(Tok::Bang); i += 1; }
+            b' ' | b'\t' | b'\n' | b'\r' => {
+                i += 1;
+            }
+            b'+' => {
+                out.push(Tok::Plus);
+                i += 1;
+            }
+            b'-' => {
+                out.push(Tok::Minus);
+                i += 1;
+            }
+            b'*' => {
+                out.push(Tok::Star);
+                i += 1;
+            }
+            b'/' => {
+                out.push(Tok::Slash);
+                i += 1;
+            }
+            b'%' => {
+                out.push(Tok::Percent);
+                i += 1;
+            }
+            b'(' => {
+                out.push(Tok::LParen);
+                i += 1;
+            }
+            b')' => {
+                out.push(Tok::RParen);
+                i += 1;
+            }
+            b'{' => {
+                out.push(Tok::LBrace);
+                i += 1;
+            }
+            b'}' => {
+                out.push(Tok::RBrace);
+                i += 1;
+            }
+            b'=' if i + 1 < bytes.len() && bytes[i + 1] == b'=' => {
+                out.push(Tok::Eq);
+                i += 2;
+            }
+            b'=' if i + 1 < bytes.len() && bytes[i + 1] == b'>' => {
+                out.push(Tok::FatArrow);
+                i += 2;
+            }
+            b',' => {
+                out.push(Tok::Comma);
+                i += 1;
+            }
+            b'!' if i + 1 < bytes.len() && bytes[i + 1] == b'=' => {
+                out.push(Tok::Ne);
+                i += 2;
+            }
+            b'<' if i + 1 < bytes.len() && bytes[i + 1] == b'=' => {
+                out.push(Tok::Le);
+                i += 2;
+            }
+            b'>' if i + 1 < bytes.len() && bytes[i + 1] == b'=' => {
+                out.push(Tok::Ge);
+                i += 2;
+            }
+            b'<' => {
+                out.push(Tok::Lt);
+                i += 1;
+            }
+            b'>' => {
+                out.push(Tok::Gt);
+                i += 1;
+            }
+            b'&' if i + 1 < bytes.len() && bytes[i + 1] == b'&' => {
+                out.push(Tok::AndAnd);
+                i += 2;
+            }
+            b'|' if i + 1 < bytes.len() && bytes[i + 1] == b'|' => {
+                out.push(Tok::OrOr);
+                i += 2;
+            }
+            b'!' => {
+                out.push(Tok::Bang);
+                i += 1;
+            }
             b'"' => {
                 let start = i + 1;
                 let mut j = start;
                 let mut s = String::new();
                 while j < bytes.len() && bytes[j] != b'"' {
                     if bytes[j] == b'\\' && j + 1 < bytes.len() {
-                        match bytes[j+1] {
+                        match bytes[j + 1] {
                             b'n' => s.push('\n'),
                             b't' => s.push('\t'),
                             b'r' => s.push('\r'),
                             b'\\' => s.push('\\'),
                             b'"' => s.push('"'),
-                            other => { s.push('\\'); s.push(other as char); }
+                            other => {
+                                s.push('\\');
+                                s.push(other as char);
+                            }
                         }
                         j += 2;
                     } else {
@@ -80,7 +158,9 @@ fn tokenize(src: &str) -> Result<Vec<Tok>, String> {
                         j += 1;
                     }
                 }
-                if j >= bytes.len() { return Err("unterminated string".to_string()); }
+                if j >= bytes.len() {
+                    return Err("unterminated string".to_string());
+                }
                 out.push(Tok::Str(s));
                 i = j + 1;
             }
@@ -90,17 +170,23 @@ fn tokenize(src: &str) -> Result<Vec<Tok>, String> {
                 while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
                     j += 1;
                 }
-                if j == i + 1 { return Err("expected variable name after $".to_string()); }
-                let name = std::str::from_utf8(&bytes[i+1..j]).unwrap().to_string();
+                if j == i + 1 {
+                    return Err("expected variable name after $".to_string());
+                }
+                let name = std::str::from_utf8(&bytes[i + 1..j]).unwrap().to_string();
                 let mut path = Vec::new();
                 while j < bytes.len() {
                     if bytes[j] == b'.' {
                         let mut k = j + 1;
-                        while k < bytes.len() && (bytes[k].is_ascii_alphanumeric() || bytes[k] == b'_') {
+                        while k < bytes.len()
+                            && (bytes[k].is_ascii_alphanumeric() || bytes[k] == b'_')
+                        {
                             k += 1;
                         }
-                        if k == j + 1 { break; }
-                        let seg = std::str::from_utf8(&bytes[j+1..k]).unwrap();
+                        if k == j + 1 {
+                            break;
+                        }
+                        let seg = std::str::from_utf8(&bytes[j + 1..k]).unwrap();
                         if let Ok(n) = seg.parse::<i64>() {
                             path.push(PathSeg::Index(n));
                         } else {
@@ -109,13 +195,21 @@ fn tokenize(src: &str) -> Result<Vec<Tok>, String> {
                         j = k;
                     } else if bytes[j] == b'[' {
                         let mut k = j + 1;
-                        while k < bytes.len() && bytes[k] != b']' { k += 1; }
-                        if k >= bytes.len() { return Err("unterminated [".to_string()); }
-                        let seg = std::str::from_utf8(&bytes[j+1..k]).unwrap();
-                        let n: i64 = seg.parse().map_err(|_| "bracket index must be integer".to_string())?;
+                        while k < bytes.len() && bytes[k] != b']' {
+                            k += 1;
+                        }
+                        if k >= bytes.len() {
+                            return Err("unterminated [".to_string());
+                        }
+                        let seg = std::str::from_utf8(&bytes[j + 1..k]).unwrap();
+                        let n: i64 = seg
+                            .parse()
+                            .map_err(|_| "bracket index must be integer".to_string())?;
                         path.push(PathSeg::Index(n));
                         j = k + 1;
-                    } else { break; }
+                    } else {
+                        break;
+                    }
                 }
                 out.push(Tok::Var(name, path));
                 i = j;
@@ -124,11 +218,19 @@ fn tokenize(src: &str) -> Result<Vec<Tok>, String> {
                 let start = i;
                 let mut j = i + 1;
                 let mut is_float = false;
-                while j < bytes.len() && bytes[j].is_ascii_digit() { j += 1; }
-                if j < bytes.len() && bytes[j] == b'.' && j + 1 < bytes.len() && bytes[j+1].is_ascii_digit() {
+                while j < bytes.len() && bytes[j].is_ascii_digit() {
+                    j += 1;
+                }
+                if j < bytes.len()
+                    && bytes[j] == b'.'
+                    && j + 1 < bytes.len()
+                    && bytes[j + 1].is_ascii_digit()
+                {
                     is_float = true;
                     j += 1;
-                    while j < bytes.len() && bytes[j].is_ascii_digit() { j += 1; }
+                    while j < bytes.len() && bytes[j].is_ascii_digit() {
+                        j += 1;
+                    }
                 }
                 let s = std::str::from_utf8(&bytes[start..j]).unwrap();
                 let f: f64 = s.parse().map_err(|_| format!("bad number '{}'", s))?;
@@ -151,11 +253,20 @@ fn tokenize(src: &str) -> Result<Vec<Tok>, String> {
     Ok(out)
 }
 
-struct Parser<'a> { toks: &'a [Tok], pos: usize }
+struct Parser<'a> {
+    toks: &'a [Tok],
+    pos: usize,
+}
 
 impl<'a> Parser<'a> {
-    fn peek(&self) -> Option<&Tok> { self.toks.get(self.pos) }
-    fn bump(&mut self) -> Option<Tok> { let t = self.toks.get(self.pos).cloned(); self.pos += 1; t }
+    fn peek(&self) -> Option<&Tok> {
+        self.toks.get(self.pos)
+    }
+    fn bump(&mut self) -> Option<Tok> {
+        let t = self.toks.get(self.pos).cloned();
+        self.pos += 1;
+        t
+    }
 
     fn parse_or(&mut self) -> Result<Expr, String> {
         let mut e = self.parse_and()?;
@@ -178,22 +289,29 @@ impl<'a> Parser<'a> {
     fn parse_cmp(&mut self) -> Result<Expr, String> {
         let l = self.parse_add()?;
         let op = match self.peek() {
-            Some(Tok::Eq) => Some(Cmp::Eq), Some(Tok::Ne) => Some(Cmp::Ne),
-            Some(Tok::Lt) => Some(Cmp::Lt), Some(Tok::Gt) => Some(Cmp::Gt),
-            Some(Tok::Le) => Some(Cmp::Le), Some(Tok::Ge) => Some(Cmp::Ge),
+            Some(Tok::Eq) => Some(Cmp::Eq),
+            Some(Tok::Ne) => Some(Cmp::Ne),
+            Some(Tok::Lt) => Some(Cmp::Lt),
+            Some(Tok::Gt) => Some(Cmp::Gt),
+            Some(Tok::Le) => Some(Cmp::Le),
+            Some(Tok::Ge) => Some(Cmp::Ge),
             _ => None,
         };
         if let Some(op) = op {
             self.bump();
             let r = self.parse_add()?;
             Ok(Expr::Cmp(Box::new(l), op, Box::new(r)))
-        } else { Ok(l) }
+        } else {
+            Ok(l)
+        }
     }
     fn parse_add(&mut self) -> Result<Expr, String> {
         let mut e = self.parse_mul()?;
         loop {
             let op = match self.peek() {
-                Some(Tok::Plus) => Bin::Add, Some(Tok::Minus) => Bin::Sub, _ => break,
+                Some(Tok::Plus) => Bin::Add,
+                Some(Tok::Minus) => Bin::Sub,
+                _ => break,
             };
             self.bump();
             let r = self.parse_mul()?;
@@ -205,8 +323,10 @@ impl<'a> Parser<'a> {
         let mut e = self.parse_unary()?;
         loop {
             let op = match self.peek() {
-                Some(Tok::Star) => Bin::Mul, Some(Tok::Slash) => Bin::Div,
-                Some(Tok::Percent) => Bin::Mod, _ => break,
+                Some(Tok::Star) => Bin::Mul,
+                Some(Tok::Slash) => Bin::Div,
+                Some(Tok::Percent) => Bin::Mod,
+                _ => break,
             };
             self.bump();
             let r = self.parse_unary()?;
@@ -216,15 +336,27 @@ impl<'a> Parser<'a> {
     }
     fn parse_unary(&mut self) -> Result<Expr, String> {
         match self.peek() {
-            Some(Tok::Bang) => { self.bump(); let e = self.parse_unary()?; Ok(Expr::Not(Box::new(e))) }
-            Some(Tok::Minus) => { self.bump(); let e = self.parse_unary()?; Ok(Expr::Neg(Box::new(e))) }
+            Some(Tok::Bang) => {
+                self.bump();
+                let e = self.parse_unary()?;
+                Ok(Expr::Not(Box::new(e)))
+            }
+            Some(Tok::Minus) => {
+                self.bump();
+                let e = self.parse_unary()?;
+                Ok(Expr::Neg(Box::new(e)))
+            }
             _ => self.parse_primary(),
         }
     }
     fn parse_primary(&mut self) -> Result<Expr, String> {
         match self.bump() {
             Some(Tok::Num(n, is_int)) => {
-                if is_int { Ok(Expr::Int(n as i64)) } else { Ok(Expr::Float(n)) }
+                if is_int {
+                    Ok(Expr::Int(n as i64))
+                } else {
+                    Ok(Expr::Float(n))
+                }
             }
             Some(Tok::Str(s)) => Ok(Expr::Str(s)),
             Some(Tok::Ident(name)) => match name.as_str() {
@@ -252,12 +384,20 @@ impl<'a> Parser<'a> {
         let scrut = self.parse_or()?;
         match self.bump() {
             Some(Tok::LBrace) => {}
-            other => return Err(format!("expected '{{' after match scrutinee, got {:?}", other)),
+            other => {
+                return Err(format!(
+                    "expected '{{' after match scrutinee, got {:?}",
+                    other
+                ))
+            }
         }
         let mut arms = Vec::new();
         loop {
             // Allow trailing comma / empty body.
-            if matches!(self.peek(), Some(Tok::RBrace)) { self.bump(); break; }
+            if matches!(self.peek(), Some(Tok::RBrace)) {
+                self.bump();
+                break;
+            }
             let pat = self.parse_match_pat()?;
             match self.bump() {
                 Some(Tok::FatArrow) => {}
@@ -266,9 +406,19 @@ impl<'a> Parser<'a> {
             let body = self.parse_or()?;
             arms.push((pat, body));
             match self.peek() {
-                Some(Tok::Comma) => { self.bump(); }
-                Some(Tok::RBrace) => { self.bump(); break; }
-                other => return Err(format!("expected ',' or '}}' between match arms, got {:?}", other)),
+                Some(Tok::Comma) => {
+                    self.bump();
+                }
+                Some(Tok::RBrace) => {
+                    self.bump();
+                    break;
+                }
+                other => {
+                    return Err(format!(
+                        "expected ',' or '}}' between match arms, got {:?}",
+                        other
+                    ))
+                }
             }
         }
         Ok(Expr::Match(Box::new(scrut), arms))
@@ -276,7 +426,12 @@ impl<'a> Parser<'a> {
 
     fn parse_match_pat(&mut self) -> Result<MatchPat, String> {
         // `_` is a normal Ident — treat it as wildcard. Allow `-N` for negative literals.
-        let negate = if matches!(self.peek(), Some(Tok::Minus)) { self.bump(); true } else { false };
+        let negate = if matches!(self.peek(), Some(Tok::Minus)) {
+            self.bump();
+            true
+        } else {
+            false
+        };
         match self.bump() {
             Some(Tok::Ident(s)) if s == "_" && !negate => Ok(MatchPat::Wildcard),
             Some(Tok::Ident(s)) => match s.as_str() {
@@ -287,8 +442,11 @@ impl<'a> Parser<'a> {
             },
             Some(Tok::Num(n, is_int)) => {
                 let n = if negate { -n } else { n };
-                if is_int { Ok(MatchPat::Lit(Value::Int(n as i64))) }
-                else { Ok(MatchPat::Lit(Value::Float(n))) }
+                if is_int {
+                    Ok(MatchPat::Lit(Value::Int(n as i64)))
+                } else {
+                    Ok(MatchPat::Lit(Value::Float(n)))
+                }
             }
             Some(Tok::Str(s)) if !negate => Ok(MatchPat::Lit(Value::String(s))),
             other => Err(format!("invalid match pattern: {:?}", other)),
@@ -334,13 +492,30 @@ impl<'a> Parser<'a> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum Bin { Add, Sub, Mul, Div, Mod }
+enum Bin {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+}
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum Cmp { Eq, Ne, Lt, Gt, Le, Ge }
+enum Cmp {
+    Eq,
+    Ne,
+    Lt,
+    Gt,
+    Le,
+    Ge,
+}
 
 #[derive(Debug, Clone)]
 enum Expr {
-    Int(i64), Float(f64), Str(String), Bool(bool), Null,
+    Int(i64),
+    Float(f64),
+    Str(String),
+    Bool(bool),
+    Null,
     Var(String, Vec<PathSeg>),
     Bin(Box<Expr>, Bin, Box<Expr>),
     Cmp(Box<Expr>, Cmp, Box<Expr>),
@@ -376,7 +551,9 @@ pub fn try_eval(src: &str, vars: &HashMap<String, Value>) -> Result<Option<Value
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    if toks.is_empty() { return Ok(None); }
+    if toks.is_empty() {
+        return Ok(None);
+    }
     // Reject token sequences that don't look expression-y (e.g. just an Ident
     // that isn't true/false/null — those are commands to run).
     if toks.len() == 1 {
@@ -386,12 +563,17 @@ pub fn try_eval(src: &str, vars: &HashMap<String, Value>) -> Result<Option<Value
             }
         }
     }
-    let mut p = Parser { toks: &toks, pos: 0 };
+    let mut p = Parser {
+        toks: &toks,
+        pos: 0,
+    };
     let expr = match p.parse_or() {
         Ok(e) => e,
         Err(_) => return Ok(None),
     };
-    if p.pos != toks.len() { return Ok(None); }
+    if p.pos != toks.len() {
+        return Ok(None);
+    }
     let v = eval(&expr, vars)?;
     Ok(Some(v))
 }
@@ -403,16 +585,29 @@ fn has_shell_syntax(src: &str) -> bool {
     let mut i = 0;
     while i < bytes.len() {
         let c = bytes[i];
-        if c == b'"' { in_str = !in_str; i += 1; continue; }
-        if in_str { i += 1; continue; }
+        if c == b'"' {
+            in_str = !in_str;
+            i += 1;
+            continue;
+        }
+        if in_str {
+            i += 1;
+            continue;
+        }
         match c {
             b';' | b'`' => return true,
             b'|' => {
-                if i + 1 < bytes.len() && bytes[i+1] == b'|' { i += 2; continue; }
+                if i + 1 < bytes.len() && bytes[i + 1] == b'|' {
+                    i += 2;
+                    continue;
+                }
                 return true;
             }
             b'&' => {
-                if i + 1 < bytes.len() && bytes[i+1] == b'&' { i += 2; continue; }
+                if i + 1 < bytes.len() && bytes[i + 1] == b'&' {
+                    i += 2;
+                    continue;
+                }
                 return true;
             }
             _ => i += 1,
@@ -430,7 +625,9 @@ fn eval(e: &Expr, vars: &HashMap<String, Value>) -> Result<Value, String> {
         Expr::Null => Ok(Value::Null),
         Expr::Var(name, path) => {
             let base = vars.get(name).cloned().unwrap_or(Value::Null);
-            Ok(crate::expand::resolve_path(&base, path).cloned().unwrap_or(Value::Null))
+            Ok(crate::expand::resolve_path(&base, path)
+                .cloned()
+                .unwrap_or(Value::Null))
         }
         Expr::Neg(x) => match eval(x, vars)? {
             Value::Int(i) => Ok(Value::Int(-i)),
@@ -440,16 +637,24 @@ fn eval(e: &Expr, vars: &HashMap<String, Value>) -> Result<Value, String> {
         Expr::Not(x) => Ok(Value::Bool(!is_truthy(&eval(x, vars)?))),
         Expr::And(a, b) => {
             let va = eval(a, vars)?;
-            if !is_truthy(&va) { return Ok(Value::Bool(false)); }
+            if !is_truthy(&va) {
+                return Ok(Value::Bool(false));
+            }
             Ok(Value::Bool(is_truthy(&eval(b, vars)?)))
         }
         Expr::Or(a, b) => {
             let va = eval(a, vars)?;
-            if is_truthy(&va) { return Ok(Value::Bool(true)); }
+            if is_truthy(&va) {
+                return Ok(Value::Bool(true));
+            }
             Ok(Value::Bool(is_truthy(&eval(b, vars)?)))
         }
         Expr::If(c, t, e) => {
-            if is_truthy(&eval(c, vars)?) { eval(t, vars) } else { eval(e, vars) }
+            if is_truthy(&eval(c, vars)?) {
+                eval(t, vars)
+            } else {
+                eval(e, vars)
+            }
         }
         Expr::Match(scrut, arms) => {
             let sv = eval(scrut, vars)?;
@@ -458,7 +663,9 @@ fn eval(e: &Expr, vars: &HashMap<String, Value>) -> Result<Value, String> {
                     MatchPat::Wildcard => true,
                     MatchPat::Lit(v) => &sv == v,
                 };
-                if hit { return eval(body, vars); }
+                if hit {
+                    return eval(body, vars);
+                }
             }
             Ok(Value::Null)
         }
@@ -471,8 +678,10 @@ fn eval(e: &Expr, vars: &HashMap<String, Value>) -> Result<Value, String> {
                 Cmp::Lt | Cmp::Gt | Cmp::Le | Cmp::Ge => {
                     match (lv.as_f64(), rv.as_f64()) {
                         (Some(a), Some(b)) => match op {
-                            Cmp::Lt => a < b, Cmp::Gt => a > b,
-                            Cmp::Le => a <= b, Cmp::Ge => a >= b,
+                            Cmp::Lt => a < b,
+                            Cmp::Gt => a > b,
+                            Cmp::Le => a <= b,
+                            Cmp::Ge => a >= b,
                             _ => unreachable!(),
                         },
                         _ => {
@@ -480,8 +689,10 @@ fn eval(e: &Expr, vars: &HashMap<String, Value>) -> Result<Value, String> {
                             let a = lv.to_display_string();
                             let b = rv.to_display_string();
                             match op {
-                                Cmp::Lt => a < b, Cmp::Gt => a > b,
-                                Cmp::Le => a <= b, Cmp::Ge => a >= b,
+                                Cmp::Lt => a < b,
+                                Cmp::Gt => a > b,
+                                Cmp::Le => a <= b,
+                                Cmp::Ge => a >= b,
                                 _ => unreachable!(),
                             }
                         }
@@ -497,7 +708,9 @@ fn eval(e: &Expr, vars: &HashMap<String, Value>) -> Result<Value, String> {
             if let Bin::Add = op {
                 if matches!(lv, Value::String(_)) || matches!(rv, Value::String(_)) {
                     return Ok(Value::String(format!(
-                        "{}{}", lv.to_display_string(), rv.to_display_string()
+                        "{}{}",
+                        lv.to_display_string(),
+                        rv.to_display_string()
                     )));
                 }
             }
@@ -505,16 +718,22 @@ fn eval(e: &Expr, vars: &HashMap<String, Value>) -> Result<Value, String> {
                 (Some(a), Some(b)) => (a, b),
                 _ => return Err(format!("non-numeric in arithmetic: {:?} {:?}", lv, rv)),
             };
-            let both_int = matches!(eval(l, vars)?, Value::Int(_)) && matches!(eval(r, vars)?, Value::Int(_));
+            let both_int =
+                matches!(eval(l, vars)?, Value::Int(_)) && matches!(eval(r, vars)?, Value::Int(_));
             let f = match op {
-                Bin::Add => a + b, Bin::Sub => a - b,
+                Bin::Add => a + b,
+                Bin::Sub => a - b,
                 Bin::Mul => a * b,
                 Bin::Div => {
-                    if b == 0.0 { return Err("division by zero".to_string()); }
+                    if b == 0.0 {
+                        return Err("division by zero".to_string());
+                    }
                     a / b
                 }
                 Bin::Mod => {
-                    if b == 0.0 { return Err("modulo by zero".to_string()); }
+                    if b == 0.0 {
+                        return Err("modulo by zero".to_string());
+                    }
                     a % b
                 }
             };

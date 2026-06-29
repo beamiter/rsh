@@ -2,7 +2,6 @@
 ///
 /// Also fills the Phase 5c gap: path access into a typed `Value` stored in
 /// `let_vars`, which couldn't be tested before `let` existed.
-
 use std::io::Write;
 use std::process::{Command, Stdio};
 
@@ -20,7 +19,12 @@ fn run(script: &str, stdin: &str) -> (String, String, i32) {
         .spawn()
         .expect("spawn rsh");
     if !stdin.is_empty() {
-        child.stdin.as_mut().unwrap().write_all(stdin.as_bytes()).unwrap();
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(stdin.as_bytes())
+            .unwrap();
     }
     let out = child.wait_with_output().expect("wait");
     (
@@ -117,10 +121,7 @@ fn where_let_bound_closure_filters() {
 #[test]
 fn each_projects_field() {
     let stdin = r#"[{"a":1,"b":2},{"a":3,"b":4}]"#;
-    let (out, err, code) = run(
-        r#"from-json | each {|x| select a} | to-json"#,
-        stdin,
-    );
+    let (out, err, code) = run(r#"from-json | each {|x| select a} | to-json"#, stdin);
     assert_eq!(code, 0, "stderr: {}", err);
     let parsed: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
     assert_eq!(parsed, serde_json::json!([{"a":1},{"a":3}]));

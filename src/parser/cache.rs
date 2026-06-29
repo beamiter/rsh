@@ -1,6 +1,5 @@
 /// Parser cache: caches AST results for frequently used scripts
 /// Useful for interactive shells where users repeat commands
-
 use crate::parser::ast::CompleteCommand;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -50,7 +49,8 @@ impl ParserCache {
         // Check if we need to evict
         if self.cache.len() >= self.max_entries && !self.cache.contains_key(&input) {
             // Remove least frequently used entry
-            if let Some(lfu_key) = self.cache
+            if let Some(lfu_key) = self
+                .cache
                 .iter()
                 .min_by_key(|(_, entry)| entry.hit_count)
                 .map(|(k, _)| k.clone())
@@ -103,9 +103,7 @@ thread_local! {
 
 /// Get cached parse result or None
 pub fn cache_get(input: &str) -> Option<Vec<CompleteCommand>> {
-    PARSER_CACHE.with(|cache| {
-        cache.lock().ok().and_then(|mut c| c.get(input))
-    })
+    PARSER_CACHE.with(|cache| cache.lock().ok().and_then(|mut c| c.get(input)))
 }
 
 /// Store parse result in cache
@@ -128,7 +126,5 @@ pub fn cache_clear() {
 
 /// Get cache statistics
 pub fn cache_stats() -> Option<CacheStats> {
-    PARSER_CACHE.with(|cache| {
-        cache.lock().ok().map(|c| c.stats())
-    })
+    PARSER_CACHE.with(|cache| cache.lock().ok().map(|c| c.stats()))
 }

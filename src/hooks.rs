@@ -1,5 +1,4 @@
 /// Hook system: precmd, preexec, chpwd hooks.
-
 use crate::environment::ShellState;
 
 pub fn run_hooks(hook_list: &[String], state: &mut ShellState) {

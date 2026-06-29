@@ -1,7 +1,6 @@
 /// Filesystem-aware completion probe: context-aware suggestions based on command type.
 /// This module provides intelligent completion by understanding what kind of filesystem
 /// entries different commands prefer (files vs directories).
-
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -28,15 +27,12 @@ pub fn classify_command(cmd: &str) -> ArgPreference {
         "cd" | "pushd" | "popd" | "rmdir" | "z" | "mkdir" => ArgPreference::DirectoriesOnly,
 
         // File-preferred commands (editors, viewers, compilers, processors)
-        "cat" | "less" | "more" | "head" | "tail" | "wc" | "file" | "stat"
-        | "vim" | "nvim" | "vi" | "nano" | "emacs" | "code" | "subl"
-        | "bat" | "diff" | "patch" | "sort" | "uniq" | "cut" | "paste"
-        | "awk" | "sed" | "grep" | "egrep" | "fgrep"
-        | "python" | "python3" | "ruby" | "node" | "perl" | "php"
-        | "rustc" | "gcc" | "g++" | "clang" | "clang++" | "javac"
-        | "source" | "." | "chmod" | "chown" | "chgrp"
-        | "md5sum" | "sha256sum" | "sha1sum" | "shasum"
-        | "strings" | "hexdump" | "xxd" | "od"
+        "cat" | "less" | "more" | "head" | "tail" | "wc" | "file" | "stat" | "vim" | "nvim"
+        | "vi" | "nano" | "emacs" | "code" | "subl" | "bat" | "diff" | "patch" | "sort"
+        | "uniq" | "cut" | "paste" | "awk" | "sed" | "grep" | "egrep" | "fgrep" | "python"
+        | "python3" | "ruby" | "node" | "perl" | "php" | "rustc" | "gcc" | "g++" | "clang"
+        | "clang++" | "javac" | "source" | "." | "chmod" | "chown" | "chgrp" | "md5sum"
+        | "sha256sum" | "sha1sum" | "shasum" | "strings" | "hexdump" | "xxd" | "od"
         | "shellcheck" | "cargo" | "make" => ArgPreference::FilesPreferred,
 
         // Directory-preferred commands (listing, searching, navigation)
@@ -50,10 +46,10 @@ pub fn classify_command(cmd: &str) -> ArgPreference {
 
         // No filesystem arguments
         "echo" | "printf" | "export" | "unset" | "alias" | "unalias" | "true" | "false"
-        | "exit" | "return" | "break" | "continue" | "jobs" | "fg" | "bg" | "history"
-        | "help" | "set" | "declare" | "local" | "type" | "which" | "kill" | "sleep"
-        | "wait" | "read" | "builtin" | "command" | "enable" | "eval" | "exec" | "test"
-        | "[" | "shopt" | "ulimit" | "umask" => ArgPreference::None,
+        | "exit" | "return" | "break" | "continue" | "jobs" | "fg" | "bg" | "history" | "help"
+        | "set" | "declare" | "local" | "type" | "which" | "kill" | "sleep" | "wait" | "read"
+        | "builtin" | "command" | "enable" | "eval" | "exec" | "test" | "[" | "shopt"
+        | "ulimit" | "umask" => ArgPreference::None,
 
         // Unknown commands: default to Any (allows both files and dirs)
         _ => ArgPreference::Any,
@@ -224,8 +220,14 @@ mod tests {
 
         // Directory-preferred
         assert_eq!(classify_command("ls"), ArgPreference::DirectoriesPreferred);
-        assert_eq!(classify_command("tree"), ArgPreference::DirectoriesPreferred);
-        assert_eq!(classify_command("find"), ArgPreference::DirectoriesPreferred);
+        assert_eq!(
+            classify_command("tree"),
+            ArgPreference::DirectoriesPreferred
+        );
+        assert_eq!(
+            classify_command("find"),
+            ArgPreference::DirectoriesPreferred
+        );
 
         // Any
         assert_eq!(classify_command("cp"), ArgPreference::Any);

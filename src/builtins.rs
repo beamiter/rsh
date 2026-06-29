@@ -1,5 +1,4 @@
 /// Built-in shell commands.
-
 use crate::environment::ShellState;
 use crate::parser;
 use std::env;
@@ -12,21 +11,84 @@ pub static EXIT_REQUESTED: AtomicBool = AtomicBool::new(false);
 pub static EXIT_CODE: AtomicI32 = AtomicI32::new(0);
 
 pub const BUILTIN_NAMES: &[&str] = &[
-    "cd", "exit", "export", "unset", "echo", "printf", "pwd",
-    "alias", "unalias", "type", "source", ".", "eval", "read",
-    "true", "false", "test", "[", "return", "break", "continue",
-    "shift", "set", "local", "jobs", "fg", "bg", "wait", "history", "help",
-    "pushd", "popd", "dirs", "trap", "command", "builtin", "[[",
-    "declare", "z", "hook", "complete", "compgen", "disown", "shopt",
-    "from-json", "to-json", "to-table", "where", "sort-by", "select",
-    "bookmark", "from-csv", "group-by", "unique", "count", "math", "exec",
+    "cd",
+    "exit",
+    "export",
+    "unset",
+    "echo",
+    "printf",
+    "pwd",
+    "alias",
+    "unalias",
+    "type",
+    "source",
+    ".",
+    "eval",
+    "read",
+    "true",
+    "false",
+    "test",
+    "[",
+    "return",
+    "break",
+    "continue",
+    "shift",
+    "set",
+    "local",
+    "jobs",
+    "fg",
+    "bg",
+    "wait",
+    "history",
+    "help",
+    "pushd",
+    "popd",
+    "dirs",
+    "trap",
+    "command",
+    "builtin",
+    "[[",
+    "declare",
+    "z",
+    "hook",
+    "complete",
+    "compgen",
+    "disown",
+    "shopt",
+    "from-json",
+    "to-json",
+    "to-table",
+    "where",
+    "sort-by",
+    "select",
+    "bookmark",
+    "from-csv",
+    "group-by",
+    "unique",
+    "count",
+    "math",
+    "exec",
     // Stream processing commands
-    "sum", "avg", "min", "max", "lines", "stats", "trim", "reverse",
-    "upper", "lower",
+    "sum",
+    "avg",
+    "min",
+    "max",
+    "lines",
+    "stats",
+    "trim",
+    "reverse",
+    "upper",
+    "lower",
     // Debug commands
-    "debug-trace", "debug-timing", "debug-profile",
+    "debug-trace",
+    "debug-timing",
+    "debug-profile",
     // Data processing commands
-    "filter", "map", "dedupe", "shuffle", "uniq",
+    "filter",
+    "map",
+    "dedupe",
+    "shuffle",
+    "uniq",
 ];
 
 pub fn is_builtin(name: &str) -> bool {
@@ -79,30 +141,51 @@ pub fn run_builtin(name: &str, args: &[String], state: &mut ShellState) -> i32 {
         "popd" => builtin_popd(state),
         "dirs" => builtin_dirs(state),
         "trap" => builtin_trap(args, state),
-        "jobs" => { state.jobs.print_jobs(); 0 }
+        "jobs" => {
+            state.jobs.print_jobs();
+            0
+        }
         "fg" => {
-            let id = args.first().and_then(|s| s.trim_start_matches('%').parse().ok());
+            let id = args
+                .first()
+                .and_then(|s| s.trim_start_matches('%').parse().ok());
             match id {
                 Some(id) => state.jobs.continue_fg(id),
                 None => match state.jobs.get_last() {
-                    Some(job) => { let id = job.id; state.jobs.continue_fg(id) }
-                    None => { eprintln!("rsh: fg: no current job"); 1 }
-                }
+                    Some(job) => {
+                        let id = job.id;
+                        state.jobs.continue_fg(id)
+                    }
+                    None => {
+                        eprintln!("rsh: fg: no current job");
+                        1
+                    }
+                },
             }
         }
         "bg" => {
-            let id = args.first().and_then(|s| s.trim_start_matches('%').parse().ok());
+            let id = args
+                .first()
+                .and_then(|s| s.trim_start_matches('%').parse().ok());
             match id {
                 Some(id) => state.jobs.continue_bg(id),
                 None => match state.jobs.get_last_stopped() {
-                    Some(job) => { let id = job.id; state.jobs.continue_bg(id) }
-                    None => { eprintln!("rsh: bg: no current job"); 1 }
-                }
+                    Some(job) => {
+                        let id = job.id;
+                        state.jobs.continue_bg(id)
+                    }
+                    None => {
+                        eprintln!("rsh: bg: no current job");
+                        1
+                    }
+                },
             }
         }
         "[[" => builtin_double_bracket(args, state),
         "command" => {
-            if args.is_empty() { return 0; }
+            if args.is_empty() {
+                return 0;
+            }
             let cmd_name = &args[0];
             if is_builtin(cmd_name) {
                 run_builtin(cmd_name, &args[1..], state)
@@ -111,7 +194,9 @@ pub fn run_builtin(name: &str, args: &[String], state: &mut ShellState) -> i32 {
                 match parser::parse(&cmd) {
                     Ok(cmds) => {
                         let mut last = 0;
-                        for c in &cmds { last = crate::executor::execute_complete_command(c, state); }
+                        for c in &cmds {
+                            last = crate::executor::execute_complete_command(c, state);
+                        }
                         last
                     }
                     Err(_) => 1,
@@ -119,7 +204,9 @@ pub fn run_builtin(name: &str, args: &[String], state: &mut ShellState) -> i32 {
             }
         }
         "builtin" => {
-            if args.is_empty() { return 0; }
+            if args.is_empty() {
+                return 0;
+            }
             let cmd_name = &args[0];
             if is_builtin(cmd_name) {
                 run_builtin(cmd_name, &args[1..], state)
@@ -171,7 +258,8 @@ pub fn run_builtin(name: &str, args: &[String], state: &mut ShellState) -> i32 {
             if let Some(vfn) = crate::value_builtins::VALUE_BUILTINS.get(name) {
                 return run_value_builtin_in_fork(*vfn, args, state);
             }
-            eprintln!("rsh: {}: builtin not yet implemented", name); 1
+            eprintln!("rsh: {}: builtin not yet implemented", name);
+            1
         }
     }
 }
@@ -197,12 +285,16 @@ fn run_value_builtin_in_fork(
             let t = s.trim();
             if t.starts_with('[') {
                 serde_json::from_str::<serde_json::Value>(t).ok()
-            } else { None }
+            } else {
+                None
+            }
         });
         match try_parse {
-            Some(serde_json::Value::Array(arr)) => {
-                PipelineData::Values(arr.into_iter().map(crate::value::Value::from_json).collect())
-            }
+            Some(serde_json::Value::Array(arr)) => PipelineData::Values(
+                arr.into_iter()
+                    .map(crate::value::Value::from_json)
+                    .collect(),
+            ),
             _ => PipelineData::Bytes(buf),
         }
     };
@@ -246,7 +338,10 @@ fn builtin_cd(args: &[String], state: &mut ShellState) -> i32 {
                 println!("{}", d);
                 d.to_string()
             }
-            None => { eprintln!("rsh: cd: OLDPWD not set"); return 1; }
+            None => {
+                eprintln!("rsh: cd: OLDPWD not set");
+                return 1;
+            }
         }
     } else if args[0].starts_with('+') || args[0].starts_with('-') {
         // Handle directory stack navigation: cd +N or cd -N
@@ -261,7 +356,9 @@ fn builtin_cd(args: &[String], state: &mut ShellState) -> i32 {
             } else {
                 // -N means from the end
                 if idx <= state.dir_stack.len() {
-                    state.dir_stack[state.dir_stack.len() - idx].to_string_lossy().to_string()
+                    state.dir_stack[state.dir_stack.len() - idx]
+                        .to_string_lossy()
+                        .to_string()
                 } else {
                     eprintln!("rsh: cd: invalid stack index: -{}", idx);
                     return 1;
@@ -286,7 +383,9 @@ fn builtin_cd(args: &[String], state: &mut ShellState) -> i32 {
         if let Some(cdpath_ref) = state.get_var("CDPATH") {
             let cdpath = cdpath_ref.to_string();
             for dir in cdpath.split(':') {
-                if dir.is_empty() { continue; }
+                if dir.is_empty() {
+                    continue;
+                }
                 let candidate = format!("{}/{}", dir, target);
                 if let Ok(new_dir) = change_to_directory(&candidate, state) {
                     println!("{}", new_dir.display());
@@ -301,14 +400,15 @@ fn builtin_cd(args: &[String], state: &mut ShellState) -> i32 {
     1
 }
 
-fn change_to_directory(path: &str, state: &mut ShellState) -> Result<std::path::PathBuf, std::io::Error> {
+fn change_to_directory(
+    path: &str,
+    state: &mut ShellState,
+) -> Result<std::path::PathBuf, std::io::Error> {
     let old = env::current_dir().ok();
     env::set_current_dir(path)?;
 
     match env::current_dir() {
-        Ok(new_dir) => {
-            Ok(new_dir)
-        }
+        Ok(new_dir) => Ok(new_dir),
         Err(e) => {
             if let Some(old_dir) = old {
                 let _ = env::set_current_dir(&old_dir);
@@ -319,7 +419,9 @@ fn change_to_directory(path: &str, state: &mut ShellState) -> Result<std::path::
 }
 
 fn update_directory_vars(new_dir: &std::path::Path, state: &mut ShellState) {
-    let old = env::current_dir().ok().map(|p| p.to_string_lossy().to_string());
+    let old = env::current_dir()
+        .ok()
+        .map(|p| p.to_string_lossy().to_string());
 
     let new_str = new_dir.to_string_lossy().to_string();
     state.export_var("PWD", &new_str);
@@ -344,7 +446,8 @@ fn update_directory_vars(new_dir: &std::path::Path, state: &mut ShellState) {
 }
 
 fn builtin_exit(args: &[String]) -> i32 {
-    let code = args.first()
+    let code = args
+        .first()
         .and_then(|s| s.parse::<i32>().ok())
         .unwrap_or(0);
     EXIT_CODE.store(code, Ordering::SeqCst);
@@ -394,7 +497,9 @@ fn builtin_export(args: &[String], state: &mut ShellState) -> i32 {
 
 fn builtin_unset(args: &[String], state: &mut ShellState) -> i32 {
     for name in args {
-        if name == "-v" || name == "-f" { continue; }
+        if name == "-v" || name == "-f" {
+            continue;
+        }
         // Support unset arr[idx]
         if let Some(bracket) = name.find('[') {
             if name.ends_with(']') {
@@ -424,10 +529,23 @@ fn builtin_echo(args: &[String]) -> i32 {
 
     for (i, arg) in args.iter().enumerate() {
         match arg.as_str() {
-            "-n" => { newline = false; start = i + 1; }
-            "-e" => { interpret_escapes = true; start = i + 1; }
-            "-E" => { interpret_escapes = false; start = i + 1; }
-            "-ne" | "-en" => { newline = false; interpret_escapes = true; start = i + 1; }
+            "-n" => {
+                newline = false;
+                start = i + 1;
+            }
+            "-e" => {
+                interpret_escapes = true;
+                start = i + 1;
+            }
+            "-E" => {
+                interpret_escapes = false;
+                start = i + 1;
+            }
+            "-ne" | "-en" => {
+                newline = false;
+                interpret_escapes = true;
+                start = i + 1;
+            }
             _ => break,
         }
     }
@@ -438,7 +556,9 @@ fn builtin_echo(args: &[String]) -> i32 {
     } else {
         print!("{}", text);
     }
-    if newline { println!(); }
+    if newline {
+        println!();
+    }
     0
 }
 
@@ -455,7 +575,10 @@ fn unescape_echo(s: &str) -> String {
                 Some('a') => result.push('\x07'),
                 Some('b') => result.push('\x08'),
                 Some('0') => result.push('\0'),
-                Some(c2) => { result.push('\\'); result.push(c2); }
+                Some(c2) => {
+                    result.push('\\');
+                    result.push(c2);
+                }
                 None => result.push('\\'),
             }
         } else {
@@ -467,8 +590,14 @@ fn unescape_echo(s: &str) -> String {
 
 fn builtin_pwd() -> i32 {
     match env::current_dir() {
-        Ok(p) => { println!("{}", p.display()); 0 }
-        Err(e) => { eprintln!("rsh: pwd: {}", e); 1 }
+        Ok(p) => {
+            println!("{}", p.display());
+            0
+        }
+        Err(e) => {
+            eprintln!("rsh: pwd: {}", e);
+            1
+        }
     }
 }
 
@@ -488,7 +617,10 @@ fn builtin_alias(args: &[String], state: &mut ShellState) -> i32 {
         } else {
             match state.aliases.get(arg) {
                 Some(v) => println!("alias {}='{}'", arg, v),
-                None => { eprintln!("rsh: alias: {}: not found", arg); return 1; }
+                None => {
+                    eprintln!("rsh: alias: {}: not found", arg);
+                    return 1;
+                }
             }
         }
     }
@@ -563,7 +695,8 @@ declare -F | awk '{{print $3}}'
     match std::process::Command::new("bash")
         .arg("-c")
         .arg(&bash_script)
-        .output() {
+        .output()
+    {
         Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -581,9 +714,10 @@ declare -F | awk '{{print $3}}'
                         let key = &line[..eq_pos];
                         let value = &line[eq_pos + 1..];
                         // Remove quotes if present
-                        let value = if (value.starts_with('\'') && value.ends_with('\'')) ||
-                                       (value.starts_with('"') && value.ends_with('"')) {
-                            &value[1..value.len()-1]
+                        let value = if (value.starts_with('\'') && value.ends_with('\''))
+                            || (value.starts_with('"') && value.ends_with('"'))
+                        {
+                            &value[1..value.len() - 1]
                         } else {
                             value
                         };
@@ -593,7 +727,11 @@ declare -F | awk '{{print $3}}'
             }
 
             // Return success (bash exit code is usually 0 for sourcing)
-            if output.status.success() { 0 } else { 1 }
+            if output.status.success() {
+                0
+            } else {
+                1
+            }
         }
         Err(e) => {
             eprintln!("rsh: source: failed to execute bash fallback: {}", e);
@@ -725,7 +863,9 @@ fn builtin_read(args: &[String], state: &mut ShellState) -> i32 {
         match args[i].as_str() {
             "-p" => {
                 i += 1;
-                if i < args.len() { prompt_str = Some(args[i].as_str()); }
+                if i < args.len() {
+                    prompt_str = Some(args[i].as_str());
+                }
             }
             "-s" => silent = true,
             "-r" => raw = true,
@@ -760,7 +900,9 @@ fn builtin_read(args: &[String], state: &mut ShellState) -> i32 {
                 read_array = true;
             }
             s if s.starts_with('-') => {}
-            _ => { var_names.push(&args[i]); }
+            _ => {
+                var_names.push(&args[i]);
+            }
         }
         i += 1;
     }
@@ -776,7 +918,10 @@ fn builtin_read(args: &[String], state: &mut ShellState) -> i32 {
     }
 
     if silent {
-        std::process::Command::new("stty").arg("-echo").status().ok();
+        std::process::Command::new("stty")
+            .arg("-echo")
+            .status()
+            .ok();
     }
 
     let result = if let Some(count) = exact_count {
@@ -798,7 +943,12 @@ fn builtin_read(args: &[String], state: &mut ShellState) -> i32 {
     result
 }
 
-fn read_exact_chars(count: usize, var_names: &[&str], read_array: bool, state: &mut ShellState) -> i32 {
+fn read_exact_chars(
+    count: usize,
+    var_names: &[&str],
+    read_array: bool,
+    state: &mut ShellState,
+) -> i32 {
     use std::io::Read;
 
     let mut buffer = vec![0u8; count];
@@ -808,7 +958,10 @@ fn read_exact_chars(count: usize, var_names: &[&str], read_array: bool, state: &
             if read_array {
                 let parts: Vec<&str> = line.split_whitespace().collect();
                 if let Some(arr_name) = var_names.first() {
-                    state.arrays.insert(arr_name.to_string(), parts.into_iter().map(|s| s.to_string()).collect());
+                    state.arrays.insert(
+                        arr_name.to_string(),
+                        parts.into_iter().map(|s| s.to_string()).collect(),
+                    );
                 }
             } else if var_names.len() == 1 {
                 state.set_var(var_names[0], &line);
@@ -819,7 +972,13 @@ fn read_exact_chars(count: usize, var_names: &[&str], read_array: bool, state: &
     }
 }
 
-fn read_limited_chars(max_count: usize, delim: char, var_names: &[&str], read_array: bool, state: &mut ShellState) -> i32 {
+fn read_limited_chars(
+    max_count: usize,
+    delim: char,
+    var_names: &[&str],
+    read_array: bool,
+    state: &mut ShellState,
+) -> i32 {
     use std::io::Read;
 
     let mut buffer = vec![0u8; max_count];
@@ -830,7 +989,10 @@ fn read_limited_chars(max_count: usize, delim: char, var_names: &[&str], read_ar
             if read_array {
                 let parts: Vec<&str> = line.split(delim).collect();
                 if let Some(arr_name) = var_names.first() {
-                    state.arrays.insert(arr_name.to_string(), parts.into_iter().map(|s| s.to_string()).collect());
+                    state.arrays.insert(
+                        arr_name.to_string(),
+                        parts.into_iter().map(|s| s.to_string()).collect(),
+                    );
                 }
             } else if var_names.len() == 1 {
                 state.set_var(var_names[0], &line);
@@ -846,7 +1008,13 @@ fn read_limited_chars(max_count: usize, delim: char, var_names: &[&str], read_ar
     }
 }
 
-fn read_line_with_delimiter(delim: char, raw: bool, var_names: &[&str], read_array: bool, state: &mut ShellState) -> i32 {
+fn read_line_with_delimiter(
+    delim: char,
+    raw: bool,
+    var_names: &[&str],
+    read_array: bool,
+    state: &mut ShellState,
+) -> i32 {
     use std::io::BufRead;
 
     let stdin = std::io::stdin();
@@ -865,16 +1033,25 @@ fn read_line_with_delimiter(delim: char, raw: bool, var_names: &[&str], read_arr
             if read_array {
                 // Get IFS for splitting
                 let ifs = state.get_var("IFS").unwrap_or(" \t\n");
-                let parts: Vec<&str> = line.split(|c: char| ifs.contains(c)).filter(|s| !s.is_empty()).collect();
+                let parts: Vec<&str> = line
+                    .split(|c: char| ifs.contains(c))
+                    .filter(|s| !s.is_empty())
+                    .collect();
                 if let Some(arr_name) = var_names.first() {
-                    state.arrays.insert(arr_name.to_string(), parts.into_iter().map(|s| s.to_string()).collect());
+                    state.arrays.insert(
+                        arr_name.to_string(),
+                        parts.into_iter().map(|s| s.to_string()).collect(),
+                    );
                 }
             } else if var_names.len() == 1 {
                 state.set_var(var_names[0], &line);
             } else {
                 // Get IFS for splitting
                 let ifs = state.get_var("IFS").unwrap_or(" \t\n");
-                let parts: Vec<&str> = line.split(|c: char| ifs.contains(c)).filter(|s| !s.is_empty()).collect();
+                let parts: Vec<&str> = line
+                    .split(|c: char| ifs.contains(c))
+                    .filter(|s| !s.is_empty())
+                    .collect();
                 for (vi, var) in var_names.iter().enumerate() {
                     state.set_var(var, parts.get(vi).unwrap_or(&""));
                 }
@@ -888,12 +1065,15 @@ fn read_line_with_delimiter(delim: char, raw: bool, var_names: &[&str], read_arr
 }
 
 fn builtin_test(args: &[String]) -> i32 {
-    let args: Vec<&str> = args.iter()
+    let args: Vec<&str> = args
+        .iter()
         .map(|s| s.as_str())
         .filter(|s| *s != "]")
         .collect();
 
-    if args.is_empty() { return 1; }
+    if args.is_empty() {
+        return 1;
+    }
 
     match parse_test_expr(&args, 0).0 {
         TestResult::True => 0,
@@ -980,27 +1160,148 @@ fn parse_primary(args: &[&str], idx: usize) -> (TestResult, usize) {
     // Handle unary operators
     if idx + 1 < args.len() {
         match args[idx] {
-            "-n" => return (if !args[idx + 1].is_empty() { TestResult::True } else { TestResult::False }, idx + 2),
-            "-z" => return (if args[idx + 1].is_empty() { TestResult::True } else { TestResult::False }, idx + 2),
-            "-f" => return (if Path::new(args[idx + 1]).is_file() { TestResult::True } else { TestResult::False }, idx + 2),
-            "-d" => return (if Path::new(args[idx + 1]).is_dir() { TestResult::True } else { TestResult::False }, idx + 2),
-            "-e" => return (if Path::new(args[idx + 1]).exists() { TestResult::True } else { TestResult::False }, idx + 2),
-            "-L" => return (if is_symlink(args[idx + 1]) { TestResult::True } else { TestResult::False }, idx + 2),
-            "-p" => return (if is_fifo(args[idx + 1]) { TestResult::True } else { TestResult::False }, idx + 2),
-            "-S" => return (if is_socket(args[idx + 1]) { TestResult::True } else { TestResult::False }, idx + 2),
-            "-b" => return (if is_block_device(args[idx + 1]) { TestResult::True } else { TestResult::False }, idx + 2),
-            "-c" => return (if is_char_device(args[idx + 1]) { TestResult::True } else { TestResult::False }, idx + 2),
+            "-n" => {
+                return (
+                    if !args[idx + 1].is_empty() {
+                        TestResult::True
+                    } else {
+                        TestResult::False
+                    },
+                    idx + 2,
+                )
+            }
+            "-z" => {
+                return (
+                    if args[idx + 1].is_empty() {
+                        TestResult::True
+                    } else {
+                        TestResult::False
+                    },
+                    idx + 2,
+                )
+            }
+            "-f" => {
+                return (
+                    if Path::new(args[idx + 1]).is_file() {
+                        TestResult::True
+                    } else {
+                        TestResult::False
+                    },
+                    idx + 2,
+                )
+            }
+            "-d" => {
+                return (
+                    if Path::new(args[idx + 1]).is_dir() {
+                        TestResult::True
+                    } else {
+                        TestResult::False
+                    },
+                    idx + 2,
+                )
+            }
+            "-e" => {
+                return (
+                    if Path::new(args[idx + 1]).exists() {
+                        TestResult::True
+                    } else {
+                        TestResult::False
+                    },
+                    idx + 2,
+                )
+            }
+            "-L" => {
+                return (
+                    if is_symlink(args[idx + 1]) {
+                        TestResult::True
+                    } else {
+                        TestResult::False
+                    },
+                    idx + 2,
+                )
+            }
+            "-p" => {
+                return (
+                    if is_fifo(args[idx + 1]) {
+                        TestResult::True
+                    } else {
+                        TestResult::False
+                    },
+                    idx + 2,
+                )
+            }
+            "-S" => {
+                return (
+                    if is_socket(args[idx + 1]) {
+                        TestResult::True
+                    } else {
+                        TestResult::False
+                    },
+                    idx + 2,
+                )
+            }
+            "-b" => {
+                return (
+                    if is_block_device(args[idx + 1]) {
+                        TestResult::True
+                    } else {
+                        TestResult::False
+                    },
+                    idx + 2,
+                )
+            }
+            "-c" => {
+                return (
+                    if is_char_device(args[idx + 1]) {
+                        TestResult::True
+                    } else {
+                        TestResult::False
+                    },
+                    idx + 2,
+                )
+            }
             "-s" => {
                 let result = if let Ok(m) = std::fs::metadata(args[idx + 1]) {
-                    if m.len() > 0 { TestResult::True } else { TestResult::False }
+                    if m.len() > 0 {
+                        TestResult::True
+                    } else {
+                        TestResult::False
+                    }
                 } else {
                     TestResult::False
                 };
                 return (result, idx + 2);
             }
-            "-r" => return (if is_readable(args[idx + 1]) { TestResult::True } else { TestResult::False }, idx + 2),
-            "-w" => return (if is_writable(args[idx + 1]) { TestResult::True } else { TestResult::False }, idx + 2),
-            "-x" => return (if is_executable(args[idx + 1]) { TestResult::True } else { TestResult::False }, idx + 2),
+            "-r" => {
+                return (
+                    if is_readable(args[idx + 1]) {
+                        TestResult::True
+                    } else {
+                        TestResult::False
+                    },
+                    idx + 2,
+                )
+            }
+            "-w" => {
+                return (
+                    if is_writable(args[idx + 1]) {
+                        TestResult::True
+                    } else {
+                        TestResult::False
+                    },
+                    idx + 2,
+                )
+            }
+            "-x" => {
+                return (
+                    if is_executable(args[idx + 1]) {
+                        TestResult::True
+                    } else {
+                        TestResult::False
+                    },
+                    idx + 2,
+                )
+            }
             _ => {}
         }
     }
@@ -1008,48 +1309,120 @@ fn parse_primary(args: &[&str], idx: usize) -> (TestResult, usize) {
     // Handle binary operators
     if idx + 2 < args.len() {
         match args[idx + 1] {
-            "=" | "==" => return (if args[idx] == args[idx + 2] { TestResult::True } else { TestResult::False }, idx + 3),
-            "!=" => return (if args[idx] != args[idx + 2] { TestResult::True } else { TestResult::False }, idx + 3),
-            "<" => return (if args[idx] < args[idx + 2] { TestResult::True } else { TestResult::False }, idx + 3),
-            ">" => return (if args[idx] > args[idx + 2] { TestResult::True } else { TestResult::False }, idx + 3),
+            "=" | "==" => {
+                return (
+                    if args[idx] == args[idx + 2] {
+                        TestResult::True
+                    } else {
+                        TestResult::False
+                    },
+                    idx + 3,
+                )
+            }
+            "!=" => {
+                return (
+                    if args[idx] != args[idx + 2] {
+                        TestResult::True
+                    } else {
+                        TestResult::False
+                    },
+                    idx + 3,
+                )
+            }
+            "<" => {
+                return (
+                    if args[idx] < args[idx + 2] {
+                        TestResult::True
+                    } else {
+                        TestResult::False
+                    },
+                    idx + 3,
+                )
+            }
+            ">" => {
+                return (
+                    if args[idx] > args[idx + 2] {
+                        TestResult::True
+                    } else {
+                        TestResult::False
+                    },
+                    idx + 3,
+                )
+            }
             "-eq" => {
                 let result = match (args[idx].parse::<i64>(), args[idx + 2].parse::<i64>()) {
-                    (Ok(a), Ok(b)) => if a == b { TestResult::True } else { TestResult::False },
+                    (Ok(a), Ok(b)) => {
+                        if a == b {
+                            TestResult::True
+                        } else {
+                            TestResult::False
+                        }
+                    }
                     _ => TestResult::Error,
                 };
                 return (result, idx + 3);
             }
             "-ne" => {
                 let result = match (args[idx].parse::<i64>(), args[idx + 2].parse::<i64>()) {
-                    (Ok(a), Ok(b)) => if a != b { TestResult::True } else { TestResult::False },
+                    (Ok(a), Ok(b)) => {
+                        if a != b {
+                            TestResult::True
+                        } else {
+                            TestResult::False
+                        }
+                    }
                     _ => TestResult::Error,
                 };
                 return (result, idx + 3);
             }
             "-lt" => {
                 let result = match (args[idx].parse::<i64>(), args[idx + 2].parse::<i64>()) {
-                    (Ok(a), Ok(b)) => if a < b { TestResult::True } else { TestResult::False },
+                    (Ok(a), Ok(b)) => {
+                        if a < b {
+                            TestResult::True
+                        } else {
+                            TestResult::False
+                        }
+                    }
                     _ => TestResult::Error,
                 };
                 return (result, idx + 3);
             }
             "-le" => {
                 let result = match (args[idx].parse::<i64>(), args[idx + 2].parse::<i64>()) {
-                    (Ok(a), Ok(b)) => if a <= b { TestResult::True } else { TestResult::False },
+                    (Ok(a), Ok(b)) => {
+                        if a <= b {
+                            TestResult::True
+                        } else {
+                            TestResult::False
+                        }
+                    }
                     _ => TestResult::Error,
                 };
                 return (result, idx + 3);
             }
             "-gt" => {
                 let result = match (args[idx].parse::<i64>(), args[idx + 2].parse::<i64>()) {
-                    (Ok(a), Ok(b)) => if a > b { TestResult::True } else { TestResult::False },
+                    (Ok(a), Ok(b)) => {
+                        if a > b {
+                            TestResult::True
+                        } else {
+                            TestResult::False
+                        }
+                    }
                     _ => TestResult::Error,
                 };
                 return (result, idx + 3);
             }
             "-ge" => {
                 let result = match (args[idx].parse::<i64>(), args[idx + 2].parse::<i64>()) {
-                    (Ok(a), Ok(b)) => if a >= b { TestResult::True } else { TestResult::False },
+                    (Ok(a), Ok(b)) => {
+                        if a >= b {
+                            TestResult::True
+                        } else {
+                            TestResult::False
+                        }
+                    }
                     _ => TestResult::Error,
                 };
                 return (result, idx + 3);
@@ -1060,7 +1433,14 @@ fn parse_primary(args: &[&str], idx: usize) -> (TestResult, usize) {
 
     // Single argument - check if non-empty string
     if idx + 1 == args.len() {
-        return (if !args[idx].is_empty() { TestResult::True } else { TestResult::False }, idx + 1);
+        return (
+            if !args[idx].is_empty() {
+                TestResult::True
+            } else {
+                TestResult::False
+            },
+            idx + 1,
+        );
     }
 
     (TestResult::Error, idx)
@@ -1125,7 +1505,13 @@ fn is_executable(path: &str) -> bool {
 
 fn cmp_int(a: &str, b: &str, f: fn(i64, i64) -> bool) -> i32 {
     match (a.parse::<i64>(), b.parse::<i64>()) {
-        (Ok(a), Ok(b)) => if f(a, b) { 0 } else { 1 },
+        (Ok(a), Ok(b)) => {
+            if f(a, b) {
+                0
+            } else {
+                1
+            }
+        }
         _ => 2,
     }
 }
@@ -1138,7 +1524,9 @@ fn builtin_set(args: &[String], state: &mut ShellState) -> i32 {
             all.extend(scope.iter());
         }
         all.sort_by_key(|(k, _)| (*k).clone());
-        for (k, v) in all { println!("{}={}", k, v); }
+        for (k, v) in all {
+            println!("{}={}", k, v);
+        }
         return 0;
     }
     let mut i = 0;
@@ -1158,7 +1546,10 @@ fn builtin_set(args: &[String], state: &mut ShellState) -> i32 {
                         "globstar" => state.shell_opts.globstar = true,
                         "vi" => state.editing_mode = crate::environment::EditingMode::Vi,
                         "emacs" => state.editing_mode = crate::environment::EditingMode::Emacs,
-                        _ => { eprintln!("rsh: set: unknown option: {}", args[i]); return 1; }
+                        _ => {
+                            eprintln!("rsh: set: unknown option: {}", args[i]);
+                            return 1;
+                        }
                     }
                 }
             }
@@ -1172,7 +1563,10 @@ fn builtin_set(args: &[String], state: &mut ShellState) -> i32 {
                         "globstar" => state.shell_opts.globstar = false,
                         "vi" => state.editing_mode = crate::environment::EditingMode::Emacs,
                         "emacs" => state.editing_mode = crate::environment::EditingMode::Vi,
-                        _ => { eprintln!("rsh: set: unknown option: {}", args[i]); return 1; }
+                        _ => {
+                            eprintln!("rsh: set: unknown option: {}", args[i]);
+                            return 1;
+                        }
                     }
                 }
             }
@@ -1208,7 +1602,9 @@ fn builtin_local(args: &[String], state: &mut ShellState) -> i32 {
 }
 
 fn builtin_history(_state: &ShellState) -> i32 {
-    let path = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/tmp")).join(".rsh_history");
+    let path = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join(".rsh_history");
     if let Ok(content) = std::fs::read_to_string(&path) {
         for (i, line) in content.lines().enumerate() {
             println!("{:5}  {}", i + 1, line);
@@ -1219,7 +1615,9 @@ fn builtin_history(_state: &ShellState) -> i32 {
 
 fn builtin_printf(args: &[String]) -> i32 {
     use std::io::Write;
-    if args.is_empty() { return 0; }
+    if args.is_empty() {
+        return 0;
+    }
     let fmt = &args[0];
     let params = &args[1..];
     let mut out = String::new();
@@ -1239,21 +1637,32 @@ fn builtin_printf(args: &[String]) -> i32 {
                     Some('0') => out.push('\0'),
                     Some('a') => out.push('\x07'),
                     Some('b') => out.push('\x08'),
-                    Some(c2) => { out.push('\\'); out.push(c2); }
+                    Some(c2) => {
+                        out.push('\\');
+                        out.push(c2);
+                    }
                     None => out.push('\\'),
                 }
             } else if c == '%' {
                 let arg = params.get(pi).map(|s| s.as_str()).unwrap_or("");
                 match chars.next() {
                     Some('s') => out.push_str(arg),
-                    Some('d') | Some('i') => out.push_str(&arg.parse::<i64>().unwrap_or(0).to_string()),
+                    Some('d') | Some('i') => {
+                        out.push_str(&arg.parse::<i64>().unwrap_or(0).to_string())
+                    }
                     Some('f') => out.push_str(&arg.parse::<f64>().unwrap_or(0.0).to_string()),
                     Some('x') => out.push_str(&format!("{:x}", arg.parse::<i64>().unwrap_or(0))),
                     Some('X') => out.push_str(&format!("{:X}", arg.parse::<i64>().unwrap_or(0))),
                     Some('o') => out.push_str(&format!("{:o}", arg.parse::<i64>().unwrap_or(0))),
                     Some('c') => out.push(arg.chars().next().unwrap_or('\0')),
-                    Some('%') => { out.push('%'); continue; }
-                    Some(c2) => { out.push('%'); out.push(c2); }
+                    Some('%') => {
+                        out.push('%');
+                        continue;
+                    }
+                    Some(c2) => {
+                        out.push('%');
+                        out.push(c2);
+                    }
                     None => out.push('%'),
                 }
                 pi += 1;
@@ -1281,9 +1690,9 @@ fn builtin_shift(state: &mut ShellState) -> i32 {
 }
 
 fn builtin_exec(args: &[String], _state: &mut ShellState) -> i32 {
+    use nix::unistd::close;
     use std::fs::{File, OpenOptions};
     use std::os::unix::io::{IntoRawFd, RawFd};
-    use nix::unistd::close;
 
     fn dup2_raw(oldfd: RawFd, newfd: RawFd) -> Result<(), String> {
         unsafe {
@@ -1464,7 +1873,9 @@ fn builtin_pushd(args: &[String], state: &mut ShellState) -> i32 {
                 }
             } else {
                 if idx <= state.dir_stack.len() {
-                    state.dir_stack[state.dir_stack.len() - idx].to_string_lossy().to_string()
+                    state.dir_stack[state.dir_stack.len() - idx]
+                        .to_string_lossy()
+                        .to_string()
                 } else {
                     eprintln!("rsh: pushd: invalid stack index: -{}", idx);
                     return 1;
@@ -1505,21 +1916,19 @@ fn builtin_popd(state: &mut ShellState) -> i32 {
     }
 
     match state.dir_stack.pop() {
-        Some(dir) => {
-            match env::set_current_dir(&dir) {
-                Ok(()) => {
-                    if let Ok(new_dir) = env::current_dir() {
-                        update_directory_vars(&new_dir, state);
-                    }
-                    builtin_dirs(state);
-                    0
+        Some(dir) => match env::set_current_dir(&dir) {
+            Ok(()) => {
+                if let Ok(new_dir) = env::current_dir() {
+                    update_directory_vars(&new_dir, state);
                 }
-                Err(e) => {
-                    eprintln!("rsh: popd: {}", e);
-                    1
-                }
+                builtin_dirs(state);
+                0
             }
-        }
+            Err(e) => {
+                eprintln!("rsh: popd: {}", e);
+                1
+            }
+        },
         None => {
             eprintln!("rsh: popd: directory stack empty");
             1
@@ -1565,15 +1974,14 @@ fn builtin_trap(args: &[String], state: &mut ShellState) -> i32 {
             // Validate signal name
             let sig_lower = sig.to_uppercase();
             let valid_signals = vec![
-                "EXIT", "HUP", "INT", "QUIT", "ABRT", "ALRM", "TERM",
-                "USR1", "USR2", "PIPE", "CHLD", "TSTP", "TTIN", "TTOU",
-                "CONT", "STOP", "KILL", "ILL", "FPE", "SEGV", "BUS",
-                "SYS", "TRAP", "CLD", "PWR", "POLL", "PROF", "VTALRM",
-                "XCPU", "XFSZ", "IOT", "EMT", "STKFLT", "IO", "ERR",
-                "RETURN", "DEBUG"
+                "EXIT", "HUP", "INT", "QUIT", "ABRT", "ALRM", "TERM", "USR1", "USR2", "PIPE",
+                "CHLD", "TSTP", "TTIN", "TTOU", "CONT", "STOP", "KILL", "ILL", "FPE", "SEGV",
+                "BUS", "SYS", "TRAP", "CLD", "PWR", "POLL", "PROF", "VTALRM", "XCPU", "XFSZ",
+                "IOT", "EMT", "STKFLT", "IO", "ERR", "RETURN", "DEBUG",
             ];
 
-            let is_valid = valid_signals.iter().any(|&s| s == sig_lower) || sig_lower.parse::<i32>().is_ok();
+            let is_valid =
+                valid_signals.iter().any(|&s| s == sig_lower) || sig_lower.parse::<i32>().is_ok();
 
             if !is_valid {
                 eprintln!("rsh: trap: {} is not a valid signal name", sig);
@@ -1595,11 +2003,14 @@ fn builtin_trap(args: &[String], state: &mut ShellState) -> i32 {
 // ============================================================
 
 fn builtin_double_bracket(args: &[String], state: &mut ShellState) -> i32 {
-    let args: Vec<&str> = args.iter()
+    let args: Vec<&str> = args
+        .iter()
         .map(|s| s.as_str())
         .filter(|s| *s != "]]")
         .collect();
-    if args.is_empty() { return 1; }
+    if args.is_empty() {
+        return 1;
+    }
     eval_cond_expr(&args, &mut 0, state)
 }
 
@@ -1628,7 +2039,9 @@ fn eval_cond_and(args: &[&str], pos: &mut usize, state: &mut ShellState) -> i32 
 }
 
 fn eval_cond_primary(args: &[&str], pos: &mut usize, state: &mut ShellState) -> i32 {
-    if *pos >= args.len() { return 1; }
+    if *pos >= args.len() {
+        return 1;
+    }
 
     if args[*pos] == "!" {
         *pos += 1;
@@ -1638,7 +2051,9 @@ fn eval_cond_primary(args: &[&str], pos: &mut usize, state: &mut ShellState) -> 
     if args[*pos] == "(" {
         *pos += 1;
         let r = eval_cond_expr(args, pos, state);
-        if *pos < args.len() && args[*pos] == ")" { *pos += 1; }
+        if *pos < args.len() && args[*pos] == ")" {
+            *pos += 1;
+        }
         return r;
     }
 
@@ -1647,13 +2062,60 @@ fn eval_cond_primary(args: &[&str], pos: &mut usize, state: &mut ShellState) -> 
         let op = args[*pos];
         let operand = args[*pos + 1];
         let result = match op {
-            "-n" => { *pos += 2; if !operand.is_empty() { 0 } else { 1 } }
-            "-z" => { *pos += 2; if operand.is_empty() { 0 } else { 1 } }
-            "-f" => { *pos += 2; if Path::new(operand).is_file() { 0 } else { 1 } }
-            "-d" => { *pos += 2; if Path::new(operand).is_dir() { 0 } else { 1 } }
-            "-e" => { *pos += 2; if Path::new(operand).exists() { 0 } else { 1 } }
-            "-s" => { *pos += 2; std::fs::metadata(operand).map(|m| if m.len() > 0 { 0 } else { 1 }).unwrap_or(1) }
-            "-r" | "-w" | "-x" => { *pos += 2; if Path::new(operand).exists() { 0 } else { 1 } }
+            "-n" => {
+                *pos += 2;
+                if !operand.is_empty() {
+                    0
+                } else {
+                    1
+                }
+            }
+            "-z" => {
+                *pos += 2;
+                if operand.is_empty() {
+                    0
+                } else {
+                    1
+                }
+            }
+            "-f" => {
+                *pos += 2;
+                if Path::new(operand).is_file() {
+                    0
+                } else {
+                    1
+                }
+            }
+            "-d" => {
+                *pos += 2;
+                if Path::new(operand).is_dir() {
+                    0
+                } else {
+                    1
+                }
+            }
+            "-e" => {
+                *pos += 2;
+                if Path::new(operand).exists() {
+                    0
+                } else {
+                    1
+                }
+            }
+            "-s" => {
+                *pos += 2;
+                std::fs::metadata(operand)
+                    .map(|m| if m.len() > 0 { 0 } else { 1 })
+                    .unwrap_or(1)
+            }
+            "-r" | "-w" | "-x" => {
+                *pos += 2;
+                if Path::new(operand).exists() {
+                    0
+                } else {
+                    1
+                }
+            }
             _ => {
                 if *pos + 2 < args.len() {
                     return eval_cond_binary(args, pos, state);
@@ -1672,15 +2134,24 @@ fn eval_cond_primary(args: &[&str], pos: &mut usize, state: &mut ShellState) -> 
 
     let s = args[*pos];
     *pos += 1;
-    if s.is_empty() { 1 } else { 0 }
+    if s.is_empty() {
+        1
+    } else {
+        0
+    }
 }
 
 fn is_cond_binary_op(op: &str) -> bool {
-    matches!(op, "==" | "=" | "!=" | "<" | ">" | "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge" | "=~")
+    matches!(
+        op,
+        "==" | "=" | "!=" | "<" | ">" | "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge" | "=~"
+    )
 }
 
 fn eval_cond_binary(args: &[&str], pos: &mut usize, state: &mut ShellState) -> i32 {
-    if *pos + 2 > args.len() { return 1; }
+    if *pos + 2 > args.len() {
+        return 1;
+    }
     let left = args[*pos];
     let op = args[*pos + 1];
     let right = args[*pos + 2];
@@ -1688,20 +2159,48 @@ fn eval_cond_binary(args: &[&str], pos: &mut usize, state: &mut ShellState) -> i
     match op {
         "==" | "=" => {
             if right.contains('*') || right.contains('?') {
-                if glob_match(right, left) { 0 } else { 1 }
+                if glob_match(right, left) {
+                    0
+                } else {
+                    1
+                }
             } else {
-                if left == right { 0 } else { 1 }
+                if left == right {
+                    0
+                } else {
+                    1
+                }
             }
         }
         "!=" => {
             if right.contains('*') || right.contains('?') {
-                if glob_match(right, left) { 1 } else { 0 }
+                if glob_match(right, left) {
+                    1
+                } else {
+                    0
+                }
             } else {
-                if left != right { 0 } else { 1 }
+                if left != right {
+                    0
+                } else {
+                    1
+                }
             }
         }
-        "<" => if left < right { 0 } else { 1 },
-        ">" => if left > right { 0 } else { 1 },
+        "<" => {
+            if left < right {
+                0
+            } else {
+                1
+            }
+        }
+        ">" => {
+            if left > right {
+                0
+            } else {
+                1
+            }
+        }
         "-eq" => cmp_int(left, right, |a, b| a == b),
         "-ne" => cmp_int(left, right, |a, b| a != b),
         "-lt" => cmp_int(left, right, |a, b| a < b),
@@ -1716,7 +2215,12 @@ fn eval_cond_binary(args: &[&str], pos: &mut usize, state: &mut ShellState) -> i
                         // Store BASH_REMATCH array
                         let mut rematch = Vec::new();
                         for i in 0..captures.len() {
-                            rematch.push(captures.get(i).map(|m| m.as_str().to_string()).unwrap_or_default());
+                            rematch.push(
+                                captures
+                                    .get(i)
+                                    .map(|m| m.as_str().to_string())
+                                    .unwrap_or_default(),
+                            );
                         }
                         state.arrays.insert("BASH_REMATCH".to_string(), rematch);
                         0
@@ -1760,9 +2264,19 @@ fn builtin_declare(args: &[String], state: &mut ShellState) -> i32 {
     if print {
         for name in &names {
             if let Some(arr) = state.arrays.get(*name) {
-                println!("declare -a {}=({})", name, arr.iter().map(|s| format!("\"{}\"", s)).collect::<Vec<_>>().join(" "));
+                println!(
+                    "declare -a {}=({})",
+                    name,
+                    arr.iter()
+                        .map(|s| format!("\"{}\"", s))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                );
             } else if let Some(map) = state.assoc_arrays.get(*name) {
-                let pairs: Vec<String> = map.iter().map(|(k, v)| format!("[{}]=\"{}\"", k, v)).collect();
+                let pairs: Vec<String> = map
+                    .iter()
+                    .map(|(k, v)| format!("[{}]=\"{}\"", k, v))
+                    .collect();
                 println!("declare -A {}=({})", name, pairs.join(" "));
             } else if let Some(val) = state.get_var(name) {
                 println!("declare -- {}=\"{}\"", name, val);
@@ -1781,17 +2295,23 @@ fn builtin_declare(args: &[String], state: &mut ShellState) -> i32 {
 
         if associative {
             if !state.assoc_arrays.contains_key(var_name) {
-                state.assoc_arrays.insert(var_name.to_string(), std::collections::HashMap::new());
+                state
+                    .assoc_arrays
+                    .insert(var_name.to_string(), std::collections::HashMap::new());
             }
 
             // Parse initialization value like: ([key1]=val1 [key2]=val2)
             if let Some(val) = value {
                 if val.starts_with('(') && val.ends_with(')') {
-                    let inner = &val[1..val.len()-1].trim();
+                    let inner = &val[1..val.len() - 1].trim();
                     parse_assoc_array_init(var_name, inner, state);
                 } else if !val.is_empty() && !val.starts_with('(') {
                     // Handle single value assignment (rare for assoc arrays)
-                    state.assoc_arrays.get_mut(var_name).unwrap().insert("0".to_string(), val.to_string());
+                    state
+                        .assoc_arrays
+                        .get_mut(var_name)
+                        .unwrap()
+                        .insert("0".to_string(), val.to_string());
                 }
             }
         } else if indexed {
@@ -1802,12 +2322,17 @@ fn builtin_declare(args: &[String], state: &mut ShellState) -> i32 {
             // Parse initialization value like: (val1 val2 val3)
             if let Some(val) = value {
                 if val.starts_with('(') && val.ends_with(')') {
-                    let inner = &val[1..val.len()-1];
+                    let inner = &val[1..val.len() - 1];
                     let elements: Vec<&str> = inner.split_whitespace().collect();
-                    *state.arrays.get_mut(var_name).unwrap() = elements.iter().map(|s| s.to_string()).collect();
+                    *state.arrays.get_mut(var_name).unwrap() =
+                        elements.iter().map(|s| s.to_string()).collect();
                 } else if !val.is_empty() && !val.starts_with('(') {
                     // Single value
-                    state.arrays.get_mut(var_name).unwrap().push(val.to_string());
+                    state
+                        .arrays
+                        .get_mut(var_name)
+                        .unwrap()
+                        .push(val.to_string());
                 }
             }
         } else {
@@ -1853,25 +2378,28 @@ fn parse_assoc_array_init(var_name: &str, input: &str, state: &mut ShellState) {
                             break;
                         }
                     }
-                    let val = &value_part[1..end_pos-1];
+                    let val = &value_part[1..end_pos - 1];
                     (val.to_string(), end_pos)
                 } else if value_part.starts_with('\'') {
                     // Single-quoted value
                     if let Some(end) = value_part[1..].find('\'') {
-                        let val = &value_part[1..end+1];
+                        let val = &value_part[1..end + 1];
                         (val.to_string(), end + 2)
                     } else {
                         break;
                     }
                 } else {
                     // Unquoted value (until space or next bracket)
-                    let end_pos = value_part.find(|c: char| c == ' ' || c == '[')
+                    let end_pos = value_part
+                        .find(|c: char| c == ' ' || c == '[')
                         .unwrap_or(value_part.len());
                     (value_part[..end_pos].to_string(), end_pos)
                 };
 
                 // Store in associative array
-                state.assoc_arrays.get_mut(var_name)
+                state
+                    .assoc_arrays
+                    .get_mut(var_name)
                     .unwrap()
                     .insert(key.to_string(), value);
 
@@ -1925,21 +2453,19 @@ fn builtin_z(args: &[String], state: &mut ShellState) -> i32 {
     };
 
     match target {
-        Some(target) => {
-            match env::set_current_dir(&target) {
-                Ok(()) => {
-                    println!("{}", target);
-                    if let Ok(new_dir) = env::current_dir() {
-                        update_directory_vars(&new_dir, state);
-                    }
-                    0
+        Some(target) => match env::set_current_dir(&target) {
+            Ok(()) => {
+                println!("{}", target);
+                if let Ok(new_dir) = env::current_dir() {
+                    update_directory_vars(&new_dir, state);
                 }
-                Err(e) => {
-                    eprintln!("rsh: z: {}: {}", target, e);
-                    1
-                }
+                0
             }
-        }
+            Err(e) => {
+                eprintln!("rsh: z: {}: {}", target, e);
+                1
+            }
+        },
         None => {
             eprintln!("rsh: z: no match for: {}", args.join(" "));
             1
@@ -2010,8 +2536,12 @@ fn builtin_complete(args: &[String], state: &mut ShellState) -> i32 {
             if let Some(ref f) = spec.function {
                 parts.push(format!("-F {}", f));
             }
-            if spec.directory { parts.push("-d".to_string()); }
-            if spec.file { parts.push("-f".to_string()); }
+            if spec.directory {
+                parts.push("-d".to_string());
+            }
+            if spec.file {
+                parts.push("-f".to_string());
+            }
             println!("complete {} {}", parts.join(" "), cmd);
         }
         return 0;
@@ -2032,14 +2562,44 @@ fn builtin_complete(args: &[String], state: &mut ShellState) -> i32 {
 
     while i < args.len() {
         match args[i].as_str() {
-            "-W" => { i += 1; if i < args.len() { word_list = Some(args[i].split_whitespace().map(|s| s.to_string()).collect()); } }
-            "-F" => { i += 1; if i < args.len() { function = Some(args[i].clone()); } }
+            "-W" => {
+                i += 1;
+                if i < args.len() {
+                    word_list = Some(args[i].split_whitespace().map(|s| s.to_string()).collect());
+                }
+            }
+            "-F" => {
+                i += 1;
+                if i < args.len() {
+                    function = Some(args[i].clone());
+                }
+            }
             "-d" => directory = true,
             "-f" => file = true,
-            "-G" => { i += 1; if i < args.len() { glob_pattern = Some(args[i].clone()); } }
-            "-X" => { i += 1; if i < args.len() { filter_pattern = Some(args[i].clone()); } }
-            "-P" => { i += 1; if i < args.len() { prefix = Some(args[i].clone()); } }
-            "-S" => { i += 1; if i < args.len() { suffix = Some(args[i].clone()); } }
+            "-G" => {
+                i += 1;
+                if i < args.len() {
+                    glob_pattern = Some(args[i].clone());
+                }
+            }
+            "-X" => {
+                i += 1;
+                if i < args.len() {
+                    filter_pattern = Some(args[i].clone());
+                }
+            }
+            "-P" => {
+                i += 1;
+                if i < args.len() {
+                    prefix = Some(args[i].clone());
+                }
+            }
+            "-S" => {
+                i += 1;
+                if i < args.len() {
+                    suffix = Some(args[i].clone());
+                }
+            }
             "-r" => remove = true,
             _ => command_name = args[i].clone(),
         }
@@ -2056,22 +2616,27 @@ fn builtin_complete(args: &[String], state: &mut ShellState) -> i32 {
         return 0;
     }
 
-    state.completion_specs.insert(command_name.clone(), crate::environment::CompletionSpec {
-        command: command_name,
-        word_list,
-        function,
-        directory,
-        file,
-        glob_pattern,
-        filter_pattern,
-        prefix,
-        suffix,
-    });
+    state.completion_specs.insert(
+        command_name.clone(),
+        crate::environment::CompletionSpec {
+            command: command_name,
+            word_list,
+            function,
+            directory,
+            file,
+            glob_pattern,
+            filter_pattern,
+            prefix,
+            suffix,
+        },
+    );
     0
 }
 
 fn builtin_compgen(args: &[String], state: &mut ShellState) -> i32 {
-    if args.is_empty() { return 0; }
+    if args.is_empty() {
+        return 0;
+    }
     let mut word_list: Vec<String> = Vec::new();
     let mut action: Option<&str> = None;
     let mut prefix = "";
@@ -2080,16 +2645,45 @@ fn builtin_compgen(args: &[String], state: &mut ShellState) -> i32 {
 
     while i < args.len() {
         match args[i].as_str() {
-            "-W" => { i += 1; if i < args.len() { word_list = args[i].split_whitespace().map(|s| s.to_string()).collect(); } }
-            "-A" => { i += 1; if i < args.len() { action = Some(args[i].as_str()); } }
-            "-c" => { action = Some("command"); }
-            "-b" => { action = Some("builtin"); }
-            "-a" => { action = Some("alias"); }
-            "-d" => { action = Some("directory"); }
-            "-f" => { action = Some("file"); }
-            "-v" => { action = Some("variable"); }
-            "-G" => { i += 1; if i < args.len() { glob_pattern = Some(args[i].as_str()); } }
-            s if !s.starts_with('-') => { prefix = s; }
+            "-W" => {
+                i += 1;
+                if i < args.len() {
+                    word_list = args[i].split_whitespace().map(|s| s.to_string()).collect();
+                }
+            }
+            "-A" => {
+                i += 1;
+                if i < args.len() {
+                    action = Some(args[i].as_str());
+                }
+            }
+            "-c" => {
+                action = Some("command");
+            }
+            "-b" => {
+                action = Some("builtin");
+            }
+            "-a" => {
+                action = Some("alias");
+            }
+            "-d" => {
+                action = Some("directory");
+            }
+            "-f" => {
+                action = Some("file");
+            }
+            "-v" => {
+                action = Some("variable");
+            }
+            "-G" => {
+                i += 1;
+                if i < args.len() {
+                    glob_pattern = Some(args[i].as_str());
+                }
+            }
+            s if !s.starts_with('-') => {
+                prefix = s;
+            }
             _ => {}
         }
         i += 1;
@@ -2102,16 +2696,38 @@ fn builtin_compgen(args: &[String], state: &mut ShellState) -> i32 {
             "command" => {
                 let cache = state.path_cache().clone();
                 results.extend(cache.into_iter().filter(|c| c.starts_with(prefix)));
-                results.extend(BUILTIN_NAMES.iter().filter(|b| b.starts_with(prefix)).map(|s| s.to_string()));
+                results.extend(
+                    BUILTIN_NAMES
+                        .iter()
+                        .filter(|b| b.starts_with(prefix))
+                        .map(|s| s.to_string()),
+                );
             }
             "builtin" => {
-                results.extend(BUILTIN_NAMES.iter().filter(|b| b.starts_with(prefix)).map(|s| s.to_string()));
+                results.extend(
+                    BUILTIN_NAMES
+                        .iter()
+                        .filter(|b| b.starts_with(prefix))
+                        .map(|s| s.to_string()),
+                );
             }
             "alias" => {
-                results.extend(state.aliases.keys().filter(|a| a.starts_with(prefix)).cloned());
+                results.extend(
+                    state
+                        .aliases
+                        .keys()
+                        .filter(|a| a.starts_with(prefix))
+                        .cloned(),
+                );
             }
             "function" => {
-                results.extend(state.functions.keys().filter(|f| f.starts_with(prefix)).cloned());
+                results.extend(
+                    state
+                        .functions
+                        .keys()
+                        .filter(|f| f.starts_with(prefix))
+                        .cloned(),
+                );
             }
             "directory" => {
                 if let Ok(entries) = std::fs::read_dir(".") {
@@ -2140,7 +2756,13 @@ fn builtin_compgen(args: &[String], state: &mut ShellState) -> i32 {
                 }
             }
             "variable" => {
-                results.extend(state.env_vars.keys().filter(|v| v.starts_with(prefix)).cloned());
+                results.extend(
+                    state
+                        .env_vars
+                        .keys()
+                        .filter(|v| v.starts_with(prefix))
+                        .cloned(),
+                );
             }
             _ => {}
         }
@@ -2169,7 +2791,11 @@ fn builtin_compgen(args: &[String], state: &mut ShellState) -> i32 {
     for r in &results {
         println!("{}", r);
     }
-    if results.is_empty() { 1 } else { 0 }
+    if results.is_empty() {
+        1
+    } else {
+        0
+    }
 }
 
 // ============================================================
@@ -2205,7 +2831,7 @@ fn builtin_disown(args: &[String], state: &mut ShellState) -> i32 {
 }
 
 fn builtin_wait(args: &[String], state: &mut ShellState) -> i32 {
-    use nix::sys::wait::{waitpid, WaitStatus, WaitPidFlag};
+    use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
     use nix::unistd::Pid;
 
     if args.is_empty() {
@@ -2252,7 +2878,9 @@ fn builtin_wait(args: &[String], state: &mut ShellState) -> i32 {
                 state.jobs.jobs.retain(|j| j.pid != pid);
                 last_status = 128 + sig as i32;
             }
-            _ => { last_status = 127; }
+            _ => {
+                last_status = 127;
+            }
         }
     }
     last_status
@@ -2480,13 +3108,16 @@ fn builtin_bookmark(args: &[String], state: &mut ShellState) -> i32 {
         "add" => {
             let name = match args.get(1) {
                 Some(n) => n.clone(),
-                None => { eprintln!("Usage: bookmark add <name> [path]"); return 1; }
+                None => {
+                    eprintln!("Usage: bookmark add <name> [path]");
+                    return 1;
+                }
             };
-            let path = args.get(2)
-                .map(|p| p.clone())
-                .unwrap_or_else(|| std::env::current_dir()
+            let path = args.get(2).map(|p| p.clone()).unwrap_or_else(|| {
+                std::env::current_dir()
                     .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_else(|_| ".".to_string()));
+                    .unwrap_or_else(|_| ".".to_string())
+            });
             if let Ok(mut db) = crate::bookmarks::get_bookmark_db().lock() {
                 db.add(&name, &path);
                 println!("Bookmark '{}' -> {}", name, path);
@@ -2496,7 +3127,10 @@ fn builtin_bookmark(args: &[String], state: &mut ShellState) -> i32 {
         "go" => {
             let name = match args.get(1) {
                 Some(n) => n,
-                None => { eprintln!("Usage: bookmark go <name>"); return 1; }
+                None => {
+                    eprintln!("Usage: bookmark go <name>");
+                    return 1;
+                }
             };
             let path = {
                 if let Ok(db) = crate::bookmarks::get_bookmark_db().lock() {
@@ -2533,7 +3167,10 @@ fn builtin_bookmark(args: &[String], state: &mut ShellState) -> i32 {
         "rm" => {
             let name = match args.get(1) {
                 Some(n) => n,
-                None => { eprintln!("Usage: bookmark rm <name>"); return 1; }
+                None => {
+                    eprintln!("Usage: bookmark rm <name>");
+                    return 1;
+                }
             };
             if let Ok(mut db) = crate::bookmarks::get_bookmark_db().lock() {
                 if db.remove(name) {
@@ -2599,56 +3236,161 @@ fn builtin_math(args: &[String]) -> i32 {
     let field = &args[1];
     let records = crate::structured::read_json_stdin();
     match crate::structured::math_op(&records, op, field) {
-        Some(result) => { println!("{}", result); 0 }
-        None => { eprintln!("math: no numeric values for field '{}'", field); 1 }
+        Some(result) => {
+            println!("{}", result);
+            0
+        }
+        None => {
+            eprintln!("math: no numeric values for field '{}'", field);
+            1
+        }
     }
 }
 
 const HELP_ENTRIES: &[(&str, &str)] = &[
-    ("cd", "cd [-] [dir] — Change working directory. cd - returns to previous."),
-    ("exit", "exit [N] — Exit the shell with status N (default: last command's status)."),
-    ("export", "export [-n] name[=value] — Set environment variables. -n unexports."),
+    (
+        "cd",
+        "cd [-] [dir] — Change working directory. cd - returns to previous.",
+    ),
+    (
+        "exit",
+        "exit [N] — Exit the shell with status N (default: last command's status).",
+    ),
+    (
+        "export",
+        "export [-n] name[=value] — Set environment variables. -n unexports.",
+    ),
     ("unset", "unset name... — Remove variables or functions."),
-    ("echo", "echo [-neE] [args...] — Print arguments. -n no newline, -e escapes."),
-    ("printf", "printf format [args...] — Formatted output (C-style)."),
+    (
+        "echo",
+        "echo [-neE] [args...] — Print arguments. -n no newline, -e escapes.",
+    ),
+    (
+        "printf",
+        "printf format [args...] — Formatted output (C-style).",
+    ),
     ("pwd", "pwd — Print current working directory."),
-    ("alias", "alias [name[=value]...] — Define or display aliases."),
-    ("unalias", "unalias [-a] name... — Remove aliases. -a removes all."),
-    ("type", "type name... — Show how each name would be interpreted as a command."),
-    ("source", "source file [args] — Execute commands from file in current shell."),
-    ("eval", "eval [args...] — Concatenate args and execute as a command."),
-    ("read", "read [-p prompt] [-t timeout] [-r] var... — Read line from stdin."),
-    ("test", "test expr / [ expr ] — Evaluate conditional expression."),
-    ("set", "set [-/+euxo option] — Set/unset shell options. set -e enables errexit."),
-    ("local", "local name[=value]... — Declare local variables in a function."),
-    ("shift", "shift [N] — Shift positional parameters left by N (default 1)."),
+    (
+        "alias",
+        "alias [name[=value]...] — Define or display aliases.",
+    ),
+    (
+        "unalias",
+        "unalias [-a] name... — Remove aliases. -a removes all.",
+    ),
+    (
+        "type",
+        "type name... — Show how each name would be interpreted as a command.",
+    ),
+    (
+        "source",
+        "source file [args] — Execute commands from file in current shell.",
+    ),
+    (
+        "eval",
+        "eval [args...] — Concatenate args and execute as a command.",
+    ),
+    (
+        "read",
+        "read [-p prompt] [-t timeout] [-r] var... — Read line from stdin.",
+    ),
+    (
+        "test",
+        "test expr / [ expr ] — Evaluate conditional expression.",
+    ),
+    (
+        "set",
+        "set [-/+euxo option] — Set/unset shell options. set -e enables errexit.",
+    ),
+    (
+        "local",
+        "local name[=value]... — Declare local variables in a function.",
+    ),
+    (
+        "shift",
+        "shift [N] — Shift positional parameters left by N (default 1).",
+    ),
     ("jobs", "jobs — List active jobs."),
     ("fg", "fg [%N] — Bring job N to foreground."),
     ("bg", "bg [%N] — Resume job N in background."),
-    ("wait", "wait [pid|%jobspec...] — Wait for processes to complete."),
-    ("trap", "trap [action] signal... — Set signal handlers. trap '' SIG ignores."),
-    ("return", "return [N] — Return from a function with exit status N."),
+    (
+        "wait",
+        "wait [pid|%jobspec...] — Wait for processes to complete.",
+    ),
+    (
+        "trap",
+        "trap [action] signal... — Set signal handlers. trap '' SIG ignores.",
+    ),
+    (
+        "return",
+        "return [N] — Return from a function with exit status N.",
+    ),
     ("break", "break [N] — Exit from N enclosing loops."),
-    ("continue", "continue [N] — Resume next iteration of Nth enclosing loop."),
-    ("declare", "declare [-aAirx] name[=value] — Declare variables with attributes."),
+    (
+        "continue",
+        "continue [N] — Resume next iteration of Nth enclosing loop.",
+    ),
+    (
+        "declare",
+        "declare [-aAirx] name[=value] — Declare variables with attributes.",
+    ),
     ("history", "history — Display command history."),
-    ("pushd", "pushd [dir] — Push directory onto stack and cd to it."),
+    (
+        "pushd",
+        "pushd [dir] — Push directory onto stack and cd to it.",
+    ),
     ("popd", "popd — Pop directory from stack and cd to it."),
     ("dirs", "dirs — Display directory stack."),
-    ("complete", "complete [-W words] [-F func] cmd — Register completions."),
-    ("compgen", "compgen [-abcdfv] [-A action] [-W words] [-G glob] [prefix]"),
-    ("disown", "disown [-a] [%N] — Remove job from table (won't receive SIGHUP)."),
-    ("shopt", "shopt [-su] opt... — Set/unset shell options (globstar, extglob, etc)."),
-    ("exec", "exec cmd [args] — Replace shell with command (no fork)."),
-    ("z", "z [query] — Jump to frecency-ranked directory matching query."),
-    ("bookmark", "bookmark <add|go|ls|rm> [name] — Manage directory bookmarks."),
-    ("hook", "hook <add|remove|list> <precmd|preexec|chpwd> [cmd]"),
-    ("from-json", "from-json — Parse JSON from stdin into structured pipeline."),
+    (
+        "complete",
+        "complete [-W words] [-F func] cmd — Register completions.",
+    ),
+    (
+        "compgen",
+        "compgen [-abcdfv] [-A action] [-W words] [-G glob] [prefix]",
+    ),
+    (
+        "disown",
+        "disown [-a] [%N] — Remove job from table (won't receive SIGHUP).",
+    ),
+    (
+        "shopt",
+        "shopt [-su] opt... — Set/unset shell options (globstar, extglob, etc).",
+    ),
+    (
+        "exec",
+        "exec cmd [args] — Replace shell with command (no fork).",
+    ),
+    (
+        "z",
+        "z [query] — Jump to frecency-ranked directory matching query.",
+    ),
+    (
+        "bookmark",
+        "bookmark <add|go|ls|rm> [name] — Manage directory bookmarks.",
+    ),
+    (
+        "hook",
+        "hook <add|remove|list> <precmd|preexec|chpwd> [cmd]",
+    ),
+    (
+        "from-json",
+        "from-json — Parse JSON from stdin into structured pipeline.",
+    ),
     ("to-json", "to-json — Output structured data as JSON."),
-    ("to-table", "to-table — Output structured data as aligned table."),
+    (
+        "to-table",
+        "to-table — Output structured data as aligned table.",
+    ),
     ("where", "where field op value — Filter structured records."),
-    ("sort-by", "sort-by field — Sort structured records by field."),
-    ("select", "select field... — Project fields from structured records."),
+    (
+        "sort-by",
+        "sort-by field — Sort structured records by field.",
+    ),
+    (
+        "select",
+        "select field... — Project fields from structured records.",
+    ),
 ];
 
 fn builtin_help(args: &[String], state: &ShellState) -> i32 {
@@ -2687,19 +3429,28 @@ fn builtin_help(args: &[String], state: &ShellState) -> i32 {
     for a in args {
         match a.as_str() {
             "-r" | "--record" => as_record = true,
-            other => { if cmd.is_none() { cmd = Some(other); } }
+            other => {
+                if cmd.is_none() {
+                    cmd = Some(other);
+                }
+            }
         }
     }
     let cmd = match cmd {
         Some(c) => c,
-        None => { return builtin_help(&[], state); }
+        None => {
+            return builtin_help(&[], state);
+        }
     };
 
     // Phase 15c: user-defined signatures take precedence so re-defs are visible.
     if let Some(rsig) = state.user_signatures.get(cmd) {
         if as_record {
-            println!("{{\"name\":\"{}\",\"user_defined\":true,\"params\":{}}}",
-                rsig.name, rsig.params.len());
+            println!(
+                "{{\"name\":\"{}\",\"user_defined\":true,\"params\":{}}}",
+                rsig.name,
+                rsig.params.len()
+            );
         } else {
             print!("{}", rsig.render_help());
         }

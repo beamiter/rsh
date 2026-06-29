@@ -1,18 +1,28 @@
 /// Phase 8a — closure-body expression evaluator.
 /// Closures can now do `$a + $b`, `$r.age > 30`, etc. without the body being
 /// interpreted as a shell command pipeline.
-
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-fn rsh_bin() -> String { env!("CARGO_BIN_EXE_rsh").to_string() }
+fn rsh_bin() -> String {
+    env!("CARGO_BIN_EXE_rsh").to_string()
+}
 
 fn run(script: &str, stdin: &str) -> (String, String, i32) {
     let mut child = Command::new(rsh_bin())
-        .arg("-c").arg(script)
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-        .spawn().expect("spawn");
-    child.stdin.as_mut().unwrap().write_all(stdin.as_bytes()).unwrap();
+        .arg("-c")
+        .arg(script)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(stdin.as_bytes())
+        .unwrap();
     let out = child.wait_with_output().expect("wait");
     (
         String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -131,7 +141,7 @@ fn each_string_concat() {
     );
     assert_eq!(code, 0, "stderr: {}", err);
     let p: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
-    assert_eq!(p, serde_json::json!(["alice!","bob!"]));
+    assert_eq!(p, serde_json::json!(["alice!", "bob!"]));
 }
 
 // ---------------------------------------------------------------------------

@@ -7,9 +7,8 @@
 ///   pipeline        = ['!'] command ('|' command)*
 ///   command         = simple_command | compound_command | function_def
 ///   simple_command  = (assignment)* word+ (redirect)*
-
 use super::ast::*;
-use super::lexer::{Lexer, SpannedToken, Token, RedirectOp};
+use super::lexer::{Lexer, RedirectOp, SpannedToken, Token};
 
 #[derive(Debug)]
 pub enum ParseError {
@@ -34,8 +33,14 @@ fn split_for_header(s: &str) -> Vec<String> {
     let mut depth = 0i32;
     for c in s.chars() {
         match c {
-            '(' => { depth += 1; cur.push(c); }
-            ')' => { depth -= 1; cur.push(c); }
+            '(' => {
+                depth += 1;
+                cur.push(c);
+            }
+            ')' => {
+                depth -= 1;
+                cur.push(c);
+            }
             ';' if depth == 0 => {
                 parts.push(cur.trim().to_string());
                 cur.clear();
@@ -62,7 +67,13 @@ impl<'a> Parser<'a> {
     pub fn new(input: &'a str) -> Self {
         let mut lexer = Lexer::new(input);
         let current = lexer.next_token();
-        Parser { lexer, current, peeked: None, input, heredoc_skips: Vec::new() }
+        Parser {
+            lexer,
+            current,
+            peeked: None,
+            input,
+            heredoc_skips: Vec::new(),
+        }
     }
 
     fn advance(&mut self) {
@@ -81,7 +92,11 @@ impl<'a> Parser<'a> {
             return;
         }
         let pos = self.current.span.0;
-        if let Some(i) = self.heredoc_skips.iter().position(|(trigger, _)| *trigger == pos) {
+        if let Some(i) = self
+            .heredoc_skips
+            .iter()
+            .position(|(trigger, _)| *trigger == pos)
+        {
             let (_, resume) = self.heredoc_skips.remove(i);
             self.lexer.set_pos(resume.min(self.input.len()));
             self.peeked = None;
@@ -103,7 +118,10 @@ impl<'a> Parser<'a> {
                 Ok(w)
             }
             Token::Eof => Err(ParseError::Incomplete),
-            other => Err(ParseError::Unexpected(format!("expected word, got {:?}", other))),
+            other => Err(ParseError::Unexpected(format!(
+                "expected word, got {:?}",
+                other
+            ))),
         }
     }
 
@@ -112,7 +130,12 @@ impl<'a> Parser<'a> {
     /// (so any same-line tokens like `| sort` are left for normal lexing) and runs
     /// until a line equal to the delimiter. A skip is registered so the lexer steps
     /// over the body once the line-ending newline is consumed.
-    fn collect_here_doc_content(&mut self, delimiter: &str, strip_tabs: bool, after_delim: usize) -> String {
+    fn collect_here_doc_content(
+        &mut self,
+        delimiter: &str,
+        strip_tabs: bool,
+        after_delim: usize,
+    ) -> String {
         let input = self.input;
         let after_delim = after_delim.min(input.len());
 
@@ -130,7 +153,11 @@ impl<'a> Parser<'a> {
 
         for line in remaining.lines() {
             let line_len = line.len();
-            let trimmed = if strip_tabs { line.trim_start_matches('\t') } else { line };
+            let trimmed = if strip_tabs {
+                line.trim_start_matches('\t')
+            } else {
+                line
+            };
 
             if trimmed == delimiter {
                 resume = (body_start + line_start + line_len + 1).min(input.len());
@@ -169,16 +196,27 @@ impl<'a> Parser<'a> {
         } else if self.current.token == Token::Eof {
             Err(ParseError::Incomplete)
         } else {
-            Err(ParseError::Unexpected(format!("expected '{}', got {:?}", kw, self.current.token)))
+            Err(ParseError::Unexpected(format!(
+                "expected '{}', got {:?}",
+                kw, self.current.token
+            )))
         }
     }
 
     fn is_redirect(&self) -> bool {
-        matches!(self.current.token,
-            Token::RedirectOut | Token::RedirectAppend | Token::RedirectIn |
-            Token::HereDoc | Token::HereDocStrip | Token::HereString | Token::DupFd |
-            Token::RedirectAllOut | Token::RedirectAllAppend |
-            Token::RedirectFd(_, _))
+        matches!(
+            self.current.token,
+            Token::RedirectOut
+                | Token::RedirectAppend
+                | Token::RedirectIn
+                | Token::HereDoc
+                | Token::HereDocStrip
+                | Token::HereString
+                | Token::DupFd
+                | Token::RedirectAllOut
+                | Token::RedirectAllAppend
+                | Token::RedirectFd(_, _)
+        )
     }
 
     fn parse_redirect(&mut self) -> Result<Redirect, ParseError> {
@@ -220,8 +258,11 @@ impl<'a> Parser<'a> {
                 let quoted = delimiter.starts_with('\\')
                     || delimiter.starts_with('\'')
                     || delimiter.starts_with('"');
-                let clean_delim = delimiter.trim_matches(|c| c == '\\' || c == '\'' || c == '"').to_string();
-                let c = self.collect_here_doc_content(&clean_delim, is_heredoc_strip, delim_span_end);
+                let clean_delim = delimiter
+                    .trim_matches(|c| c == '\\' || c == '\'' || c == '"')
+                    .to_string();
+                let c =
+                    self.collect_here_doc_content(&clean_delim, is_heredoc_strip, delim_span_end);
                 (c, !quoted)
             } else {
                 // HereString: content is the target string itself; expansion happens
@@ -240,7 +281,12 @@ impl<'a> Parser<'a> {
         };
 
         let target = parse_word_parts(&target_str);
-        Ok(Redirect { fd, kind, target, here_doc: here_doc_opt })
+        Ok(Redirect {
+            fd,
+            kind,
+            target,
+            here_doc: here_doc_opt,
+        })
     }
 
     fn is_command_start(&mut self) -> bool {
@@ -271,7 +317,11 @@ impl<'a> Parser<'a> {
                 false
             };
             if is_assign {
-                let w = if let Token::Word(w) = &self.current.token { w.clone() } else { unreachable!() };
+                let w = if let Token::Word(w) = &self.current.token {
+                    w.clone()
+                } else {
+                    unreachable!()
+                };
                 let assign = parse_assignment(&w, self)?;
                 assignments.push(assign);
                 continue;
@@ -294,11 +344,16 @@ impl<'a> Parser<'a> {
 
         if words.is_empty() && assignments.is_empty() && redirects.is_empty() {
             return Err(ParseError::Unexpected(format!(
-                "expected command, got {:?}", self.current.token
+                "expected command, got {:?}",
+                self.current.token
             )));
         }
 
-        Ok(Command::Simple(SimpleCommand { assignments, words, redirects }))
+        Ok(Command::Simple(SimpleCommand {
+            assignments,
+            words,
+            redirects,
+        }))
     }
 
     fn parse_compound_command(&mut self) -> Result<Command, ParseError> {
@@ -351,7 +406,10 @@ impl<'a> Parser<'a> {
         }
         self.advance();
         let redirects = self.parse_optional_redirects()?;
-        Ok(Command::Compound(CompoundCommand::Subshell { body, redirects }))
+        Ok(Command::Compound(CompoundCommand::Subshell {
+            body,
+            redirects,
+        }))
     }
 
     fn parse_brace_group(&mut self) -> Result<Command, ParseError> {
@@ -367,7 +425,10 @@ impl<'a> Parser<'a> {
         }
         self.advance();
         let redirects = self.parse_optional_redirects()?;
-        Ok(Command::Compound(CompoundCommand::BraceGroup { body, redirects }))
+        Ok(Command::Compound(CompoundCommand::BraceGroup {
+            body,
+            redirects,
+        }))
     }
 
     fn parse_if(&mut self) -> Result<Command, ParseError> {
@@ -401,7 +462,11 @@ impl<'a> Parser<'a> {
         }
         self.expect_keyword("fi")?;
         let redirects = self.parse_optional_redirects()?;
-        Ok(Command::Compound(CompoundCommand::If { conditions, else_branch, redirects }))
+        Ok(Command::Compound(CompoundCommand::If {
+            conditions,
+            else_branch,
+            redirects,
+        }))
     }
 
     fn parse_for(&mut self) -> Result<Command, ParseError> {
@@ -443,7 +508,12 @@ impl<'a> Parser<'a> {
         let body = self.parse_command_list()?;
         self.expect_keyword("done")?;
         let redirects = self.parse_optional_redirects()?;
-        Ok(Command::Compound(CompoundCommand::For { var, words, body, redirects }))
+        Ok(Command::Compound(CompoundCommand::For {
+            var,
+            words,
+            body,
+            redirects,
+        }))
     }
 
     fn parse_c_style_for(&mut self) -> Result<Command, ParseError> {
@@ -510,7 +580,11 @@ impl<'a> Parser<'a> {
         let body = self.parse_command_list()?;
         self.expect_keyword("done")?;
         let redirects = self.parse_optional_redirects()?;
-        Ok(Command::Compound(CompoundCommand::While { condition, body, redirects }))
+        Ok(Command::Compound(CompoundCommand::While {
+            condition,
+            body,
+            redirects,
+        }))
     }
 
     fn parse_until(&mut self) -> Result<Command, ParseError> {
@@ -522,7 +596,11 @@ impl<'a> Parser<'a> {
         let body = self.parse_command_list()?;
         self.expect_keyword("done")?;
         let redirects = self.parse_optional_redirects()?;
-        Ok(Command::Compound(CompoundCommand::Until { condition, body, redirects }))
+        Ok(Command::Compound(CompoundCommand::Until {
+            condition,
+            body,
+            redirects,
+        }))
     }
 
     fn parse_case(&mut self) -> Result<Command, ParseError> {
@@ -548,23 +626,43 @@ impl<'a> Parser<'a> {
                 patterns.push(parse_word_parts(&p));
             }
             if self.current.token != Token::RParen {
-                return Err(ParseError::Unexpected(format!("expected ')' in case, got {:?}", self.current.token)));
+                return Err(ParseError::Unexpected(format!(
+                    "expected ')' in case, got {:?}",
+                    self.current.token
+                )));
             }
             self.advance();
             self.skip_newlines();
             let body = self.parse_command_list()?;
             let terminator = match self.current.token {
-                Token::DoubleSemi => { self.advance(); CaseTerminator::Break }
-                Token::SemiAmp => { self.advance(); CaseTerminator::FallThrough }
-                Token::DoubleSemiAmp => { self.advance(); CaseTerminator::ContinueMatch }
+                Token::DoubleSemi => {
+                    self.advance();
+                    CaseTerminator::Break
+                }
+                Token::SemiAmp => {
+                    self.advance();
+                    CaseTerminator::FallThrough
+                }
+                Token::DoubleSemiAmp => {
+                    self.advance();
+                    CaseTerminator::ContinueMatch
+                }
                 _ => CaseTerminator::Break, // last arm: directly before esac
             };
             self.skip_newlines();
-            arms.push(CaseArm { patterns, body, terminator });
+            arms.push(CaseArm {
+                patterns,
+                body,
+                terminator,
+            });
         }
         self.expect_keyword("esac")?;
         let redirects = self.parse_optional_redirects()?;
-        Ok(Command::Compound(CompoundCommand::Case { word, arms, redirects }))
+        Ok(Command::Compound(CompoundCommand::Case {
+            word,
+            arms,
+            redirects,
+        }))
     }
 
     /// Heuristic: is the current `select` token followed by `var in ...; do`?
@@ -581,7 +679,10 @@ impl<'a> Parser<'a> {
         if let Token::Word(w) = &next {
             // bash select var must be a plain identifier (no flags, no dots).
             if !w.is_empty()
-                && w.chars().next().map(|c| c.is_alphabetic() || c == '_').unwrap_or(false)
+                && w.chars()
+                    .next()
+                    .map(|c| c.is_alphabetic() || c == '_')
+                    .unwrap_or(false)
                 && w.chars().all(|c| c.is_alphanumeric() || c == '_')
             {
                 // Now peek one further: tentatively advance past `select` and the var.
@@ -589,7 +690,7 @@ impl<'a> Parser<'a> {
                 let saved_peeked = self.peeked.clone();
                 self.advance(); // consume select
                 self.advance(); // consume var
-                // skip newlines / semicolons
+                                // skip newlines / semicolons
                 while matches!(self.current.token, Token::Newline | Token::Semi) {
                     self.advance();
                 }
@@ -644,7 +745,12 @@ impl<'a> Parser<'a> {
         let body = self.parse_command_list()?;
         self.expect_keyword("done")?;
         let redirects = self.parse_optional_redirects()?;
-        Ok(Command::Compound(CompoundCommand::Select { var, words, body, redirects }))
+        Ok(Command::Compound(CompoundCommand::Select {
+            var,
+            words,
+            body,
+            redirects,
+        }))
     }
 
     fn parse_arithmetic_command(&mut self) -> Result<Command, ParseError> {
@@ -709,7 +815,10 @@ impl<'a> Parser<'a> {
 
         let expr = expr_tokens.join(" ");
         let redirects = self.parse_optional_redirects()?;
-        Ok(Command::Compound(CompoundCommand::Arithmetic { expr, redirects }))
+        Ok(Command::Compound(CompoundCommand::Arithmetic {
+            expr,
+            redirects,
+        }))
     }
 
     fn parse_optional_redirects(&mut self) -> Result<Vec<Redirect>, ParseError> {
@@ -736,7 +845,10 @@ impl<'a> Parser<'a> {
                             self.skip_newlines();
                             let body = self.parse_compound_command()?;
                             if let Command::Compound(c) = body {
-                                return Ok(Command::FunctionDef { name, body: Box::new(c) });
+                                return Ok(Command::FunctionDef {
+                                    name,
+                                    body: Box::new(c),
+                                });
                             }
                         }
                     }
@@ -787,7 +899,9 @@ impl<'a> Parser<'a> {
                             redirects,
                         }));
                     } else {
-                        return Err(ParseError::Unexpected("coproc requires a simple command".into()));
+                        return Err(ParseError::Unexpected(
+                            "coproc requires a simple command".into(),
+                        ));
                     }
                 } else {
                     unreachable!()
@@ -806,9 +920,14 @@ impl<'a> Parser<'a> {
                 self.skip_newlines();
                 let body = self.parse_compound_command()?;
                 if let Command::Compound(c) = body {
-                    Ok(Command::FunctionDef { name, body: Box::new(c) })
+                    Ok(Command::FunctionDef {
+                        name,
+                        body: Box::new(c),
+                    })
                 } else {
-                    Err(ParseError::Unexpected("expected compound command after function name".into()))
+                    Err(ParseError::Unexpected(
+                        "expected compound command after function name".into(),
+                    ))
                 }
             }
             _ => self.parse_simple_command(),
@@ -855,11 +974,21 @@ impl<'a> Parser<'a> {
     fn parse_complete_command(&mut self) -> Result<CompleteCommand, ParseError> {
         let list = self.parse_and_or()?;
         let (background, disown) = match &self.current.token {
-            Token::Amp => { self.advance(); (true, false) }
-            Token::AmpBang => { self.advance(); (true, true) }
+            Token::Amp => {
+                self.advance();
+                (true, false)
+            }
+            Token::AmpBang => {
+                self.advance();
+                (true, true)
+            }
             _ => (false, false),
         };
-        Ok(CompleteCommand { list, background, disown })
+        Ok(CompleteCommand {
+            list,
+            background,
+            disown,
+        })
     }
 
     fn parse_command_list(&mut self) -> Result<Vec<CompleteCommand>, ParseError> {
@@ -881,7 +1010,8 @@ impl<'a> Parser<'a> {
         let cmds = self.parse_command_list()?;
         if self.current.token != Token::Eof {
             return Err(ParseError::Unexpected(format!(
-                "unexpected token {:?}", self.current.token
+                "unexpected token {:?}",
+                self.current.token
             )));
         }
         Ok(cmds)
@@ -895,7 +1025,10 @@ pub fn is_incomplete(input: &str) -> bool {
     let mut in_double = false;
     let mut escaped = false;
     for c in input.chars() {
-        if escaped { escaped = false; continue; }
+        if escaped {
+            escaped = false;
+            continue;
+        }
         match c {
             '\\' if !in_single => escaped = true,
             '\'' if !in_double => in_single = !in_single,
@@ -903,11 +1036,17 @@ pub fn is_incomplete(input: &str) -> bool {
             _ => {}
         }
     }
-    if in_single || in_double { return true; }
+    if in_single || in_double {
+        return true;
+    }
 
     // Check for trailing pipe, &&, ||, or backslash
     let trimmed = input.trim_end();
-    if trimmed.ends_with('|') || trimmed.ends_with("&&") || trimmed.ends_with("||") || trimmed.ends_with('\\') {
+    if trimmed.ends_with('|')
+        || trimmed.ends_with("&&")
+        || trimmed.ends_with("||")
+        || trimmed.ends_with('\\')
+    {
         return true;
     }
 
@@ -936,8 +1075,25 @@ pub fn parse(input: &str) -> Result<Vec<CompleteCommand>, ParseError> {
 // --- Helper functions ---
 
 fn is_reserved_word(w: &str) -> bool {
-    matches!(w, "if" | "then" | "else" | "elif" | "fi" | "for" | "in" | "do" | "done" |
-             "while" | "until" | "case" | "esac" | "function" | "!" | "{" | "}")
+    matches!(
+        w,
+        "if" | "then"
+            | "else"
+            | "elif"
+            | "fi"
+            | "for"
+            | "in"
+            | "do"
+            | "done"
+            | "while"
+            | "until"
+            | "case"
+            | "esac"
+            | "function"
+            | "!"
+            | "{"
+            | "}"
+    )
 }
 
 fn is_compound_keyword(w: &str) -> bool {
@@ -946,7 +1102,10 @@ fn is_compound_keyword(w: &str) -> bool {
 
 /// Keywords that terminate a command list (not valid as the start of a new command).
 fn is_list_terminator(w: &str) -> bool {
-    matches!(w, "then" | "else" | "elif" | "fi" | "do" | "done" | "esac" | "}" | ")")
+    matches!(
+        w,
+        "then" | "else" | "elif" | "fi" | "do" | "done" | "esac" | "}" | ")"
+    )
 }
 
 fn is_assignment(w: &str) -> bool {
@@ -978,15 +1137,20 @@ fn is_assignment(w: &str) -> bool {
 }
 
 fn is_valid_assign_lhs(s: &str) -> bool {
-    if s.is_empty() { return false; }
+    if s.is_empty() {
+        return false;
+    }
     // Could be "name" or "name[idx]"
     let name = if let Some(bracket) = s.find('[') {
-        if !s.ends_with(']') { return false; }
+        if !s.ends_with(']') {
+            return false;
+        }
         &s[..bracket]
     } else {
         s
     };
-    !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_')
+    !name.is_empty()
+        && name.chars().all(|c| c.is_alphanumeric() || c == '_')
         && !name.starts_with(|c: char| c.is_ascii_digit())
 }
 
@@ -1068,7 +1232,8 @@ fn parse_assignment(w: &str, parser: &mut Parser) -> Result<Assignment, ParseErr
     // Check for complete array literal: name=(a b c) all in one token
     if value_str.starts_with('(') && value_str.ends_with(')') {
         let inner = &value_str[1..value_str.len() - 1];
-        let array_words: Vec<Word> = inner.split_whitespace()
+        let array_words: Vec<Word> = inner
+            .split_whitespace()
             .map(|s| parse_word_parts(s))
             .collect();
         parser.advance();
@@ -1109,23 +1274,40 @@ fn try_parse_closure(raw: &str) -> Option<WordPart> {
         return None;
     }
     let inner = &raw[2..raw.len() - 1]; // strip {| and }
-    // Find the closing `|` for the params section. It's the first `|` at depth 0
-    // (we already consumed the opening one), respecting nested quotes/braces.
+                                        // Find the closing `|` for the params section. It's the first `|` at depth 0
+                                        // (we already consumed the opening one), respecting nested quotes/braces.
     let mut depth: i32 = 0;
     let mut in_single = false;
     let mut in_double = false;
     let mut split: Option<usize> = None;
     let mut prev_escape = false;
     for (i, c) in inner.char_indices() {
-        if prev_escape { prev_escape = false; continue; }
-        if c == '\\' { prev_escape = true; continue; }
-        if !in_double && c == '\'' { in_single = !in_single; continue; }
-        if !in_single && c == '"' { in_double = !in_double; continue; }
-        if in_single || in_double { continue; }
+        if prev_escape {
+            prev_escape = false;
+            continue;
+        }
+        if c == '\\' {
+            prev_escape = true;
+            continue;
+        }
+        if !in_double && c == '\'' {
+            in_single = !in_single;
+            continue;
+        }
+        if !in_single && c == '"' {
+            in_double = !in_double;
+            continue;
+        }
+        if in_single || in_double {
+            continue;
+        }
         match c {
             '{' => depth += 1,
             '}' => depth -= 1,
-            '|' if depth == 0 => { split = Some(i); break; }
+            '|' if depth == 0 => {
+                split = Some(i);
+                break;
+            }
             _ => {}
         }
     }
@@ -1153,14 +1335,18 @@ fn try_read_path(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Vec<Pa
                 let mut probe = chars.clone();
                 probe.next();
                 let ok = matches!(probe.peek(), Some(&c) if c.is_alphanumeric() || c == '_');
-                if !ok { break; }
+                if !ok {
+                    break;
+                }
                 chars.next();
                 let mut field = String::new();
                 while let Some(&c) = chars.peek() {
                     if c.is_alphanumeric() || c == '_' {
                         field.push(c);
                         chars.next();
-                    } else { break; }
+                    } else {
+                        break;
+                    }
                 }
                 if !field.is_empty() && field.chars().all(|c| c.is_ascii_digit()) {
                     if let Ok(n) = field.parse::<i64>() {
@@ -1174,17 +1360,33 @@ fn try_read_path(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Vec<Pa
                 let mut probe = chars.clone();
                 probe.next();
                 let neg = probe.peek() == Some(&'-');
-                if neg { probe.next(); }
+                if neg {
+                    probe.next();
+                }
                 let mut idx = String::new();
                 let mut closed = false;
                 while let Some(&c) = probe.peek() {
-                    if c == ']' { closed = true; break; }
-                    if c.is_ascii_digit() { idx.push(c); probe.next(); } else { break; }
+                    if c == ']' {
+                        closed = true;
+                        break;
+                    }
+                    if c.is_ascii_digit() {
+                        idx.push(c);
+                        probe.next();
+                    } else {
+                        break;
+                    }
                 }
-                if !closed || idx.is_empty() { break; }
+                if !closed || idx.is_empty() {
+                    break;
+                }
                 chars.next();
-                if neg { chars.next(); }
-                for _ in 0..idx.len() { chars.next(); }
+                if neg {
+                    chars.next();
+                }
+                for _ in 0..idx.len() {
+                    chars.next();
+                }
                 chars.next();
                 let n: i64 = idx.parse().unwrap_or(0);
                 path.push(PathSeg::Index(if neg { -n } else { n }));
@@ -1202,7 +1404,10 @@ fn read_interpolated(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Ve
     let mut lit = String::new();
     while let Some(&c) = chars.peek() {
         match c {
-            '"' => { chars.next(); break; }
+            '"' => {
+                chars.next();
+                break;
+            }
             '\\' => {
                 chars.next();
                 match chars.next() {
@@ -1210,7 +1415,10 @@ fn read_interpolated(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Ve
                     Some('n') => lit.push('\n'),
                     Some('t') => lit.push('\t'),
                     Some('r') => lit.push('\r'),
-                    Some(other) => { lit.push('\\'); lit.push(other); }
+                    Some(other) => {
+                        lit.push('\\');
+                        lit.push(other);
+                    }
                     None => lit.push('\\'),
                 }
             }
@@ -1223,13 +1431,27 @@ fn read_interpolated(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Ve
                 let mut depth = 1;
                 while let Some(&c2) = chars.peek() {
                     chars.next();
-                    if c2 == '(' { depth += 1; body.push(c2); continue; }
-                    if c2 == ')' { depth -= 1; if depth == 0 { break; } body.push(c2); continue; }
+                    if c2 == '(' {
+                        depth += 1;
+                        body.push(c2);
+                        continue;
+                    }
+                    if c2 == ')' {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                        body.push(c2);
+                        continue;
+                    }
                     body.push(c2);
                 }
                 parts.push(InterpPart::Expr(parse_word_parts(&body)));
             }
-            _ => { lit.push(c); chars.next(); }
+            _ => {
+                lit.push(c);
+                chars.next();
+            }
         }
     }
     if !lit.is_empty() {
@@ -1257,7 +1479,10 @@ pub fn parse_word_parts(raw: &str) -> Word {
                 chars.next();
                 let mut s = String::new();
                 while let Some(&c2) = chars.peek() {
-                    if c2 == '\'' { chars.next(); break; }
+                    if c2 == '\'' {
+                        chars.next();
+                        break;
+                    }
                     s.push(c2);
                     chars.next();
                 }
@@ -1270,7 +1495,10 @@ pub fn parse_word_parts(raw: &str) -> Word {
                 chars.next();
                 let mut inner = String::new();
                 while let Some(&c2) = chars.peek() {
-                    if c2 == '"' { chars.next(); break; }
+                    if c2 == '"' {
+                        chars.next();
+                        break;
+                    }
                     if c2 == '\\' {
                         chars.next();
                         // Preserve the backslash; parse_word_parts_inner decides whether
@@ -1302,10 +1530,16 @@ pub fn parse_word_parts(raw: &str) -> Word {
                             if c2 == '\\' {
                                 raw.push('\\');
                                 chars.next();
-                                if let Some(&c3) = chars.peek() { raw.push(c3); chars.next(); }
+                                if let Some(&c3) = chars.peek() {
+                                    raw.push(c3);
+                                    chars.next();
+                                }
                                 continue;
                             }
-                            if c2 == '\'' { chars.next(); break; }
+                            if c2 == '\'' {
+                                chars.next();
+                                break;
+                            }
                             raw.push(c2);
                             chars.next();
                         }
@@ -1324,7 +1558,9 @@ pub fn parse_word_parts(raw: &str) -> Word {
                                     if chars.peek() == Some(&')') {
                                         chars.next();
                                         depth -= 1;
-                                        if depth == 0 { break; }
+                                        if depth == 0 {
+                                            break;
+                                        }
                                     }
                                     expr.push(')');
                                 } else if c2 == '(' {
@@ -1347,10 +1583,15 @@ pub fn parse_word_parts(raw: &str) -> Word {
                             let mut cmd = String::new();
                             let mut depth = 1;
                             while let Some(&c2) = chars.peek() {
-                                if c2 == '(' { depth += 1; }
+                                if c2 == '(' {
+                                    depth += 1;
+                                }
                                 if c2 == ')' {
                                     depth -= 1;
-                                    if depth == 0 { chars.next(); break; }
+                                    if depth == 0 {
+                                        chars.next();
+                                        break;
+                                    }
                                 }
                                 cmd.push(c2);
                                 chars.next();
@@ -1362,7 +1603,10 @@ pub fn parse_word_parts(raw: &str) -> Word {
                         chars.next();
                         let mut var = String::new();
                         while let Some(&c2) = chars.peek() {
-                            if c2 == '}' { chars.next(); break; }
+                            if c2 == '}' {
+                                chars.next();
+                                break;
+                            }
                             var.push(c2);
                             chars.next();
                         }
@@ -1373,7 +1617,16 @@ pub fn parse_word_parts(raw: &str) -> Word {
                         let interp = read_interpolated(&mut chars);
                         parts.push(WordPart::Interpolated(interp));
                     }
-                    Some(&c2) if c2.is_alphanumeric() || c2 == '_' || c2 == '?' || c2 == '$' || c2 == '!' || c2 == '#' || c2 == '@' || c2 == '*' => {
+                    Some(&c2)
+                        if c2.is_alphanumeric()
+                            || c2 == '_'
+                            || c2 == '?'
+                            || c2 == '$'
+                            || c2 == '!'
+                            || c2 == '#'
+                            || c2 == '@'
+                            || c2 == '*' =>
+                    {
                         let mut var = String::new();
                         if "?$!#@*".contains(c2) {
                             var.push(c2);
@@ -1407,7 +1660,10 @@ pub fn parse_word_parts(raw: &str) -> Word {
                 chars.next();
                 let mut cmd = String::new();
                 while let Some(&c2) = chars.peek() {
-                    if c2 == '`' { chars.next(); break; }
+                    if c2 == '`' {
+                        chars.next();
+                        break;
+                    }
                     if c2 == '\\' {
                         chars.next();
                         if let Some(&c3) = chars.peek() {
@@ -1425,7 +1681,9 @@ pub fn parse_word_parts(raw: &str) -> Word {
                 chars.next();
                 let mut user = String::new();
                 while let Some(&c2) = chars.peek() {
-                    if c2 == '/' || c2 == ':' { break; }
+                    if c2 == '/' || c2 == ':' {
+                        break;
+                    }
                     user.push(c2);
                     chars.next();
                 }
@@ -1436,16 +1694,25 @@ pub fn parse_word_parts(raw: &str) -> Word {
                 if !literal.is_empty() {
                     parts.push(WordPart::Literal(std::mem::take(&mut literal)));
                 }
-                let kind = if c == '<' { ProcessSubKind::Input } else { ProcessSubKind::Output };
+                let kind = if c == '<' {
+                    ProcessSubKind::Input
+                } else {
+                    ProcessSubKind::Output
+                };
                 chars.next(); // consume < or >
                 chars.next(); // consume (
                 let mut cmd = String::new();
                 let mut depth = 1;
                 while let Some(&c2) = chars.peek() {
-                    if c2 == '(' { depth += 1; }
+                    if c2 == '(' {
+                        depth += 1;
+                    }
                     if c2 == ')' {
                         depth -= 1;
-                        if depth == 0 { chars.next(); break; }
+                        if depth == 0 {
+                            chars.next();
+                            break;
+                        }
                     }
                     cmd.push(c2);
                     chars.next();
@@ -1463,7 +1730,9 @@ pub fn parse_word_parts(raw: &str) -> Word {
                     while let Some(&c2) = chars.peek() {
                         glob.push(c2);
                         chars.next();
-                        if c2 == ']' { break; }
+                        if c2 == ']' {
+                            break;
+                        }
                     }
                 }
                 parts.push(WordPart::Glob(glob));
@@ -1486,10 +1755,16 @@ pub fn parse_word_parts(raw: &str) -> Word {
                 let mut found_close = false;
                 let save = chars.clone();
                 while let Some(&c2) = chars.peek() {
-                    if c2 == '{' { depth += 1; }
+                    if c2 == '{' {
+                        depth += 1;
+                    }
                     if c2 == '}' {
                         depth -= 1;
-                        if depth == 0 { chars.next(); found_close = true; break; }
+                        if depth == 0 {
+                            chars.next();
+                            found_close = true;
+                            break;
+                        }
                     }
                     content.push(c2);
                     chars.next();
@@ -1500,7 +1775,9 @@ pub fn parse_word_parts(raw: &str) -> Word {
                     literal.push_str(&content);
                     chars = save;
                     // Consume all characters we already consumed from save
-                    for _ in 0..content.len() { chars.next(); }
+                    for _ in 0..content.len() {
+                        chars.next();
+                    }
                     continue;
                 }
                 // Check if it's a range: start..end[..step]
@@ -1508,9 +1785,8 @@ pub fn parse_word_parts(raw: &str) -> Word {
                     parts.push(range);
                 } else if content.contains(',') && !looks_like_json_object(&content) {
                     // Comma-separated brace expansion: {a,b,c}
-                    let items: Vec<Vec<WordPart>> = content.split(',')
-                        .map(|s| parse_word_parts(s))
-                        .collect();
+                    let items: Vec<Vec<WordPart>> =
+                        content.split(',').map(|s| parse_word_parts(s)).collect();
                     parts.push(WordPart::BraceExpansion(items));
                 } else {
                     // Not a valid brace expansion (or it's a JSON object) — keep literal.
@@ -1547,8 +1823,13 @@ fn parse_word_parts_inner(input: &str) -> Vec<WordPart> {
             // Inside double quotes, backslash only escapes $ ` " \ (and newline).
             chars.next();
             match chars.peek() {
-                Some(&c2 @ ('$' | '`' | '"' | '\\')) => { literal.push(c2); chars.next(); }
-                Some(&'\n') => { chars.next(); } // line continuation
+                Some(&c2 @ ('$' | '`' | '"' | '\\')) => {
+                    literal.push(c2);
+                    chars.next();
+                }
+                Some(&'\n') => {
+                    chars.next();
+                } // line continuation
                 _ => literal.push('\\'),
             }
         } else if c == '`' {
@@ -1558,10 +1839,16 @@ fn parse_word_parts_inner(input: &str) -> Vec<WordPart> {
             chars.next();
             let mut cmd = String::new();
             while let Some(&c2) = chars.peek() {
-                if c2 == '`' { chars.next(); break; }
+                if c2 == '`' {
+                    chars.next();
+                    break;
+                }
                 if c2 == '\\' {
                     chars.next();
-                    if let Some(&c3) = chars.peek() { cmd.push(c3); chars.next(); }
+                    if let Some(&c3) = chars.peek() {
+                        cmd.push(c3);
+                        chars.next();
+                    }
                     continue;
                 }
                 cmd.push(c2);
@@ -1574,7 +1861,16 @@ fn parse_word_parts_inner(input: &str) -> Vec<WordPart> {
             }
             chars.next();
             match chars.peek() {
-                Some(&c2) if c2.is_alphanumeric() || c2 == '_' || c2 == '?' || c2 == '$' || c2 == '!' || c2 == '#' || c2 == '@' || c2 == '*' => {
+                Some(&c2)
+                    if c2.is_alphanumeric()
+                        || c2 == '_'
+                        || c2 == '?'
+                        || c2 == '$'
+                        || c2 == '!'
+                        || c2 == '#'
+                        || c2 == '@'
+                        || c2 == '*' =>
+                {
                     let mut var = String::new();
                     if "?$!#@*".contains(c2) {
                         var.push(c2);
@@ -1601,8 +1897,16 @@ fn parse_word_parts_inner(input: &str) -> Vec<WordPart> {
                     let mut var = String::new();
                     let mut depth = 1;
                     while let Some(&c2) = chars.peek() {
-                        if c2 == '{' { depth += 1; }
-                        if c2 == '}' { depth -= 1; if depth == 0 { chars.next(); break; } }
+                        if c2 == '{' {
+                            depth += 1;
+                        }
+                        if c2 == '}' {
+                            depth -= 1;
+                            if depth == 0 {
+                                chars.next();
+                                break;
+                            }
+                        }
                         var.push(c2);
                         chars.next();
                     }
@@ -1621,7 +1925,9 @@ fn parse_word_parts_inner(input: &str) -> Vec<WordPart> {
                                 if chars.peek() == Some(&')') {
                                     chars.next();
                                     depth -= 1;
-                                    if depth == 0 { break; }
+                                    if depth == 0 {
+                                        break;
+                                    }
                                     expr.push_str("))");
                                 } else {
                                     expr.push(')');
@@ -1641,8 +1947,16 @@ fn parse_word_parts_inner(input: &str) -> Vec<WordPart> {
                         let mut cmd = String::new();
                         let mut depth = 1;
                         while let Some(&c2) = chars.peek() {
-                            if c2 == '(' { depth += 1; }
-                            if c2 == ')' { depth -= 1; if depth == 0 { chars.next(); break; } }
+                            if c2 == '(' {
+                                depth += 1;
+                            }
+                            if c2 == ')' {
+                                depth -= 1;
+                                if depth == 0 {
+                                    chars.next();
+                                    break;
+                                }
+                            }
                             cmd.push(c2);
                             chars.next();
                         }
@@ -1689,26 +2003,38 @@ fn decode_ansi_c(s: &str) -> String {
                 let mut hex = String::new();
                 while hex.len() < 2 {
                     match chars.peek() {
-                        Some(&h) if h.is_ascii_hexdigit() => { hex.push(h); chars.next(); }
+                        Some(&h) if h.is_ascii_hexdigit() => {
+                            hex.push(h);
+                            chars.next();
+                        }
                         _ => break,
                     }
                 }
                 if let Ok(n) = u32::from_str_radix(&hex, 16) {
-                    if let Some(ch) = char::from_u32(n) { out.push(ch); }
+                    if let Some(ch) = char::from_u32(n) {
+                        out.push(ch);
+                    }
                 } else {
-                    out.push('\\'); out.push('x'); out.push_str(&hex);
+                    out.push('\\');
+                    out.push('x');
+                    out.push_str(&hex);
                 }
             }
             Some('u') => {
                 let mut hex = String::new();
                 while hex.len() < 4 {
                     match chars.peek() {
-                        Some(&h) if h.is_ascii_hexdigit() => { hex.push(h); chars.next(); }
+                        Some(&h) if h.is_ascii_hexdigit() => {
+                            hex.push(h);
+                            chars.next();
+                        }
                         _ => break,
                     }
                 }
                 if let Ok(n) = u32::from_str_radix(&hex, 16) {
-                    if let Some(ch) = char::from_u32(n) { out.push(ch); }
+                    if let Some(ch) = char::from_u32(n) {
+                        out.push(ch);
+                    }
                 }
             }
             Some(c @ '0'..='7') => {
@@ -1716,15 +2042,23 @@ fn decode_ansi_c(s: &str) -> String {
                 oct.push(c);
                 while oct.len() < 3 {
                     match chars.peek() {
-                        Some(&o) if ('0'..='7').contains(&o) => { oct.push(o); chars.next(); }
+                        Some(&o) if ('0'..='7').contains(&o) => {
+                            oct.push(o);
+                            chars.next();
+                        }
                         _ => break,
                     }
                 }
                 if let Ok(n) = u32::from_str_radix(&oct, 8) {
-                    if let Some(ch) = char::from_u32(n) { out.push(ch); }
+                    if let Some(ch) = char::from_u32(n) {
+                        out.push(ch);
+                    }
                 }
             }
-            Some(other) => { out.push('\\'); out.push(other); }
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
             None => out.push('\\'),
         }
     }

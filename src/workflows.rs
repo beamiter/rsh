@@ -1,6 +1,5 @@
 /// Workflows: parameterized command templates with fuzzy search and interactive filling.
 /// Inspired by Warp's Workflows but local-first and extensible.
-
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -55,7 +54,9 @@ impl WorkflowRegistry {
     }
 
     fn load_user(&mut self) {
-        if !self.user_dir.exists() { return; }
+        if !self.user_dir.exists() {
+            return;
+        }
         if let Ok(entries) = std::fs::read_dir(&self.user_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -172,7 +173,9 @@ pub struct WorkflowSession {
 
 impl WorkflowSession {
     pub fn new(workflow: Workflow) -> Self {
-        let param_values = workflow.parameters.iter()
+        let param_values = workflow
+            .parameters
+            .iter()
             .map(|p| (p.name.clone(), p.default.clone().unwrap_or_default()))
             .collect();
         WorkflowSession {

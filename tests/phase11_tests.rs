@@ -1,16 +1,26 @@
 /// Phase 11 — sort/to-csv/chunks/window/split-by + encode/decode (base64/hex).
-
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-fn rsh_bin() -> String { env!("CARGO_BIN_EXE_rsh").to_string() }
+fn rsh_bin() -> String {
+    env!("CARGO_BIN_EXE_rsh").to_string()
+}
 
 fn run(script: &str, stdin: &str) -> (String, String, i32) {
     let mut child = Command::new(rsh_bin())
-        .arg("-c").arg(script)
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-        .spawn().expect("spawn");
-    child.stdin.as_mut().unwrap().write_all(stdin.as_bytes()).unwrap();
+        .arg("-c")
+        .arg(script)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(stdin.as_bytes())
+        .unwrap();
     let out = child.wait_with_output().expect("wait");
     (
         String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -41,16 +51,16 @@ fn sort_descending_flag() {
 
 #[test]
 fn sort_strings() {
-    let (out, _, _) = run("from-json | sort | to-json", r#"["banana", "apple", "cherry"]"#);
+    let (out, _, _) = run(
+        "from-json | sort | to-json",
+        r#"["banana", "apple", "cherry"]"#,
+    );
     assert_eq!(squash(&out), r#"["apple","banana","cherry"]"#);
 }
 
 #[test]
 fn to_csv_basic() {
-    let (out, _, _) = run(
-        "from-json | to-csv",
-        r#"[{"a":1,"b":"x"},{"a":2,"b":"y"}]"#,
-    );
+    let (out, _, _) = run("from-json | to-csv", r#"[{"a":1,"b":"x"},{"a":2,"b":"y"}]"#);
     let lines: Vec<&str> = out.trim().lines().collect();
     assert_eq!(lines, vec!["a,b", "1,x", "2,y"]);
 }
@@ -79,7 +89,10 @@ fn window_default_stride_1() {
 
 #[test]
 fn window_custom_stride() {
-    let (out, _, _) = run("from-json | window 3 --stride 2 | to-json", "[1,2,3,4,5,6,7]");
+    let (out, _, _) = run(
+        "from-json | window 3 --stride 2 | to-json",
+        "[1,2,3,4,5,6,7]",
+    );
     assert_eq!(squash(&out), "[[1,2,3],[3,4,5],[5,6,7]]");
 }
 

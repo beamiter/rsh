@@ -3,7 +3,7 @@ use std::env;
 use std::path::PathBuf;
 use std::sync::mpsc;
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 use crate::job::JobTable;
 use crate::parser::ast::CompoundCommand;
@@ -16,16 +16,16 @@ pub enum EditingMode {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ConfigSource {
-    Bashrc,    // 使用 .bashrc，直接用 bash 执行
-    Rshrc,     // 使用 .rshrc，用 rsh 解析器执行
+    Bashrc, // 使用 .bashrc，直接用 bash 执行
+    Rshrc,  // 使用 .rshrc，用 rsh 解析器执行
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PromptStyle {
-    Full,     // user@host ~/path (branch) took duration ❯
-    Compact,  // user ~/path (branch) ❯
-    Minimal,  // ~/path ❯
-    Auto,     // Automatically choose based on terminal width
+    Full,    // user@host ~/path (branch) took duration ❯
+    Compact, // user ~/path (branch) ❯
+    Minimal, // ~/path ❯
+    Auto,    // Automatically choose based on terminal width
 }
 
 impl Default for PromptStyle {
@@ -36,21 +36,21 @@ impl Default for PromptStyle {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShellOpts {
-    pub errexit: bool,        // set -e
-    pub xtrace: bool,         // set -x
-    pub pipefail: bool,       // set -o pipefail
-    pub globstar: bool,       // set -o globstar
-    pub dotglob: bool,        // shopt dotglob: match hidden files
-    pub nullglob: bool,       // shopt nullglob: empty string for no matches
-    pub failglob: bool,       // shopt failglob: error on no matches
-    pub extglob: bool,        // shopt extglob: extended glob patterns
-    pub nocaseglob: bool,     // shopt nocaseglob: case-insensitive matching
-    pub noglob: bool,         // shopt noglob: disable pathname expansion
-    pub lastpipe: bool,       // shopt lastpipe: last pipe component in current shell
-    pub autocd: bool,         // shopt autocd: cd to bare directory names
-    pub cdspell: bool,        // shopt cdspell: correct cd spelling errors
-    pub checkwinsize: bool,   // shopt checkwinsize: update LINES/COLUMNS
-    pub inherit_errexit: bool,// shopt inherit_errexit: subshells inherit errexit
+    pub errexit: bool,               // set -e
+    pub xtrace: bool,                // set -x
+    pub pipefail: bool,              // set -o pipefail
+    pub globstar: bool,              // set -o globstar
+    pub dotglob: bool,               // shopt dotglob: match hidden files
+    pub nullglob: bool,              // shopt nullglob: empty string for no matches
+    pub failglob: bool,              // shopt failglob: error on no matches
+    pub extglob: bool,               // shopt extglob: extended glob patterns
+    pub nocaseglob: bool,            // shopt nocaseglob: case-insensitive matching
+    pub noglob: bool,                // shopt noglob: disable pathname expansion
+    pub lastpipe: bool,              // shopt lastpipe: last pipe component in current shell
+    pub autocd: bool,                // shopt autocd: cd to bare directory names
+    pub cdspell: bool,               // shopt cdspell: correct cd spelling errors
+    pub checkwinsize: bool,          // shopt checkwinsize: update LINES/COLUMNS
+    pub inherit_errexit: bool,       // shopt inherit_errexit: subshells inherit errexit
     pub config_source: ConfigSource, // which config file to use: .bashrc or .rshrc
 }
 
@@ -80,9 +80,9 @@ impl Default for ShellOpts {
 /// Hook lists for shell events.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ShellHooks {
-    pub precmd: Vec<String>,   // run before each prompt
-    pub preexec: Vec<String>,  // run before each command
-    pub chpwd: Vec<String>,    // run after directory change
+    pub precmd: Vec<String>,  // run before each prompt
+    pub preexec: Vec<String>, // run before each command
+    pub chpwd: Vec<String>,   // run after directory change
 }
 
 /// Completion specification for a command.
@@ -271,8 +271,7 @@ impl ShellState {
             }
         }
         // Fall back to env_vars
-        self.env_vars.get(name)
-            .map(|s| s.as_str())
+        self.env_vars.get(name).map(|s| s.as_str())
     }
 
     fn detect_terminal_width() -> usize {
@@ -286,9 +285,7 @@ impl ShellState {
         }
 
         // Try stty size
-        if let Ok(output) = std::process::Command::new("stty")
-            .arg("size")
-            .output() {
+        if let Ok(output) = std::process::Command::new("stty").arg("size").output() {
             if let Ok(output_str) = String::from_utf8(output.stdout) {
                 let parts: Vec<&str> = output_str.split_whitespace().collect();
                 if parts.len() >= 2 {
@@ -304,7 +301,6 @@ impl ShellState {
         // Default fallback
         80
     }
-
 
     pub fn set_var(&mut self, name: &str, value: &str) {
         if self.env_vars.contains_key(name) {
@@ -355,15 +351,13 @@ impl ShellState {
     fn invalidate_path_cache(&mut self) {
         self.path_cache = None;
         // Update the hash for the next check
-        self.path_hash = Self::hash_path(
-            self.env_vars.get("PATH").map(|s| s.as_str()).unwrap_or("")
-        );
+        self.path_hash =
+            Self::hash_path(self.env_vars.get("PATH").map(|s| s.as_str()).unwrap_or(""));
     }
 
     pub fn path_cache(&mut self) -> &Vec<String> {
-        let current_path_hash = Self::hash_path(
-            self.env_vars.get("PATH").map(|s| s.as_str()).unwrap_or("")
-        );
+        let current_path_hash =
+            Self::hash_path(self.env_vars.get("PATH").map(|s| s.as_str()).unwrap_or(""));
 
         if self.path_hash != current_path_hash {
             self.path_cache = None;
@@ -424,7 +418,8 @@ impl ShellState {
     }
 
     pub fn push_positional_params(&mut self, args: Vec<String>) {
-        self.positional_stack.push(std::mem::replace(&mut self.positional_params, args));
+        self.positional_stack
+            .push(std::mem::replace(&mut self.positional_params, args));
     }
 
     pub fn pop_positional_params(&mut self) {
@@ -447,7 +442,9 @@ impl ShellState {
 
     pub fn set_array_element(&mut self, name: &str, index: &str, value: &str) {
         if self.assoc_arrays.contains_key(name) {
-            self.assoc_arrays.get_mut(name).unwrap()
+            self.assoc_arrays
+                .get_mut(name)
+                .unwrap()
                 .insert(index.to_string(), value.to_string());
         } else {
             let arr = self.arrays.entry(name.to_string()).or_default();

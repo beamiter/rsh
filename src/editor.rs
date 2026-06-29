@@ -1,26 +1,27 @@
 /// Line editor: raw mode, cursor movement, inline editing, integration with
 /// highlighting, suggestions, and completion. Supports multiline editing.
-
-use crate::ai::{AiConfig, AiWorker, AiRequest, AiContext, AiResponse};
-use crate::completer::{self, Completion, CompletionKind, common_prefix};
-use crate::workflows;
+use crate::ai::{AiConfig, AiContext, AiRequest, AiResponse, AiWorker};
+use crate::completer::{self, common_prefix, Completion, CompletionKind};
 use crate::environment::ShellState;
 use crate::highlighter;
 use crate::history::History;
 use crate::prompt;
-use crate::signal::{SIGINT_RECEIVED, SIGHUP_RECEIVED};
+use crate::signal::{SIGHUP_RECEIVED, SIGINT_RECEIVED};
 use crate::suggest;
+use crate::workflows;
 
 use nix::libc;
 
 use crossterm::{
     cursor::{self, MoveToColumn, MoveUp},
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
-    style::{Color, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor, Attribute},
+    style::{
+        Attribute, Color, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
+    },
     terminal::{self, Clear, ClearType},
     ExecutableCommand, QueueableCommand,
 };
-use std::io::{self, Write, stdout};
+use std::io::{self, stdout, Write};
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use unicode_width::UnicodeWidthChar;
@@ -33,7 +34,7 @@ enum ViMode {
 
 pub struct Editor {
     buffer: String,
-    cursor: usize,    // byte position in buffer
+    cursor: usize, // byte position in buffer
     saved_buffer: String,
     suggestion: Option<String>,
     terminal_width: u16,
@@ -99,7 +100,9 @@ impl Editor {
             ai_pending: false,
             ai_explain_mode: false,
             last_error_info: None,
-            key_bindings: crate::keybindings::KeyBindingManager::new(crate::keybindings::EditorMode::Emacs),
+            key_bindings: crate::keybindings::KeyBindingManager::new(
+                crate::keybindings::EditorMode::Emacs,
+            ),
             cached_prompt: String::new(),
             last_buffer_snapshot: String::new(),
             last_cursor_snapshot: 0,
@@ -108,7 +111,11 @@ impl Editor {
         }
     }
 
-    pub fn read_line(&mut self, state: &mut ShellState, history: &mut History) -> io::Result<Option<String>> {
+    pub fn read_line(
+        &mut self,
+        state: &mut ShellState,
+        history: &mut History,
+    ) -> io::Result<Option<String>> {
         self.buffer.clear();
         self.cursor = 0;
         self.suggestion = None;
@@ -146,7 +153,11 @@ impl Editor {
         result
     }
 
-    fn edit_loop(&mut self, state: &mut ShellState, history: &mut History) -> io::Result<Option<String>> {
+    fn edit_loop(
+        &mut self,
+        state: &mut ShellState,
+        history: &mut History,
+    ) -> io::Result<Option<String>> {
         // Compute initial suggestion for proactive recommendations on empty buffer
         // (e.g., suggest "git push" right after "git commit")
         self.update_suggestion(history, state);
@@ -193,7 +204,10 @@ impl Editor {
                             if key.code != KeyCode::Enter {
                                 if let Some(menu) = self.completion_menu.take() {
                                     if key.code == KeyCode::Esc {
-                                        self.buffer.replace_range(menu.word_start..self.cursor, &menu.original_word);
+                                        self.buffer.replace_range(
+                                            menu.word_start..self.cursor,
+                                            &menu.original_word,
+                                        );
                                         self.cursor = menu.word_start + menu.original_word.len();
                                     }
                                 }
@@ -298,7 +312,12 @@ impl Editor {
         StdinPoll::Timeout
     }
 
-    fn handle_key(&mut self, key: KeyEvent, state: &mut ShellState, history: &mut History) -> io::Result<KeyAction> {
+    fn handle_key(
+        &mut self,
+        key: KeyEvent,
+        state: &mut ShellState,
+        history: &mut History,
+    ) -> io::Result<KeyAction> {
         if self.workflow_mode.is_some() {
             return self.handle_workflow_key(key, state);
         }
@@ -312,7 +331,12 @@ impl Editor {
         }
     }
 
-    fn handle_emacs_key(&mut self, key: KeyEvent, state: &mut ShellState, history: &mut History) -> io::Result<KeyAction> {
+    fn handle_emacs_key(
+        &mut self,
+        key: KeyEvent,
+        state: &mut ShellState,
+        history: &mut History,
+    ) -> io::Result<KeyAction> {
         match (key.code, key.modifiers) {
             (KeyCode::Enter, _) => {
                 // Accept completion if menu is open
@@ -320,7 +344,8 @@ impl Editor {
                     let completion = &menu.completions[menu.selected];
                     let text = completion.text.clone();
                     let is_dir = completion.is_dir;
-                    self.buffer.replace_range(menu.word_start..self.cursor, &text);
+                    self.buffer
+                        .replace_range(menu.word_start..self.cursor, &text);
                     self.cursor = menu.word_start + text.len();
                     if !is_dir {
                         self.buffer.insert(self.cursor, ' ');
@@ -420,7 +445,8 @@ impl Editor {
                         menu.selected -= 1;
                     }
                     let text = menu.completions[menu.selected].text.clone();
-                    self.buffer.replace_range(menu.word_start..self.cursor, &text);
+                    self.buffer
+                        .replace_range(menu.word_start..self.cursor, &text);
                     self.cursor = menu.word_start + text.len();
                 }
             }
@@ -523,14 +549,24 @@ impl Editor {
         Ok(KeyAction::Continue)
     }
 
-    fn handle_vi_key(&mut self, key: KeyEvent, state: &mut ShellState, history: &mut History) -> io::Result<KeyAction> {
+    fn handle_vi_key(
+        &mut self,
+        key: KeyEvent,
+        state: &mut ShellState,
+        history: &mut History,
+    ) -> io::Result<KeyAction> {
         match self.vi_mode {
             ViMode::Insert => self.handle_vi_insert_key(key, state, history),
             ViMode::Normal => self.handle_vi_normal_key(key, state, history),
         }
     }
 
-    fn handle_vi_insert_key(&mut self, key: KeyEvent, state: &mut ShellState, history: &mut History) -> io::Result<KeyAction> {
+    fn handle_vi_insert_key(
+        &mut self,
+        key: KeyEvent,
+        state: &mut ShellState,
+        history: &mut History,
+    ) -> io::Result<KeyAction> {
         match (key.code, key.modifiers) {
             (KeyCode::Esc, _) => {
                 self.vi_mode = ViMode::Normal;
@@ -547,7 +583,12 @@ impl Editor {
         Ok(KeyAction::Continue)
     }
 
-    fn handle_vi_normal_key(&mut self, key: KeyEvent, _state: &mut ShellState, history: &mut History) -> io::Result<KeyAction> {
+    fn handle_vi_normal_key(
+        &mut self,
+        key: KeyEvent,
+        _state: &mut ShellState,
+        history: &mut History,
+    ) -> io::Result<KeyAction> {
         // Handle pending multi-char commands (dd, dw, etc.)
         if let Some(pending) = self.vi_pending.take() {
             return self.handle_vi_pending(pending, key);
@@ -728,7 +769,8 @@ impl Editor {
                     let completion = &menu.completions[menu.selected];
                     let text = completion.text.clone();
                     let is_dir = completion.is_dir;
-                    self.buffer.replace_range(menu.word_start..self.cursor, &text);
+                    self.buffer
+                        .replace_range(menu.word_start..self.cursor, &text);
                     self.cursor = menu.word_start + text.len();
                     if !is_dir {
                         self.buffer.insert(self.cursor, ' ');
@@ -843,7 +885,10 @@ impl Editor {
                 if let KeyCode::Char(c) = key.code {
                     if self.cursor < self.buffer.len() {
                         let old_char = self.buffer[self.cursor..].chars().next().unwrap();
-                        self.buffer.replace_range(self.cursor..self.cursor + old_char.len_utf8(), &c.to_string());
+                        self.buffer.replace_range(
+                            self.cursor..self.cursor + old_char.len_utf8(),
+                            &c.to_string(),
+                        );
                     }
                 }
             }
@@ -865,7 +910,9 @@ impl Editor {
                 }
                 self.search_mode = None;
             }
-            KeyCode::Up | KeyCode::Char('p') if key.code == KeyCode::Up || key.modifiers == KeyModifiers::CONTROL => {
+            KeyCode::Up | KeyCode::Char('p')
+                if key.code == KeyCode::Up || key.modifiers == KeyModifiers::CONTROL =>
+            {
                 if !search.rich_results.is_empty() {
                     if search.selected > 0 {
                         search.selected -= 1;
@@ -876,7 +923,9 @@ impl Editor {
                     }
                 }
             }
-            KeyCode::Down | KeyCode::Char('n') if key.code == KeyCode::Down || key.modifiers == KeyModifiers::CONTROL => {
+            KeyCode::Down | KeyCode::Char('n')
+                if key.code == KeyCode::Down || key.modifiers == KeyModifiers::CONTROL =>
+            {
                 if !search.rich_results.is_empty() {
                     search.selected = (search.selected + 1).min(search.rich_results.len() - 1);
                     if let Some((result, _, _, _)) = search.rich_results.get(search.selected) {
@@ -897,7 +946,9 @@ impl Editor {
             KeyCode::Backspace => {
                 search.query.pop();
                 search.rich_results = history.search_fuzzy_rich(&search.query);
-                search.results = search.rich_results.iter()
+                search.results = search
+                    .rich_results
+                    .iter()
                     .map(|(cmd, idx, _, _)| (cmd.clone(), idx.clone()))
                     .collect();
                 search.selected = 0;
@@ -906,10 +957,14 @@ impl Editor {
                     self.cursor = self.buffer.len();
                 }
             }
-            KeyCode::Char(c) if key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT => {
+            KeyCode::Char(c)
+                if key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT =>
+            {
                 search.query.push(c);
                 search.rich_results = history.search_fuzzy_rich(&search.query);
-                search.results = search.rich_results.iter()
+                search.results = search
+                    .rich_results
+                    .iter()
                     .map(|(cmd, idx, _, _)| (cmd.clone(), idx.clone()))
                     .collect();
                 search.selected = 0;
@@ -925,7 +980,11 @@ impl Editor {
         Ok(KeyAction::Continue)
     }
 
-    fn handle_workflow_key(&mut self, key: KeyEvent, state: &mut ShellState) -> io::Result<KeyAction> {
+    fn handle_workflow_key(
+        &mut self,
+        key: KeyEvent,
+        state: &mut ShellState,
+    ) -> io::Result<KeyAction> {
         let wf_mode = self.workflow_mode.as_mut().unwrap();
         match key.code {
             KeyCode::Esc => {
@@ -933,9 +992,20 @@ impl Editor {
             }
             KeyCode::Enter => {
                 if let Some(wf) = wf_mode.results.get(wf_mode.selected).cloned() {
-                    let rendered = workflows::fill_template(&wf.command, &wf.parameters.iter()
-                        .map(|p| (p.name.clone(), p.default.clone().unwrap_or_else(|| format!("{{{{{}}}}}", p.name))))
-                        .collect::<Vec<_>>());
+                    let rendered = workflows::fill_template(
+                        &wf.command,
+                        &wf.parameters
+                            .iter()
+                            .map(|p| {
+                                (
+                                    p.name.clone(),
+                                    p.default
+                                        .clone()
+                                        .unwrap_or_else(|| format!("{{{{{}}}}}", p.name)),
+                                )
+                            })
+                            .collect::<Vec<_>>(),
+                    );
                     self.buffer = rendered;
                     self.cursor = self.buffer.len();
                     self.workflow_mode = None;
@@ -953,14 +1023,24 @@ impl Editor {
             }
             KeyCode::Backspace => {
                 wf_mode.query.pop();
-                wf_mode.results = state.workflow_registry.search(&wf_mode.query)
-                    .into_iter().cloned().collect();
+                wf_mode.results = state
+                    .workflow_registry
+                    .search(&wf_mode.query)
+                    .into_iter()
+                    .cloned()
+                    .collect();
                 wf_mode.selected = 0;
             }
-            KeyCode::Char(c) if key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT => {
+            KeyCode::Char(c)
+                if key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT =>
+            {
                 wf_mode.query.push(c);
-                wf_mode.results = state.workflow_registry.search(&wf_mode.query)
-                    .into_iter().cloned().collect();
+                wf_mode.results = state
+                    .workflow_registry
+                    .search(&wf_mode.query)
+                    .into_iter()
+                    .cloned()
+                    .collect();
                 wf_mode.selected = 0;
             }
             _ => {
@@ -974,7 +1054,8 @@ impl Editor {
         if let Some(ref mut menu) = self.completion_menu {
             menu.selected = (menu.selected + 1) % menu.completions.len();
             let text = menu.completions[menu.selected].text.clone();
-            self.buffer.replace_range(menu.word_start..self.cursor, &text);
+            self.buffer
+                .replace_range(menu.word_start..self.cursor, &text);
             self.cursor = menu.word_start + text.len();
             return;
         }
@@ -1021,7 +1102,8 @@ impl Editor {
             .map(|p| p.display().to_string())
             .unwrap_or_default();
         let os = std::env::consts::OS.to_string();
-        let recent_history: Vec<String> = history.entries()
+        let recent_history: Vec<String> = history
+            .entries()
             .iter()
             .rev()
             .take(5)
@@ -1081,7 +1163,10 @@ impl Editor {
                 "Explain this shell command briefly (one line per flag/component): {}",
                 self.buffer
             );
-            worker.request(AiRequest { prompt, context: ctx });
+            worker.request(AiRequest {
+                prompt,
+                context: ctx,
+            });
             self.ai_pending = true;
             self.ai_explain_mode = true;
         }
@@ -1117,14 +1202,22 @@ impl Editor {
 
         if state.editing_mode == crate::environment::EditingMode::Vi {
             match self.vi_mode {
-                ViMode::Normal => { out.queue(Print("\x1b[1 q"))?; }
-                ViMode::Insert => { out.queue(Print("\x1b[5 q"))?; }
+                ViMode::Normal => {
+                    out.queue(Print("\x1b[1 q"))?;
+                }
+                ViMode::Insert => {
+                    out.queue(Print("\x1b[5 q"))?;
+                }
             }
         }
 
         // Fast path: only cursor moved, skip full redraw
         if cursor_only && !self.buffer.contains('\n') {
-            let prompt_last = self.cached_prompt.rsplit('\n').next().unwrap_or(&self.cached_prompt);
+            let prompt_last = self
+                .cached_prompt
+                .rsplit('\n')
+                .next()
+                .unwrap_or(&self.cached_prompt);
             let prompt_width = display_width(prompt_last) as u16;
             let buf_before = &self.buffer[..self.cursor];
             let col = prompt_width + display_width(buf_before) as u16;
@@ -1165,7 +1258,9 @@ impl Editor {
             // Results panel (up to 8 entries)
             let max_show = 8usize.min(self.terminal_height as usize / 3);
             let tw = self.terminal_width as usize;
-            for (i, (cmd, indices, ts, cwd)) in search.rich_results.iter().take(max_show).enumerate() {
+            for (i, (cmd, indices, ts, cwd)) in
+                search.rich_results.iter().take(max_show).enumerate()
+            {
                 let is_sel = i == search.selected;
 
                 // Selection marker
@@ -1179,15 +1274,18 @@ impl Editor {
 
                 // Time + cwd (right-aligned info)
                 let time_str = History::format_relative_time(*ts);
-                let cwd_str = cwd.as_ref().map(|c| {
-                    let home = dirs::home_dir().unwrap_or_default();
-                    let home_str = home.to_string_lossy();
-                    if c.starts_with(home_str.as_ref()) {
-                        format!("~{}", &c[home_str.len()..])
-                    } else {
-                        c.clone()
-                    }
-                }).unwrap_or_default();
+                let cwd_str = cwd
+                    .as_ref()
+                    .map(|c| {
+                        let home = dirs::home_dir().unwrap_or_default();
+                        let home_str = home.to_string_lossy();
+                        if c.starts_with(home_str.as_ref()) {
+                            format!("~{}", &c[home_str.len()..])
+                        } else {
+                            c.clone()
+                        }
+                    })
+                    .unwrap_or_default();
 
                 // Command with match highlighting
                 let cmd_max = tw.saturating_sub(time_str.len() + cwd_str.len() + 8);
@@ -1221,7 +1319,8 @@ impl Editor {
 
                 // Metadata (dim, right side)
                 if !time_str.is_empty() || !cwd_str.is_empty() {
-                    let pad = tw.saturating_sub(cmd_display.len() + time_str.len() + cwd_str.len() + 6);
+                    let pad =
+                        tw.saturating_sub(cmd_display.len() + time_str.len() + cwd_str.len() + 6);
                     if pad > 0 && pad < tw {
                         out.queue(Print(" ".repeat(pad.min(40))))?;
                     }
@@ -1299,7 +1398,11 @@ impl Editor {
             let rprompt_w = prompt::rprompt_width(state);
             if rprompt_w > 0 {
                 let first_line = self.buffer.split('\n').next().unwrap_or("");
-                let prompt_last = self.cached_prompt.rsplit('\n').next().unwrap_or(&self.cached_prompt);
+                let prompt_last = self
+                    .cached_prompt
+                    .rsplit('\n')
+                    .next()
+                    .unwrap_or(&self.cached_prompt);
                 let content_width = display_width(prompt_last) + display_width(first_line);
                 let available = self.terminal_width as usize;
                 if content_width + rprompt_w + 2 < available {
@@ -1320,7 +1423,11 @@ impl Editor {
             }
 
             // Compute cursor screen position accounting for continuation prompts
-            let prompt_last_line = self.cached_prompt.rsplit('\n').next().unwrap_or(&self.cached_prompt);
+            let prompt_last_line = self
+                .cached_prompt
+                .rsplit('\n')
+                .next()
+                .unwrap_or(&self.cached_prompt);
             let prompt_width = display_width(prompt_last_line) as u16;
             let cont_width = display_width(&cont_prompt) as u16;
             let buf_before = &self.buffer[..self.cursor];
@@ -1335,10 +1442,13 @@ impl Editor {
 
             // Phase 16d — signature hint line below the input
             // Only when nothing else owns this slot: no completion menu, no widget mode.
-            if self.completion_menu.is_none() && self.workflow_mode.is_none() && self.search_mode.is_none() {
-                if let Some(hint) = crate::signature::hint_for(
-                    &self.buffer, self.cursor, &state.user_signatures,
-                ) {
+            if self.completion_menu.is_none()
+                && self.workflow_mode.is_none()
+                && self.search_mode.is_none()
+            {
+                if let Some(hint) =
+                    crate::signature::hint_for(&self.buffer, self.cursor, &state.user_signatures)
+                {
                     out.queue(Print("\r\n"))?;
                     out.queue(Print(&hint))?;
                     rendered_lines += 1;
@@ -1393,7 +1503,10 @@ impl Editor {
             ];
 
             // Flatten groups into ordered items with badge info
-            let non_empty_groups: Vec<_> = groups.iter().filter(|(_, _, items)| !items.is_empty()).collect();
+            let non_empty_groups: Vec<_> = groups
+                .iter()
+                .filter(|(_, _, items)| !items.is_empty())
+                .collect();
             let single_group = non_empty_groups.len() == 1;
 
             struct FlatItem<'a> {
@@ -1440,7 +1553,12 @@ impl Editor {
             }
 
             let mut prev_group_header = "";
-            for (idx, item) in flat_items.iter().enumerate().skip(scroll_offset).take(max_visible) {
+            for (idx, item) in flat_items
+                .iter()
+                .enumerate()
+                .skip(scroll_offset)
+                .take(max_visible)
+            {
                 let is_selected = idx == menu.selected;
 
                 // Print group header if this is first item of a new group in visible range
@@ -1478,7 +1596,11 @@ impl Editor {
 
                 // Highlight selected item
                 if is_selected {
-                    out.queue(SetBackgroundColor(Color::Rgb { r: 50, g: 50, b: 80 }))?;
+                    out.queue(SetBackgroundColor(Color::Rgb {
+                        r: 50,
+                        g: 50,
+                        b: 80,
+                    }))?;
                     out.queue(SetForegroundColor(Color::White))?;
                     out.queue(SetAttribute(Attribute::Bold))?;
                 } else if item.comp.is_dir {
@@ -1487,7 +1609,11 @@ impl Editor {
 
                 // Display name
                 let name_width = 20usize.min(self.terminal_width as usize / 3);
-                out.queue(Print(format!("{:<width$}", item.comp.display, width = name_width)))?;
+                out.queue(Print(format!(
+                    "{:<width$}",
+                    item.comp.display,
+                    width = name_width
+                )))?;
 
                 if is_selected {
                     out.queue(SetBackgroundColor(Color::Reset))?;
@@ -1503,8 +1629,13 @@ impl Editor {
                         if d != "builtin" && d != "alias" && d != "function" {
                             out.queue(SetAttribute(Attribute::Dim))?;
                             out.queue(SetForegroundColor(Color::White))?;
-                            let max_desc = (self.terminal_width as usize).saturating_sub(name_width + 5);
-                            let truncated = if d.len() > max_desc { &d[..max_desc] } else { d.as_str() };
+                            let max_desc =
+                                (self.terminal_width as usize).saturating_sub(name_width + 5);
+                            let truncated = if d.len() > max_desc {
+                                &d[..max_desc]
+                            } else {
+                                d.as_str()
+                            };
                             out.queue(Print(truncated))?;
                             out.queue(ResetColor)?;
                         }
@@ -1538,7 +1669,11 @@ impl Editor {
             out.queue(Print(" WORKFLOWS "))?;
             out.queue(ResetColor)?;
             out.queue(SetForegroundColor(Color::Yellow))?;
-            out.queue(Print(format!("[{}/{}] ", wf_mode.results.len(), wf_mode.results.len())))?;
+            out.queue(Print(format!(
+                "[{}/{}] ",
+                wf_mode.results.len(),
+                wf_mode.results.len()
+            )))?;
             out.queue(ResetColor)?;
             out.queue(Print(format!("❯ {}", wf_mode.query)))?;
             out.queue(Print("\r\n"))?;
@@ -1557,7 +1692,11 @@ impl Editor {
                 }
 
                 // Workflow name
-                out.queue(SetForegroundColor(if is_sel { Color::Green } else { Color::Cyan }))?;
+                out.queue(SetForegroundColor(if is_sel {
+                    Color::Green
+                } else {
+                    Color::Cyan
+                }))?;
                 out.queue(SetAttribute(Attribute::Bold))?;
                 out.queue(Print(format!("{:<20}", wf.name)))?;
                 out.queue(ResetColor)?;
@@ -1595,7 +1734,10 @@ impl Editor {
 
             if wf_mode.results.len() > max_show {
                 out.queue(SetAttribute(Attribute::Dim))?;
-                out.queue(Print(format!("  ... +{} more", wf_mode.results.len() - max_show)))?;
+                out.queue(Print(format!(
+                    "  ... +{} more",
+                    wf_mode.results.len() - max_show
+                )))?;
                 out.queue(ResetColor)?;
                 out.queue(Print("\r\n"))?;
                 rendered_lines += 1;
@@ -1695,15 +1837,22 @@ impl Editor {
 
     fn move_cursor_up(&mut self) {
         let (line_start, col) = self.current_line_col();
-        if line_start == 0 { return; }
-        let prev_nl = self.buffer[..line_start - 1].rfind('\n').map(|p| p + 1).unwrap_or(0);
+        if line_start == 0 {
+            return;
+        }
+        let prev_nl = self.buffer[..line_start - 1]
+            .rfind('\n')
+            .map(|p| p + 1)
+            .unwrap_or(0);
         let prev_line = &self.buffer[prev_nl..line_start - 1];
         let target_col = col.min(display_width_raw(prev_line));
         // Walk chars until we reach target display column
         let mut current_col = 0;
         let mut byte_offset = 0;
         for c in prev_line.chars() {
-            if current_col >= target_col { break; }
+            if current_col >= target_col {
+                break;
+            }
             current_col += char_width(c);
             byte_offset += c.len_utf8();
         }
@@ -1713,9 +1862,12 @@ impl Editor {
     fn move_cursor_down(&mut self) {
         let (_line_start, col) = self.current_line_col();
         let next_nl = self.buffer[self.cursor..].find('\n');
-        if next_nl.is_none() { return; }
+        if next_nl.is_none() {
+            return;
+        }
         let next_line_start = self.cursor + next_nl.unwrap() + 1;
-        let next_line_end = self.buffer[next_line_start..].find('\n')
+        let next_line_end = self.buffer[next_line_start..]
+            .find('\n')
             .map(|p| next_line_start + p)
             .unwrap_or(self.buffer.len());
         let next_line = &self.buffer[next_line_start..next_line_end];
@@ -1723,7 +1875,9 @@ impl Editor {
         let mut current_col = 0;
         let mut byte_offset = 0;
         for c in next_line.chars() {
-            if current_col >= target_col { break; }
+            if current_col >= target_col {
+                break;
+            }
             current_col += char_width(c);
             byte_offset += c.len_utf8();
         }
@@ -1739,55 +1893,77 @@ impl Editor {
         // Skip current word (non-whitespace)
         for c in chars.by_ref() {
             moved += c.len_utf8();
-            if c.is_whitespace() { break; }
+            if c.is_whitespace() {
+                break;
+            }
         }
         // Skip whitespace
         for c in chars {
-            if !c.is_whitespace() { break; }
+            if !c.is_whitespace() {
+                break;
+            }
             moved += c.len_utf8();
         }
         self.cursor = (self.cursor + moved).min(self.buffer.len());
     }
 
     fn vi_word_backward(&mut self) {
-        if self.cursor == 0 { return; }
+        if self.cursor == 0 {
+            return;
+        }
         let buf = &self.buffer[..self.cursor];
         let mut pos = self.cursor;
         // Skip trailing whitespace
         for c in buf.chars().rev() {
-            if !c.is_whitespace() { break; }
+            if !c.is_whitespace() {
+                break;
+            }
             pos -= c.len_utf8();
         }
         // Skip word chars
         let buf = &self.buffer[..pos];
         for c in buf.chars().rev() {
-            if c.is_whitespace() { break; }
+            if c.is_whitespace() {
+                break;
+            }
             pos -= c.len_utf8();
         }
         self.cursor = pos;
     }
 
     fn vi_word_end(&mut self) {
-        if self.cursor >= self.buffer.len() { return; }
-        let start = self.cursor + self.buffer[self.cursor..].chars().next().map_or(0, |c| c.len_utf8());
+        if self.cursor >= self.buffer.len() {
+            return;
+        }
+        let start = self.cursor
+            + self.buffer[self.cursor..]
+                .chars()
+                .next()
+                .map_or(0, |c| c.len_utf8());
         let buf = &self.buffer[start..];
         let mut moved = 0;
         let mut chars = buf.chars();
         // Skip whitespace
         for c in chars.by_ref() {
             moved += c.len_utf8();
-            if !c.is_whitespace() { break; }
+            if !c.is_whitespace() {
+                break;
+            }
         }
         // Move to end of word
         for c in chars {
-            if c.is_whitespace() { break; }
+            if c.is_whitespace() {
+                break;
+            }
             moved += c.len_utf8();
         }
         self.cursor = (start + moved).min(self.buffer.len());
     }
 
     fn prev_char_boundary_from(&self, pos: usize) -> usize {
-        if pos == 0 { return 0; }
+        if pos == 0 {
+            return 0;
+        }
         let mut p = pos - 1;
         while p > 0 && !self.buffer.is_char_boundary(p) {
             p -= 1;
@@ -1853,7 +2029,9 @@ fn display_width(s: &str) -> usize {
 }
 
 fn char_width(c: char) -> usize {
-    if c == '\0' { return 0; }
+    if c == '\0' {
+        return 0;
+    }
     UnicodeWidthChar::width(c).unwrap_or(0)
 }
 
@@ -1878,5 +2056,9 @@ fn find_next_word_boundary(s: &str) -> usize {
     if i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'/') {
         i += 1;
     }
-    if i == 0 { s.len() } else { i }
+    if i == 0 {
+        s.len()
+    } else {
+        i
+    }
 }

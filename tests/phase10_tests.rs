@@ -1,16 +1,26 @@
 /// Phase 10 — math extensions, regex support, and table utilities.
-
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-fn rsh_bin() -> String { env!("CARGO_BIN_EXE_rsh").to_string() }
+fn rsh_bin() -> String {
+    env!("CARGO_BIN_EXE_rsh").to_string()
+}
 
 fn run(script: &str, stdin: &str) -> (String, String, i32) {
     let mut child = Command::new(rsh_bin())
-        .arg("-c").arg(script)
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-        .spawn().expect("spawn");
-    child.stdin.as_mut().unwrap().write_all(stdin.as_bytes()).unwrap();
+        .arg("-c")
+        .arg(script)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(stdin.as_bytes())
+        .unwrap();
     let out = child.wait_with_output().expect("wait");
     (
         String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -170,8 +180,20 @@ fn shuffle_actually_randomizes() {
     // Run shuffle a few times on a large input; not all outputs should be
     // identical to the input order. (Tiny chance of false negative, but with
     // 100 elements that's effectively zero.)
-    let input: String = format!("[{}]", (0..100).map(|i| i.to_string()).collect::<Vec<_>>().join(","));
+    let input: String = format!(
+        "[{}]",
+        (0..100)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    );
     let (out, _, _) = run("from-json | shuffle | to-json", &input);
-    let identity: String = format!("[{}]", (0..100).map(|i| i.to_string()).collect::<Vec<_>>().join(","));
+    let identity: String = format!(
+        "[{}]",
+        (0..100)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    );
     assert_ne!(squash(&out), squash(&identity));
 }
