@@ -218,7 +218,7 @@ impl Editor {
                             KeyAction::Continue => {}
                             KeyAction::Submit => {
                                 self.suggestion = None;
-                                self.repaint(state)?;
+                                self.repaint_for_submit(state)?;
                                 print!("\r\n");
                                 let line = self.buffer.clone();
                                 return Ok(Some(line));
@@ -226,7 +226,7 @@ impl Editor {
                             KeyAction::Eof => {
                                 if self.buffer.is_empty() {
                                     self.suggestion = None;
-                                    self.repaint(state)?;
+                                    self.repaint_for_submit(state)?;
                                     print!("\r\n");
                                     return Ok(None);
                                 } else {
@@ -1186,6 +1186,18 @@ impl Editor {
     }
 
     fn repaint(&mut self, state: &mut ShellState) -> io::Result<()> {
+        self.repaint_with_options(state, true)
+    }
+
+    fn repaint_for_submit(&mut self, state: &mut ShellState) -> io::Result<()> {
+        self.repaint_with_options(state, false)
+    }
+
+    fn repaint_with_options(
+        &mut self,
+        state: &mut ShellState,
+        show_signature_hint: bool,
+    ) -> io::Result<()> {
         let menu_sel = self.completion_menu.as_ref().map(|m| m.selected);
         let cursor_only = self.search_mode.is_none()
             && self.buffer == self.last_buffer_snapshot
@@ -1442,7 +1454,8 @@ impl Editor {
 
             // Phase 16d — signature hint line below the input
             // Only when nothing else owns this slot: no completion menu, no widget mode.
-            if self.completion_menu.is_none()
+            if show_signature_hint
+                && self.completion_menu.is_none()
                 && self.workflow_mode.is_none()
                 && self.search_mode.is_none()
             {
