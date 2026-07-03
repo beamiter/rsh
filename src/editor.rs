@@ -1097,7 +1097,7 @@ impl Editor {
         }
     }
 
-    fn build_ai_context(&self, state: &ShellState, history: &History) -> AiContext {
+    fn build_ai_context(&self, _state: &ShellState, history: &History) -> AiContext {
         let cwd = std::env::current_dir()
             .map(|p| p.display().to_string())
             .unwrap_or_default();

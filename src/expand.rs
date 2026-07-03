@@ -539,7 +539,7 @@ fn expand_parameter(name: &str, state: &mut ShellState) -> String {
             let after_bracket = &name[bracket_pos + 1..];
 
             // Handle array slicing: ${arr[@]:offset:length} or ${arr[*]:offset:length}
-            if (subscript_part == "@" || subscript_part == "*") {
+            if subscript_part == "@" || subscript_part == "*" {
                 // Check if there's slicing syntax after the bracket
                 if after_bracket.starts_with(':') {
                     let slice_part = &after_bracket[1..]; // Remove the ':'

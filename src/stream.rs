@@ -1,7 +1,5 @@
 /// Stream processing and utility commands
 /// Adds functional programming style commands to rsh
-use crate::environment::ShellState;
-
 /// sum - Add up all numbers in arguments
 pub fn builtin_sum(args: &[String]) -> i32 {
     let sum: f64 = args.iter().filter_map(|s| s.parse::<f64>().ok()).sum();

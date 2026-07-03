@@ -1080,6 +1080,7 @@ pub fn execute_compound(cmd: &CompoundCommand, state: &mut ShellState) -> i32 {
                 }
 
                 let mut code = 0;
+                let _ = code;
                 loop {
                     // Check condition
                     let cond_result = if condition.is_empty() {
@@ -1216,8 +1217,7 @@ pub fn execute_compound(cmd: &CompoundCommand, state: &mut ShellState) -> i32 {
                     return 0;
                 }
 
-                let mut code = 0;
-                loop {
+                let code = loop {
                     // Display menu
                     for (i, item) in items.iter().enumerate() {
                         println!("{}) {}", i + 1, item);
@@ -1234,8 +1234,7 @@ pub fn execute_compound(cmd: &CompoundCommand, state: &mut ShellState) -> i32 {
                     match std::io::stdin().read_line(&mut reply) {
                         Ok(0) => {
                             // EOF reached
-                            code = 0;
-                            break;
+                            break 0;
                         }
                         Ok(_) => {
                             let reply_trimmed = reply.trim_end_matches('\n').trim_end_matches('\r');
@@ -1246,28 +1245,28 @@ pub fn execute_compound(cmd: &CompoundCommand, state: &mut ShellState) -> i32 {
                                 if n >= 1 && n <= items.len() {
                                     let selected = &items[n - 1];
                                     state.set_var(var, selected);
-                                    code = execute_command_list(body, state);
+                                    let code = execute_command_list(body, state);
 
                                     // Check for break/continue control flow
                                     if state.loop_break {
                                         state.loop_break = false;
-                                        break;
+                                        break code;
                                     }
                                     if state.loop_continue {
                                         state.loop_continue = false;
                                         continue;
                                     }
+                                    continue;
                                 }
                                 // Invalid choice (out of range): show menu again without executing body
                             }
                             // Empty input or non-numeric: show menu again
                         }
                         Err(_) => {
-                            code = 1;
-                            break;
+                            break 1;
                         }
                     }
-                }
+                };
 
                 code
             })

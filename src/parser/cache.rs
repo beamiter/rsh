@@ -2,7 +2,7 @@
 /// Useful for interactive shells where users repeat commands
 use crate::parser::ast::CompleteCommand;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 /// Cache entry with frequency tracking
 #[derive(Clone)]

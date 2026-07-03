@@ -355,7 +355,7 @@ fn builtin_cd(args: &[String], state: &mut ShellState) -> i32 {
                 }
             } else {
                 // -N means from the end
-                if idx <= state.dir_stack.len() {
+                if idx > 0 && idx <= state.dir_stack.len() {
                     state.dir_stack[state.dir_stack.len() - idx]
                         .to_string_lossy()
                         .to_string()
@@ -371,10 +371,12 @@ fn builtin_cd(args: &[String], state: &mut ShellState) -> i32 {
         args[0].clone()
     };
 
+    let old_dir = env::current_dir().ok();
+
     // Try to change to target directory
     // First try as absolute/relative path
     if let Ok(new_dir) = change_to_directory(&target, state) {
-        update_directory_vars(&new_dir, state);
+        update_directory_vars(old_dir.as_deref(), &new_dir, state);
         return 0;
     }
 
@@ -389,7 +391,7 @@ fn builtin_cd(args: &[String], state: &mut ShellState) -> i32 {
                 let candidate = format!("{}/{}", dir, target);
                 if let Ok(new_dir) = change_to_directory(&candidate, state) {
                     println!("{}", new_dir.display());
-                    update_directory_vars(&new_dir, state);
+                    update_directory_vars(old_dir.as_deref(), &new_dir, state);
                     return 0;
                 }
             }
@@ -402,7 +404,7 @@ fn builtin_cd(args: &[String], state: &mut ShellState) -> i32 {
 
 fn change_to_directory(
     path: &str,
-    state: &mut ShellState,
+    _state: &mut ShellState,
 ) -> Result<std::path::PathBuf, std::io::Error> {
     let old = env::current_dir().ok();
     env::set_current_dir(path)?;
@@ -418,15 +420,16 @@ fn change_to_directory(
     }
 }
 
-fn update_directory_vars(new_dir: &std::path::Path, state: &mut ShellState) {
-    let old = env::current_dir()
-        .ok()
-        .map(|p| p.to_string_lossy().to_string());
-
+fn update_directory_vars(
+    old_dir: Option<&std::path::Path>,
+    new_dir: &std::path::Path,
+    state: &mut ShellState,
+) {
     let new_str = new_dir.to_string_lossy().to_string();
     state.export_var("PWD", &new_str);
-    if let Some(old) = old {
-        state.export_var("OLDPWD", &old);
+    if let Some(old) = old_dir {
+        let old_str = old.to_string_lossy();
+        state.export_var("OLDPWD", &old_str);
     }
 
     // z-jump: record directory visit
@@ -851,7 +854,7 @@ fn builtin_read(args: &[String], state: &mut ShellState) -> i32 {
     let mut prompt_str = None;
     let mut silent = false;
     let mut raw = false;
-    let mut timeout_secs: Option<f64> = None;
+    let mut _timeout_secs: Option<f64> = None;
     let mut count_chars: Option<usize> = None;
     let mut delim = '\n';
     let mut exact_count: Option<usize> = None;
@@ -872,7 +875,7 @@ fn builtin_read(args: &[String], state: &mut ShellState) -> i32 {
             "-t" => {
                 i += 1;
                 if i < args.len() {
-                    timeout_secs = args[i].parse::<f64>().ok();
+                    _timeout_secs = args[i].parse::<f64>().ok();
                 }
             }
             "-n" => {
@@ -1009,14 +1012,12 @@ fn read_limited_chars(
 }
 
 fn read_line_with_delimiter(
-    delim: char,
+    _delim: char,
     raw: bool,
     var_names: &[&str],
     read_array: bool,
     state: &mut ShellState,
 ) -> i32 {
-    use std::io::BufRead;
-
     let stdin = std::io::stdin();
     let mut line = String::new();
 
@@ -1089,12 +1090,12 @@ enum TestResult {
     Error,
 }
 
-fn parse_test_expr(args: &[&str], mut idx: usize) -> (TestResult, usize) {
-    let (mut result, new_idx) = parse_or_expr(args, idx);
+fn parse_test_expr(args: &[&str], idx: usize) -> (TestResult, usize) {
+    let (result, new_idx) = parse_or_expr(args, idx);
     (result, new_idx)
 }
 
-fn parse_or_expr(args: &[&str], mut idx: usize) -> (TestResult, usize) {
+fn parse_or_expr(args: &[&str], idx: usize) -> (TestResult, usize) {
     let (mut left, mut new_idx) = parse_and_expr(args, idx);
 
     while new_idx < args.len() && args[new_idx] == "-o" {
@@ -1113,7 +1114,7 @@ fn parse_or_expr(args: &[&str], mut idx: usize) -> (TestResult, usize) {
     (left, new_idx)
 }
 
-fn parse_and_expr(args: &[&str], mut idx: usize) -> (TestResult, usize) {
+fn parse_and_expr(args: &[&str], idx: usize) -> (TestResult, usize) {
     let (mut left, mut new_idx) = parse_primary(args, idx);
 
     while new_idx < args.len() && args[new_idx] == "-a" {
@@ -1872,7 +1873,7 @@ fn builtin_pushd(args: &[String], state: &mut ShellState) -> i32 {
                     return 1;
                 }
             } else {
-                if idx <= state.dir_stack.len() {
+                if idx > 0 && idx <= state.dir_stack.len() {
                     state.dir_stack[state.dir_stack.len() - idx]
                         .to_string_lossy()
                         .to_string()
@@ -1888,14 +1889,18 @@ fn builtin_pushd(args: &[String], state: &mut ShellState) -> i32 {
         remaining_args[0].clone()
     };
 
-    if let Some(cwd) = cwd {
-        state.dir_stack.push(cwd);
+    if let Some(cwd) = cwd.as_ref() {
+        state.dir_stack.push(cwd.to_path_buf());
     }
 
     match env::set_current_dir(&target) {
         Ok(()) => {
             if let Ok(new_dir) = env::current_dir() {
-                update_directory_vars(&new_dir, state);
+                if let Some(old_dir) = cwd.as_ref() {
+                    update_directory_vars(Some(old_dir.as_path()), &new_dir, state);
+                } else {
+                    update_directory_vars(None, &new_dir, state);
+                }
             }
             if print_stack {
                 builtin_dirs(state);
@@ -1916,17 +1921,20 @@ fn builtin_popd(state: &mut ShellState) -> i32 {
     }
 
     match state.dir_stack.pop() {
-        Some(dir) => match env::set_current_dir(&dir) {
-            Ok(()) => {
-                if let Ok(new_dir) = env::current_dir() {
-                    update_directory_vars(&new_dir, state);
+        Some(dir) => {
+            let old_dir = env::current_dir().ok();
+            match env::set_current_dir(&dir) {
+                Ok(()) => {
+                    if let Ok(new_dir) = env::current_dir() {
+                        update_directory_vars(old_dir.as_deref(), &new_dir, state);
+                    }
+                    builtin_dirs(state);
+                    0
                 }
-                builtin_dirs(state);
-                0
-            }
-            Err(e) => {
-                eprintln!("rsh: popd: {}", e);
-                1
+                Err(e) => {
+                    eprintln!("rsh: popd: {}", e);
+                    1
+                }
             }
         },
         None => {
@@ -2453,19 +2461,22 @@ fn builtin_z(args: &[String], state: &mut ShellState) -> i32 {
     };
 
     match target {
-        Some(target) => match env::set_current_dir(&target) {
-            Ok(()) => {
-                println!("{}", target);
-                if let Ok(new_dir) = env::current_dir() {
-                    update_directory_vars(&new_dir, state);
+        Some(target) => {
+            let old_dir = env::current_dir().ok();
+            match env::set_current_dir(&target) {
+                Ok(()) => {
+                    println!("{}", target);
+                    if let Ok(new_dir) = env::current_dir() {
+                        update_directory_vars(old_dir.as_deref(), &new_dir, state);
+                    }
+                    0
                 }
-                0
+                Err(e) => {
+                    eprintln!("rsh: z: {}: {}", target, e);
+                    1
+                }
             }
-            Err(e) => {
-                eprintln!("rsh: z: {}: {}", target, e);
-                1
-            }
-        },
+        }
         None => {
             eprintln!("rsh: z: no match for: {}", args.join(" "));
             1
@@ -3141,12 +3152,13 @@ fn builtin_bookmark(args: &[String], state: &mut ShellState) -> i32 {
             };
             match path {
                 Some(path) => {
+                    let old_dir = std::env::current_dir().ok();
                     if let Err(e) = std::env::set_current_dir(&path) {
                         eprintln!("rsh: bookmark go: {}: {}", path, e);
                         return 1;
                     }
                     if let Ok(new_dir) = std::env::current_dir() {
-                        update_directory_vars(&new_dir, state);
+                        update_directory_vars(old_dir.as_deref(), &new_dir, state);
                     }
                     0
                 }

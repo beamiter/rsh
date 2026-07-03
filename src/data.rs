@@ -39,7 +39,7 @@ pub fn builtin_map(args: &[String]) -> i32 {
         return 1;
     }
 
-    let pattern = &args[0];
+    let _pattern = &args[0];
     use std::io::BufRead;
 
     let stdin = std::io::stdin();

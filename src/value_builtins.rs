@@ -7,7 +7,9 @@ use crate::pipeline_data::PipelineData;
 use crate::value::{render_table, ClosureData, Value};
 use indexmap::IndexMap;
 use once_cell::sync::Lazy;
+use std::io::{Read, Write};
 use std::collections::HashMap;
+use std::net::{Shutdown, TcpStream};
 use std::sync::Arc;
 
 pub type ValueBuiltin = fn(PipelineData, &[String], &mut ShellState) -> Result<PipelineData, i32>;
@@ -313,6 +315,7 @@ fn vb_par_each(
         }
         i += 1;
     }
+
     let closure = match lookup_closure(closure_arg, state) {
         Some(c) => c,
         None => {
@@ -1573,7 +1576,7 @@ fn vb_split(
     } else {
         // split column SEP NAME...
         let names: Vec<String> = rest[1..].to_vec();
-        let mut process = |line: &str| -> Value {
+        let process = |line: &str| -> Value {
             let parts: Vec<&str> = line.split(sep.as_str()).collect();
             let mut rec = IndexMap::new();
             for (i, p) in parts.iter().enumerate() {
@@ -4554,6 +4557,86 @@ fn vb_help(
 /// Returns a record `{status: int, headers: record, body: string|value}`. If
 /// the response content type is JSON the body is auto-parsed into a Value.
 #[cfg(feature = "ai")]
+fn http_request_over_tcp(
+    method: &str,
+    url: &str,
+    headers: &[(String, String)],
+    body: &[u8],
+) -> Result<(i64, indexmap::IndexMap<String, Value>, String), String> {
+    let rest = url
+        .strip_prefix("http://")
+        .ok_or_else(|| "http: unsupported URL scheme".to_string())?;
+    let (authority, path_and_more) = rest.split_once('/').unwrap_or((rest, ""));
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((h, p)) if !h.is_empty() && !p.is_empty() => {
+            let port = p
+                .parse::<u16>()
+                .map_err(|e| format!("http: invalid port in URL: {}", e))?;
+            (h, port)
+        }
+        _ if !authority.is_empty() => (authority, 80),
+        _ => return Err("http: missing host".to_string()),
+    };
+
+    let path = if path_and_more.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{}", path_and_more)
+    };
+
+    let mut request = Vec::new();
+    request.extend_from_slice(format!("{} {} HTTP/1.1\r\n", method, path).as_bytes());
+    request.extend_from_slice(format!("Host: {}\r\n", authority).as_bytes());
+    request.extend_from_slice(b"User-Agent: ureq/2.12.1\r\n");
+    request.extend_from_slice(b"Accept: */*\r\n");
+    request.extend_from_slice(b"Connection: close\r\n");
+    for (k, v) in headers {
+        request.extend_from_slice(format!("{}: {}\r\n", k, v).as_bytes());
+    }
+    request.extend_from_slice(format!("Content-Length: {}\r\n", body.len()).as_bytes());
+    request.extend_from_slice(b"\r\n");
+    request.extend_from_slice(body);
+
+    let mut stream = TcpStream::connect((host, port))
+        .map_err(|e| format!("http: request failed: {}", e))?;
+    stream
+        .write_all(&request)
+        .map_err(|e| format!("http: request failed: {}", e))?;
+    let _ = stream.shutdown(Shutdown::Write);
+
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .map_err(|e| format!("http: body read failed: {}", e))?;
+
+    let header_end = response
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .ok_or_else(|| "http: malformed response".to_string())?;
+    let header_text = String::from_utf8_lossy(&response[..header_end]);
+    let mut lines = header_text.split("\r\n");
+    let status_line = lines
+        .next()
+        .ok_or_else(|| "http: malformed response".to_string())?;
+    let status = status_line
+        .split_whitespace()
+        .nth(1)
+        .ok_or_else(|| "http: malformed response".to_string())?
+        .parse::<i64>()
+        .map_err(|e| format!("http: malformed response status: {}", e))?;
+
+    let mut header_rec = indexmap::IndexMap::new();
+    for line in lines {
+        if let Some((k, v)) = line.split_once(':') {
+            header_rec.insert(k.trim().to_string(), Value::String(v.trim().to_string()));
+        }
+    }
+
+    let body_string = String::from_utf8_lossy(&response[header_end + 4..]).into_owned();
+    Ok((status, header_rec, body_string))
+}
+
+#[cfg(feature = "ai")]
 fn vb_http(
     input: PipelineData,
     args: &[String],
@@ -4618,6 +4701,13 @@ fn vb_http(
         i += 1;
     }
 
+    if as_json {
+        headers.push((
+            "Content-Type".to_string(),
+            "application/json".to_string(),
+        ));
+    }
+
     // Body: explicit -d wins; else use the pipeline input if non-empty.
     let body_bytes: Option<Vec<u8>> = if let Some(b) = body_arg {
         Some(b.into_bytes())
@@ -4641,50 +4731,88 @@ fn vb_http(
         }
     };
 
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(std::time::Duration::from_secs(10))
-        .timeout_read(std::time::Duration::from_secs(30))
-        .build();
-    let mut req = agent.request(method, &url);
-    for (k, v) in &query {
-        req = req.query(k, v);
-    }
-    for (k, v) in &headers {
-        req = req.set(k, v);
-    }
-    if as_json && body_bytes.is_none() {
-        // no-op — kept for symmetry with --json on POSTs
-    }
-    if as_json {
-        req = req.set("Content-Type", "application/json");
-    }
+    let (status, header_rec, body_string) = if body_bytes.is_some() && url.starts_with("http://") {
+        let mut full_url = url.clone();
+        if !query.is_empty() {
+            let sep = if full_url.contains('?') { '&' } else { '?' };
+            full_url.push(sep);
+            for (idx, (k, v)) in query.iter().enumerate() {
+                if idx > 0 {
+                    full_url.push('&');
+                }
+                full_url.push_str(k);
+                full_url.push('=');
+                full_url.push_str(v);
+            }
+        }
+        match body_bytes.as_ref() {
+            Some(b) => match http_request_over_tcp(method, &full_url, &headers, b) {
+                Ok(resp) => resp,
+                Err(e) => {
+                    eprintln!("{}", e);
+                    state.set_error(e, 1);
+                    return Err(1);
+                }
+            },
+            None => unreachable!(),
+        }
+    } else {
+        let agent = ureq::AgentBuilder::new()
+            .timeout_connect(std::time::Duration::from_secs(10))
+            .timeout_read(std::time::Duration::from_secs(30))
+            .build();
+        let mut req = agent.request(method, &url);
+        for (k, v) in &query {
+            req = req.query(k, v);
+        }
+        for (k, v) in &headers {
+            req = req.set(k, v);
+        }
+        if as_json && body_bytes.is_none() {
+            // no-op — kept for symmetry with --json on POSTs
+        }
+        if as_json {
+            req = req.set("Content-Type", "application/json");
+        }
 
-    let response = match body_bytes {
-        Some(b) => req.send_bytes(&b),
-        None => req.call(),
+        let response = match body_bytes {
+            Some(b) => req.send_bytes(&b),
+            None => req.call(),
+        };
+
+        // ureq folds non-2xx into Err(Response). We surface both as the same record
+        // shape (status code captured) rather than failing the pipeline — callers
+        // can `where status >= 400` to filter.
+        let resp = match response {
+            Ok(r) => r,
+            Err(ureq::Error::Status(_, r)) => r,
+            Err(e) => {
+                let msg = format!("http: request failed: {}", e);
+                eprintln!("{}", msg);
+                state.set_error(msg, 1);
+                return Err(1);
+            }
+        };
+
+        let status = resp.status() as i64;
+        let mut header_rec = indexmap::IndexMap::new();
+        for name in resp.headers_names() {
+            if let Some(v) = resp.header(&name) {
+                header_rec.insert(name, Value::String(v.to_string()));
+            }
+        }
+        let body_string = match resp.into_string() {
+            Ok(s) => s,
+            Err(e) => {
+                let msg = format!("http: body read failed: {}", e);
+                eprintln!("{}", msg);
+                state.set_error(msg, 1);
+                return Err(1);
+            }
+        };
+        (status, header_rec, body_string)
     };
 
-    // ureq folds non-2xx into Err(Response). We surface both as the same record
-    // shape (status code captured) rather than failing the pipeline — callers
-    // can `where status >= 400` to filter.
-    let resp = match response {
-        Ok(r) => r,
-        Err(ureq::Error::Status(_, r)) => r,
-        Err(e) => {
-            let msg = format!("http: request failed: {}", e);
-            eprintln!("{}", msg);
-            state.set_error(msg, 1);
-            return Err(1);
-        }
-    };
-
-    let status = resp.status() as i64;
-    let mut header_rec = indexmap::IndexMap::new();
-    for name in resp.headers_names() {
-        if let Some(v) = resp.header(&name) {
-            header_rec.insert(name, Value::String(v.to_string()));
-        }
-    }
     let content_type = header_rec
         .get("content-type")
         .or_else(|| header_rec.get("Content-Type"))
@@ -4696,15 +4824,6 @@ fn vb_http(
             }
         })
         .unwrap_or_default();
-    let body_string = match resp.into_string() {
-        Ok(s) => s,
-        Err(e) => {
-            let msg = format!("http: body read failed: {}", e);
-            eprintln!("{}", msg);
-            state.set_error(msg, 1);
-            return Err(1);
-        }
-    };
     let body_value = if content_type.contains("json") {
         match serde_json::from_str::<serde_json::Value>(&body_string) {
             Ok(j) => Value::from_json(j),
