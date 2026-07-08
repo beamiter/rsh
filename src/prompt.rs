@@ -36,6 +36,7 @@ fn render_prompt_full(state: &ShellState) -> String {
     let hostname = &state.hostname;
     let cwd = get_short_cwd(state);
     let git_branch = get_git_branch();
+    let env_hint = get_env_hint();
     let exit_indicator = if state.last_exit_code == 0 {
         "❯".green().bold().to_string()
     } else {
@@ -43,6 +44,10 @@ fn render_prompt_full(state: &ShellState) -> String {
     };
 
     let mut prompt = String::new();
+
+    if let Some(hint) = env_hint {
+        prompt.push_str(&format!("{} ", hint.with(Color::Yellow).bold()));
+    }
 
     // User@host
     prompt.push_str(&format!(
@@ -96,6 +101,7 @@ fn render_prompt_compact(state: &ShellState) -> String {
     let user = env::var("USER").unwrap_or_else(|_| String::from("user"));
     let cwd = get_short_cwd(state);
     let git_branch = get_git_branch();
+    let env_hint = get_env_hint();
     let exit_indicator = if state.last_exit_code == 0 {
         "❯".green().bold().to_string()
     } else {
@@ -103,6 +109,10 @@ fn render_prompt_compact(state: &ShellState) -> String {
     };
 
     let mut prompt = String::new();
+
+    if let Some(hint) = env_hint {
+        prompt.push_str(&format!("{} ", hint.with(Color::Yellow).bold()));
+    }
 
     // User only (no hostname)
     prompt.push_str(&format!(
@@ -142,6 +152,7 @@ fn render_prompt_compact(state: &ShellState) -> String {
 /// Minimal prompt: ~/path ❯
 fn render_prompt_minimal(state: &ShellState) -> String {
     let cwd = get_short_cwd(state);
+    let env_hint = get_env_hint();
     let exit_indicator = if state.last_exit_code == 0 {
         "❯".green().bold().to_string()
     } else {
@@ -149,6 +160,10 @@ fn render_prompt_minimal(state: &ShellState) -> String {
     };
 
     let mut prompt = String::new();
+
+    if let Some(hint) = env_hint {
+        prompt.push_str(&format!("{} ", hint.with(Color::Yellow).bold()));
+    }
 
     // CWD only
     prompt.push_str(&format!(
@@ -202,6 +217,29 @@ pub fn get_git_branch() -> Option<String> {
     None
 }
 
+fn get_env_hint() -> Option<String> {
+    if let Ok(modifier) = env::var("CONDA_PROMPT_MODIFIER") {
+        let trimmed = modifier.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    if let Ok(venv) = env::var("VIRTUAL_ENV") {
+        let trimmed = venv.trim();
+        if !trimmed.is_empty() {
+            if let Some(name) = std::path::Path::new(trimmed).file_name() {
+                let name = name.to_string_lossy().trim().to_string();
+                if !name.is_empty() {
+                    return Some(format!("({})", name));
+                }
+            }
+        }
+    }
+
+    None
+}
+
 /// Render the continuation prompt for multiline input.
 pub fn render_continuation_prompt() -> String {
     format!("{} ", "> ".dark_grey())
@@ -239,5 +277,35 @@ pub fn format_duration(d: std::time::Duration) -> String {
         format!("{:.1}s", d.as_secs_f64())
     } else {
         return String::new(); // Don't show for sub-second
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::get_env_hint;
+
+    #[test]
+    fn env_hint_prefers_conda_prompt_modifier() {
+        unsafe {
+            std::env::set_var("CONDA_PROMPT_MODIFIER", "(GPTSoVits) ");
+            std::env::set_var("VIRTUAL_ENV", "/tmp/.venv");
+        }
+        assert_eq!(get_env_hint().as_deref(), Some("(GPTSoVits)"));
+        unsafe {
+            std::env::remove_var("CONDA_PROMPT_MODIFIER");
+            std::env::remove_var("VIRTUAL_ENV");
+        }
+    }
+
+    #[test]
+    fn env_hint_falls_back_to_virtual_env_name() {
+        unsafe {
+            std::env::remove_var("CONDA_PROMPT_MODIFIER");
+            std::env::set_var("VIRTUAL_ENV", "/tmp/myenv");
+        }
+        assert_eq!(get_env_hint().as_deref(), Some("(myenv)"));
+        unsafe {
+            std::env::remove_var("VIRTUAL_ENV");
+        }
     }
 }
