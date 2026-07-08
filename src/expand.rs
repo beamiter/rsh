@@ -439,6 +439,36 @@ fn expand_interpolated(parts: &[InterpPart], state: &mut ShellState) -> String {
     out
 }
 
+fn expand_param_operand(raw: &str, state: &mut ShellState) -> String {
+    let word = crate::parser::parse_word_parts(raw);
+    expand_word_to_string(&word, state)
+}
+
+fn parameter_value(name: &str, state: &ShellState) -> Option<String> {
+    match name {
+        "?" => Some(state.last_exit_code.to_string()),
+        "$" => Some(std::process::id().to_string()),
+        "!" => Some(state.last_bg_pid.map_or(String::new(), |p| p.to_string())),
+        "#" => Some(state.positional_params.len().to_string()),
+        "@" | "*" => Some(state.positional_params.join(" ")),
+        "0" => Some(
+            std::env::current_exe()
+                .ok()
+                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                .unwrap_or_else(|| "rsh".into()),
+        ),
+        _ if name.len() <= 3 && name.chars().all(|c| c.is_ascii_digit()) => {
+            let idx: usize = name.parse().unwrap_or(0);
+            if idx > 0 && idx <= state.positional_params.len() {
+                Some(state.positional_params[idx - 1].clone())
+            } else {
+                None
+            }
+        }
+        _ => state.get_var(name).map(|v| v.to_string()),
+    }
+}
+
 fn expand_variable(name: &str, state: &mut ShellState) -> String {
     match name {
         "?" => state.last_exit_code.to_string(),
@@ -580,20 +610,20 @@ fn expand_parameter(name: &str, state: &mut ShellState) -> String {
     // ${var:-default}
     if let Some(pos) = name.find(":-") {
         let var = &name[..pos];
-        let default = &name[pos + 2..];
-        return match state.get_var(var) {
-            Some(v) if !v.is_empty() => v.to_string(),
-            _ => default.to_string(),
+        let default = expand_param_operand(&name[pos + 2..], state);
+        return match parameter_value(var, state) {
+            Some(v) if !v.is_empty() => v,
+            _ => default,
         };
     }
     // ${var:=default} (assign default)
     if let Some(pos) = name.find(":=") {
         let var = &name[..pos];
-        let default = &name[pos + 2..];
-        return match state.get_var(var) {
-            Some(v) if !v.is_empty() => v.to_string(),
+        let default = expand_param_operand(&name[pos + 2..], state);
+        return match parameter_value(var, state) {
+            Some(v) if !v.is_empty() => v,
             _ => {
-                let val = default.to_string();
+                let val = default;
                 state.set_var(var, &val);
                 val
             }
@@ -602,10 +632,39 @@ fn expand_parameter(name: &str, state: &mut ShellState) -> String {
     // ${var:+alternate}
     if let Some(pos) = name.find(":+") {
         let var = &name[..pos];
-        let alt = &name[pos + 2..];
-        return match state.get_var(var) {
-            Some(v) if !v.is_empty() => alt.to_string(),
+        let alt = expand_param_operand(&name[pos + 2..], state);
+        return match parameter_value(var, state) {
+            Some(v) if !v.is_empty() => alt,
             _ => String::new(),
+        };
+    }
+    // ${var-default}
+    if let Some(pos) = name.find('-') {
+        let var = &name[..pos];
+        let default = expand_param_operand(&name[pos + 1..], state);
+        return parameter_value(var, state).unwrap_or(default);
+    }
+    // ${var=default}
+    if let Some(pos) = name.find('=') {
+        let var = &name[..pos];
+        let default = expand_param_operand(&name[pos + 1..], state);
+        return match parameter_value(var, state) {
+            Some(v) => v,
+            None => {
+                let val = default;
+                state.set_var(var, &val);
+                val
+            }
+        };
+    }
+    // ${var+alternate}
+    if let Some(pos) = name.find('+') {
+        let var = &name[..pos];
+        let alt = expand_param_operand(&name[pos + 1..], state);
+        return if parameter_value(var, state).is_some() {
+            alt
+        } else {
+            String::new()
         };
     }
     // ${var:offset:length} and ${var:offset}
@@ -649,21 +708,22 @@ fn expand_parameter(name: &str, state: &mut ShellState) -> String {
     // mistaken for a strip operator. Array subscripts in [...] are skipped.
     if let Some(op) = find_pattern_op(name) {
         let var = &name[..op];
-        let val = state.get_var(var).unwrap_or("").to_string();
+        let val = parameter_value(var, state).unwrap_or_default();
         let spec = &name[op..];
         match spec.as_bytes()[0] {
             b'#' => {
                 if let Some(pat) = spec.strip_prefix("##") {
+                    let pat = expand_param_operand(pat, state);
                     // greedy (longest) prefix strip
                     for i in (0..=val.len()).rev() {
-                        if val.is_char_boundary(i) && match_glob(pat, &val[..i]) {
+                        if val.is_char_boundary(i) && match_glob(&pat, &val[..i]) {
                             return val[i..].to_string();
                         }
                     }
                 } else {
-                    let pat = &spec[1..];
+                    let pat = expand_param_operand(&spec[1..], state);
                     for i in 0..=val.len() {
-                        if val.is_char_boundary(i) && match_glob(pat, &val[..i]) {
+                        if val.is_char_boundary(i) && match_glob(&pat, &val[..i]) {
                             return val[i..].to_string();
                         }
                     }
@@ -672,16 +732,17 @@ fn expand_parameter(name: &str, state: &mut ShellState) -> String {
             }
             b'%' => {
                 if let Some(pat) = spec.strip_prefix("%%") {
+                    let pat = expand_param_operand(pat, state);
                     // greedy (longest) suffix strip
                     for i in 0..=val.len() {
-                        if val.is_char_boundary(i) && match_glob(pat, &val[i..]) {
+                        if val.is_char_boundary(i) && match_glob(&pat, &val[i..]) {
                             return val[..i].to_string();
                         }
                     }
                 } else {
-                    let pat = &spec[1..];
+                    let pat = expand_param_operand(&spec[1..], state);
                     for i in (0..=val.len()).rev() {
-                        if val.is_char_boundary(i) && match_glob(pat, &val[i..]) {
+                        if val.is_char_boundary(i) && match_glob(&pat, &val[i..]) {
                             return val[..i].to_string();
                         }
                     }

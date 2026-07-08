@@ -13,7 +13,7 @@ use crate::session;
 use crate::signal;
 use nix::libc;
 use nix::unistd::{getpgrp, getpid, setpgid, tcsetpgrp};
-use std::io::{self, BufRead, Write};
+use std::io::{self, Read, Write};
 use std::sync::atomic::Ordering;
 
 pub struct Shell {
@@ -390,71 +390,57 @@ impl Shell {
     }
 
     fn run_from_stdin(&mut self) {
-        // Read all lines from stdin first to avoid holding the lock during execution
-        let stdin = io::stdin();
-        let lines: Vec<String> = stdin
-            .lock()
-            .lines()
-            .collect::<Result<_, _>>()
-            .unwrap_or_default();
+        // Non-interactive stdin commonly contains shell scripts and hook payloads
+        // with multi-line function definitions. Parse the whole buffer at once.
+        let mut script = String::new();
+        if io::stdin().read_to_string(&mut script).is_err() {
+            self.state.last_exit_code = 1;
+            run_exit_trap(&mut self.state);
+            self.save_session();
+            self.history.save();
+            return;
+        }
 
-        for line in lines {
-            let line = line.trim().to_string();
-            if line.is_empty() {
-                continue;
-            }
+        if script.trim().is_empty() {
+            run_exit_trap(&mut self.state);
+            self.save_session();
+            self.history.save();
+            return;
+        }
 
-            // History expansion
-            let line = match expand_history(&line, &self.history) {
-                Some(expanded) => {
-                    if expanded != line {
-                        eprintln!("{}", expanded);
+        self.history.add_with_cwd(
+            script.trim_end(),
+            std::env::current_dir()
+                .ok()
+                .as_ref()
+                .map(|p| p.to_string_lossy().as_ref().to_string())
+                .as_deref(),
+        );
+
+        let preexec = self.state.hooks.preexec.clone();
+        hooks::run_hooks(&preexec, &mut self.state);
+
+        let cmd_start = std::time::Instant::now();
+        match parser::parse(&script) {
+            Ok(commands) => {
+                for cmd in &commands {
+                    let code = executor::execute_complete_command(cmd, &mut self.state);
+                    self.state.last_exit_code = code;
+                    if self.state.shell_opts.errexit && code != 0 {
+                        eprintln!("rsh: errexit: command exited with status {}", code);
                     }
-                    expanded
-                }
-                None => {
-                    eprintln!("rsh: !: event not found");
-                    continue;
-                }
-            };
-
-            self.history.add_with_cwd(
-                &line,
-                std::env::current_dir()
-                    .ok()
-                    .as_ref()
-                    .map(|p| p.to_string_lossy().as_ref().to_string())
-                    .as_deref(),
-            );
-
-            // Run preexec hooks
-            let preexec = self.state.hooks.preexec.clone();
-            hooks::run_hooks(&preexec, &mut self.state);
-
-            // Parse and execute
-            let cmd_start = std::time::Instant::now();
-            match parser::parse(&line) {
-                Ok(commands) => {
-                    for cmd in &commands {
-                        let code = executor::execute_complete_command(cmd, &mut self.state);
-                        self.state.last_exit_code = code;
-                        if self.state.shell_opts.errexit && code != 0 {
-                            eprintln!("rsh: errexit: command exited with status {}", code);
-                        }
+                    if builtins::EXIT_REQUESTED.load(Ordering::SeqCst) {
+                        self.state.last_exit_code = builtins::EXIT_CODE.load(Ordering::SeqCst);
+                        break;
                     }
                 }
-                Err(e) => {
-                    eprintln!("rsh: {}", e);
-                    self.state.last_exit_code = 2;
-                }
             }
-            self.state.last_command_duration = Some(cmd_start.elapsed());
-
-            if builtins::EXIT_REQUESTED.load(Ordering::SeqCst) {
-                self.state.last_exit_code = builtins::EXIT_CODE.load(Ordering::SeqCst);
-                break;
+            Err(e) => {
+                eprintln!("rsh: {}", e);
+                self.state.last_exit_code = 2;
             }
         }
+        self.state.last_command_duration = Some(cmd_start.elapsed());
 
         run_exit_trap(&mut self.state);
         self.save_session();

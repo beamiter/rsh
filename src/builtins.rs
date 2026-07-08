@@ -47,6 +47,7 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "trap",
     "command",
     "builtin",
+    "hash",
     "[[",
     "declare",
     "z",
@@ -215,6 +216,7 @@ pub fn run_builtin(name: &str, args: &[String], state: &mut ShellState) -> i32 {
                 1
             }
         }
+        "hash" => 0,
         // New builtins
         "declare" => builtin_declare(args, state),
         "z" => builtin_z(args, state),
@@ -3373,6 +3375,7 @@ const HELP_ENTRIES: &[(&str, &str)] = &[
         "exec",
         "exec cmd [args] — Replace shell with command (no fork).",
     ),
+    ("hash", "hash [-r] — Refresh command lookup cache (currently a no-op)."),
     (
         "z",
         "z [query] — Jump to frecency-ranked directory matching query.",

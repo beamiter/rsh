@@ -119,6 +119,157 @@ impl<'a> Lexer<'a> {
         s
     }
 
+    fn read_paren_body(&mut self, word: &mut String) {
+        let mut depth = 1;
+        let mut in_single = false;
+        let mut in_double = false;
+
+        while let Some(c) = self.next_char() {
+            if in_single {
+                word.push(c);
+                if c == '\'' {
+                    in_single = false;
+                }
+                continue;
+            }
+
+            if in_double {
+                word.push(c);
+                match c {
+                    '\\' => {
+                        if let Some(next) = self.next_char() {
+                            word.push(next);
+                        }
+                    }
+                    '"' => in_double = false,
+                    '$' if self.peek_char() == Some('(') => {
+                        self.next_char();
+                        word.push('(');
+                        depth += 1;
+                    }
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+
+            match c {
+                '\\' => {
+                    word.push(c);
+                    if let Some(next) = self.next_char() {
+                        word.push(next);
+                    }
+                }
+                '\'' => {
+                    in_single = true;
+                    word.push(c);
+                }
+                '"' => {
+                    in_double = true;
+                    word.push(c);
+                }
+                '$' if self.peek_char() == Some('(') => {
+                    self.next_char();
+                    word.push('$');
+                    word.push('(');
+                    depth += 1;
+                }
+                '(' => {
+                    depth += 1;
+                    word.push(c);
+                }
+                ')' => {
+                    depth -= 1;
+                    word.push(c);
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => word.push(c),
+            }
+        }
+    }
+
+    fn read_dollar_paren(&mut self, word: &mut String) {
+        self.next_char(); // $
+        self.next_char(); // (
+        word.push('$');
+        word.push('(');
+        self.read_paren_body(word);
+    }
+
+    fn read_brace_body(&mut self, word: &mut String) {
+        let mut depth = 1;
+        let mut in_single = false;
+        let mut in_double = false;
+
+        while let Some(c) = self.next_char() {
+            if in_single {
+                word.push(c);
+                if c == '\'' {
+                    in_single = false;
+                }
+                continue;
+            }
+
+            if in_double {
+                word.push(c);
+                match c {
+                    '\\' => {
+                        if let Some(next) = self.next_char() {
+                            word.push(next);
+                        }
+                    }
+                    '"' => in_double = false,
+                    _ => {}
+                }
+                continue;
+            }
+
+            match c {
+                '\\' => {
+                    word.push(c);
+                    if let Some(next) = self.next_char() {
+                        word.push(next);
+                    }
+                }
+                '\'' => {
+                    in_single = true;
+                    word.push(c);
+                }
+                '"' => {
+                    in_double = true;
+                    word.push(c);
+                }
+                '{' => {
+                    depth += 1;
+                    word.push(c);
+                }
+                '}' => {
+                    depth -= 1;
+                    word.push(c);
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => word.push(c),
+            }
+        }
+    }
+
+    fn read_dollar_brace(&mut self, word: &mut String) {
+        self.next_char(); // $
+        self.next_char(); // {
+        word.push('$');
+        word.push('{');
+        self.read_brace_body(word);
+    }
+
     fn read_double_quoted(&mut self) -> String {
         // Preserve backslash escapes verbatim so the parser's word-part stage can
         // decide how to handle them (a backslash only escapes $ ` " \ newline inside
@@ -127,6 +278,18 @@ impl<'a> Lexer<'a> {
         loop {
             match self.next_char() {
                 Some('"') => break,
+                Some('$') if self.peek_char() == Some('(') => {
+                    s.push('$');
+                    s.push('(');
+                    self.next_char(); // consume '(' after $
+                    self.read_paren_body(&mut s);
+                }
+                Some('$') if self.peek_char() == Some('{') => {
+                    s.push('$');
+                    self.next_char(); // consume {
+                    s.push('{');
+                    self.read_brace_body(&mut s);
+                }
                 Some('\\') => {
                     match self.next_char() {
                         Some('\n') => {} // line continuation
@@ -270,26 +433,13 @@ impl<'a> Lexer<'a> {
                     }
                     '$' if self.peek_char_at(1) == Some('(') => {
                         // Command substitution $(...) or arithmetic $((...)).
-                        // Read the whole parenthesized group (naive paren counting,
-                        // matching the process-substitution reader above) so the
-                        // word-part parser can decode it later.
-                        self.next_char(); // $
-                        self.next_char(); // (
-                        word.push('$');
-                        word.push('(');
-                        let mut depth = 1;
-                        while let Some(c2) = self.next_char() {
-                            word.push(c2);
-                            if c2 == '(' {
-                                depth += 1;
-                            }
-                            if c2 == ')' {
-                                depth -= 1;
-                                if depth == 0 {
-                                    break;
-                                }
-                            }
-                        }
+                        // Keep the whole raw construct in one word, respecting
+                        // nested quotes and nested $() so spaces inside do not
+                        // terminate the surrounding token.
+                        self.read_dollar_paren(&mut word);
+                    }
+                    '$' if self.peek_char_at(1) == Some('{') => {
+                        self.read_dollar_brace(&mut word);
                     }
                     '\'' => {
                         self.next_char();
@@ -555,4 +705,41 @@ pub fn tokenize(input: &str) -> Vec<SpannedToken> {
 
 pub fn tokenize_lenient(input: &str) -> Vec<SpannedToken> {
     Lexer::new_lenient(input).tokenize_all()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{tokenize, Token};
+
+    #[test]
+    fn assignment_with_command_substitution_stays_one_word() {
+        let tokens = tokenize(r#"x="$(printf "export A=1\nexport B=2\n")""#);
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(
+            tokens[0].token,
+            Token::Word(r#"x="$(printf "export A=1\nexport B=2\n")""#.to_string())
+        );
+        assert_eq!(tokens[1].token, Token::Eof);
+    }
+
+    #[test]
+    fn double_quoted_parameter_expansion_keeps_following_lines_separate() {
+        let tokens = tokenize(
+            "PATH=\"$(\\dirname \"$(\\dirname \"$D\")\")/condabin${PATH:+\":${PATH}\"}\"\n\
+             echo done\n",
+        );
+        assert_eq!(tokens.len(), 6, "{tokens:#?}");
+        assert_eq!(
+            tokens[0].token,
+            Token::Word(
+                "PATH=\"$(\\dirname \"$(\\dirname \"$D\")\")/condabin${PATH:+\":${PATH}\"}\""
+                    .to_string()
+            )
+        );
+        assert_eq!(tokens[1].token, Token::Newline, "{tokens:#?}");
+        assert_eq!(tokens[2].token, Token::Word("echo".to_string()), "{tokens:#?}");
+        assert_eq!(tokens[3].token, Token::Word("done".to_string()), "{tokens:#?}");
+        assert_eq!(tokens[4].token, Token::Newline, "{tokens:#?}");
+        assert_eq!(tokens[5].token, Token::Eof, "{tokens:#?}");
+    }
 }

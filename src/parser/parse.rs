@@ -1322,6 +1322,173 @@ fn try_parse_closure(raw: &str) -> Option<WordPart> {
     Some(WordPart::Closure { params, body_src })
 }
 
+fn read_command_sub(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> String {
+    let mut cmd = String::new();
+    let mut depth = 1;
+
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                cmd.push(c);
+                if let Some(next) = chars.next() {
+                    cmd.push(next);
+                }
+            }
+            '\'' => {
+                cmd.push(c);
+                while let Some(next) = chars.next() {
+                    cmd.push(next);
+                    if next == '\'' {
+                        break;
+                    }
+                    if next == '\\' {
+                        if let Some(escaped) = chars.next() {
+                            cmd.push(escaped);
+                        }
+                    }
+                }
+            }
+            '"' => {
+                cmd.push(c);
+                while let Some(next) = chars.next() {
+                    cmd.push(next);
+                    if next == '\\' {
+                        if let Some(escaped) = chars.next() {
+                            cmd.push(escaped);
+                        }
+                        continue;
+                    }
+                    if next == '"' {
+                        break;
+                    }
+                    if next == '$' && chars.peek() == Some(&'(') {
+                        cmd.push(chars.next().unwrap());
+                        let nested = read_command_sub(chars);
+                        cmd.push_str(&nested);
+                        cmd.push(')');
+                    }
+                }
+            }
+            '$' if chars.peek() == Some(&'(') => {
+                cmd.push('$');
+                cmd.push(chars.next().unwrap());
+                let nested = read_command_sub(chars);
+                cmd.push_str(&nested);
+                cmd.push(')');
+            }
+            '(' => {
+                depth += 1;
+                cmd.push(c);
+            }
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+                cmd.push(c);
+            }
+            _ => cmd.push(c),
+        }
+    }
+
+    cmd
+}
+
+fn read_parameter_expansion(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> String {
+    let mut inner = String::new();
+    let mut depth = 1;
+    let mut in_single = false;
+    let mut in_double = false;
+
+    while let Some(c) = chars.next() {
+        if in_single {
+            inner.push(c);
+            if c == '\'' {
+                in_single = false;
+            }
+            continue;
+        }
+
+        if in_double {
+            inner.push(c);
+            match c {
+                '\\' => {
+                    if let Some(next) = chars.next() {
+                        inner.push(next);
+                    }
+                }
+                '"' => in_double = false,
+                _ => {}
+            }
+            continue;
+        }
+
+        match c {
+            '\\' => {
+                inner.push(c);
+                if let Some(next) = chars.next() {
+                    inner.push(next);
+                }
+            }
+            '\'' => {
+                in_single = true;
+                inner.push(c);
+            }
+            '"' => {
+                in_double = true;
+                inner.push(c);
+            }
+            '{' => {
+                depth += 1;
+                inner.push(c);
+            }
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+                inner.push(c);
+            }
+            _ => inner.push(c),
+        }
+    }
+
+    inner
+}
+
+fn read_double_quoted(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> String {
+    let mut inner = String::new();
+
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => break,
+            '\\' => {
+                inner.push('\\');
+                if let Some(next) = chars.next() {
+                    inner.push(next);
+                }
+            }
+            '$' if chars.peek() == Some(&'(') => {
+                inner.push('$');
+                inner.push(chars.next().unwrap());
+                let nested = read_command_sub(chars);
+                inner.push_str(&nested);
+                inner.push(')');
+            }
+            '$' if chars.peek() == Some(&'{') => {
+                inner.push('$');
+                inner.push(chars.next().unwrap());
+                let nested = read_parameter_expansion(chars);
+                inner.push_str(&nested);
+                inner.push('}');
+            }
+            _ => inner.push(c),
+        }
+    }
+
+    inner
+}
+
 /// After a `$name`, try to consume a chain of `.field` / `[N]` segments
 /// (nushell-style path access). Returns the empty vec if nothing matches.
 /// Only consumes characters that look like a path: `.` must be followed by
@@ -1493,27 +1660,7 @@ pub fn parse_word_parts(raw: &str) -> Word {
                     parts.push(WordPart::Literal(std::mem::take(&mut literal)));
                 }
                 chars.next();
-                let mut inner = String::new();
-                while let Some(&c2) = chars.peek() {
-                    if c2 == '"' {
-                        chars.next();
-                        break;
-                    }
-                    if c2 == '\\' {
-                        chars.next();
-                        // Preserve the backslash; parse_word_parts_inner decides whether
-                        // it escapes the following char (only $ ` " \ are special here).
-                        inner.push('\\');
-                        if let Some(&c3) = chars.peek() {
-                            inner.push(c3);
-                            chars.next();
-                        }
-                        continue;
-                    }
-                    inner.push(c2);
-                    chars.next();
-                }
-                // Parse inner for variables
+                let inner = read_double_quoted(&mut chars);
                 parts.push(WordPart::DoubleQuoted(parse_word_parts_inner(&inner)));
             }
             '$' => {
@@ -1580,22 +1727,7 @@ pub fn parse_word_parts(raw: &str) -> Word {
                             parts.push(WordPart::Arithmetic(expr));
                         } else {
                             // Command substitution $(...)
-                            let mut cmd = String::new();
-                            let mut depth = 1;
-                            while let Some(&c2) = chars.peek() {
-                                if c2 == '(' {
-                                    depth += 1;
-                                }
-                                if c2 == ')' {
-                                    depth -= 1;
-                                    if depth == 0 {
-                                        chars.next();
-                                        break;
-                                    }
-                                }
-                                cmd.push(c2);
-                                chars.next();
-                            }
+                            let cmd = read_command_sub(&mut chars);
                             parts.push(WordPart::CommandSub(cmd));
                         }
                     }
@@ -1944,22 +2076,7 @@ fn parse_word_parts_inner(input: &str) -> Vec<WordPart> {
                         parts.push(WordPart::Arithmetic(expr));
                     } else {
                         // Command substitution $(...)
-                        let mut cmd = String::new();
-                        let mut depth = 1;
-                        while let Some(&c2) = chars.peek() {
-                            if c2 == '(' {
-                                depth += 1;
-                            }
-                            if c2 == ')' {
-                                depth -= 1;
-                                if depth == 0 {
-                                    chars.next();
-                                    break;
-                                }
-                            }
-                            cmd.push(c2);
-                            chars.next();
-                        }
+                        let cmd = read_command_sub(&mut chars);
                         parts.push(WordPart::CommandSub(cmd));
                     }
                 }
@@ -1975,6 +2092,42 @@ fn parse_word_parts_inner(input: &str) -> Vec<WordPart> {
         parts.push(WordPart::Literal(literal));
     }
     parts
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse, parse_word_parts, WordPart};
+
+    #[test]
+    fn command_substitution_keeps_nested_quoted_subshells() {
+        let parts = parse_word_parts(r#"$(dirname "$(dirname "$CONDA_EXE")")"#);
+        assert_eq!(
+            parts,
+            vec![WordPart::CommandSub(
+                r#"dirname "$(dirname "$CONDA_EXE")""#.to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn double_quoted_command_substitution_keeps_inner_quotes() {
+        let parts = parse_word_parts(r#""$(dirname "$CONDA_EXE")""#);
+        assert_eq!(
+            parts,
+            vec![WordPart::DoubleQuoted(vec![WordPart::CommandSub(
+                r#"dirname "$CONDA_EXE""#.to_string()
+            )])]
+        );
+    }
+
+    #[test]
+    fn if_body_with_nested_command_sub_and_parameter_expansion_parses() {
+        let src = "if true; then\n\
+                    PATH=\"$(\\dirname \"$(\\dirname \"$D\")\")/condabin${PATH:+\":${PATH}\"}\"\n\
+                    echo done\n\
+                   fi\n";
+        assert!(parse(src).is_ok(), "{:?}", parse(src));
+    }
 }
 
 /// Decode ANSI-C escape sequences for $'...' quoting.
