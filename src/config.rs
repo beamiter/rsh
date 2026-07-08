@@ -3,12 +3,17 @@ use crate::environment::{ConfigSource, ShellState};
 use crate::executor;
 use crate::parser;
 use std::path::PathBuf;
+use std::process::Command;
 
 pub fn load_config(state: &mut ShellState) {
     match state.shell_opts.config_source {
         ConfigSource::Bashrc => load_bashrc(state),
         ConfigSource::Rshrc => load_rshrc(state),
     }
+}
+
+pub fn refresh_shell_integrations(state: &mut ShellState) {
+    load_conda_hook(state);
 }
 
 /// Load ~/.bashrc directly via bash, without attempting rsh parsing
@@ -88,6 +93,35 @@ shopt 2>/dev/null || true
     {
         let stdout = String::from_utf8_lossy(&output.stdout);
         parse_bash_output(&stdout, state);
+    }
+}
+
+/// If conda is present after importing bashrc state, load its POSIX shell hook
+/// into the current rsh process so `conda activate` works interactively.
+fn load_conda_hook(state: &mut ShellState) {
+    let conda_cmd = state
+        .get_var("CONDA_EXE")
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "conda".to_string());
+
+    let output = match Command::new(&conda_cmd)
+        .args(["shell.posix", "hook"])
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return,
+    };
+
+    let hook = String::from_utf8_lossy(&output.stdout);
+    if hook.trim().is_empty() {
+        return;
+    }
+
+    if let Ok(commands) = parser::parse(&hook) {
+        for cmd in &commands {
+            executor::execute_complete_command(cmd, state);
+        }
     }
 }
 

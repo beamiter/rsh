@@ -239,6 +239,7 @@ impl Shell {
         if !self.session_restored {
             config::load_config(&mut self.state);
         }
+        config::refresh_shell_integrations(&mut self.state);
 
         // Check if stdin is a TTY for interactive mode
         // Use libc::isatty directly to catch deleted/invalid ptys that atty might miss
