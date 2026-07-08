@@ -6,6 +6,31 @@ fn make_state() -> ShellState {
 }
 
 #[test]
+fn test_interactive_state_has_color_ls_aliases() {
+    let state = ShellState::new(true);
+    assert_eq!(
+        state.aliases.get("ls"),
+        Some(&"ls --color=auto".to_string())
+    );
+    assert_eq!(
+        state.aliases.get("ll"),
+        Some(&"ls -alF --color=auto".to_string())
+    );
+    assert_eq!(
+        state.aliases.get("la"),
+        Some(&"ls -A --color=auto".to_string())
+    );
+}
+
+#[test]
+fn test_noninteractive_state_does_not_seed_ls_aliases() {
+    let state = ShellState::new(false);
+    assert!(!state.aliases.contains_key("ls"));
+    assert!(!state.aliases.contains_key("ll"));
+    assert!(!state.aliases.contains_key("la"));
+}
+
+#[test]
 fn test_is_builtin() {
     assert!(is_builtin("cd"));
     assert!(is_builtin("echo"));

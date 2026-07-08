@@ -179,6 +179,12 @@ impl ShellState {
         for (k, v) in env::vars() {
             env_vars.insert(k, v);
         }
+        let mut aliases = HashMap::new();
+        if interactive {
+            aliases.insert("ls".to_string(), "ls --color=auto".to_string());
+            aliases.insert("ll".to_string(), "ls -alF --color=auto".to_string());
+            aliases.insert("la".to_string(), "ls -A --color=auto".to_string());
+        }
 
         let home_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
         let hostname = std::fs::read_to_string("/etc/hostname")
@@ -190,7 +196,7 @@ impl ShellState {
         ShellState {
             env_vars,
             local_vars_stack: Vec::new(),
-            aliases: HashMap::new(),
+            aliases,
             functions: HashMap::new(),
             last_exit_code: 0,
             last_bg_pid: None,
