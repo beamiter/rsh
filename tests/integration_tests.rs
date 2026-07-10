@@ -2,6 +2,7 @@
 // Tests verify that features parse and execute correctly
 
 use rsh::parser::parse;
+use rsh::parser::ast::{Command, WordPart};
 
 #[test]
 fn test_simple_arithmetic() {
@@ -149,6 +150,33 @@ fn test_exec_command_parsing() {
     let cmd_str = "exec 3< /etc/passwd";
     let cmds = parse(cmd_str).unwrap();
     assert_eq!(cmds.len(), 1);
+}
+
+#[test]
+fn test_unquoted_backslash_newline_is_line_continuation() {
+    let cmds = parse(
+        r#"find /tmp \
+        -type f \
+        -exec sed -i 's#old#new#g' {} +"#,
+    )
+    .unwrap();
+    let Command::Simple(command) = &cmds[0].list.first.commands[0] else {
+        panic!("expected a simple command");
+    };
+
+    let words: Vec<String> = command
+        .words
+        .iter()
+        .map(|word| match word.as_slice() {
+            [WordPart::Literal(value)] | [WordPart::SingleQuoted(value)] => value.clone(),
+            other => panic!("unexpected word parts: {other:?}"),
+        })
+        .collect();
+
+    assert_eq!(
+        words,
+        ["find", "/tmp", "-type", "f", "-exec", "sed", "-i", "s#old#new#g", "{}", "+"]
+    );
 }
 
 #[test]

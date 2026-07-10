@@ -88,6 +88,10 @@ impl<'a> Lexer<'a> {
         while let Some(c) = self.peek_char() {
             if c == ' ' || c == '\t' {
                 self.next_char();
+            } else if c == '\\' && self.peek_char_at(1) == Some('\n') {
+                // Treat an unquoted line continuation as whitespace between words.
+                self.next_char();
+                self.next_char();
             } else if c == '#' {
                 // Skip comment to end of line
                 while let Some(c) = self.peek_char() {
@@ -457,9 +461,15 @@ impl<'a> Lexer<'a> {
                     }
                     '\\' => {
                         self.next_char();
-                        word.push('\\');
-                        if let Some(c2) = self.next_char() {
-                            word.push(c2);
+                        if self.peek_char() == Some('\n') {
+                            // An unquoted backslash-newline is a line continuation,
+                            // not part of a word (POSIX shell grammar).
+                            self.next_char();
+                        } else {
+                            word.push('\\');
+                            if let Some(c2) = self.next_char() {
+                                word.push(c2);
+                            }
                         }
                     }
                     '#' if word.is_empty() => break, // comment
