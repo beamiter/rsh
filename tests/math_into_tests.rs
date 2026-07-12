@@ -155,7 +155,7 @@ fn math_stddev_on_range() {
     let (out, err, code) = run("range 1..5 | math stddev", "");
     assert_eq!(code, 0, "stderr: {}", err);
     let v: f64 = out.trim().parse().unwrap();
-    assert!((v - 1.4142135623730951).abs() < 1e-10, "got {}", v);
+    assert!((v - std::f64::consts::SQRT_2).abs() < 1e-10, "got {}", v);
 }
 
 #[test]
