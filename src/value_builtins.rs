@@ -7,8 +7,8 @@ use crate::pipeline_data::PipelineData;
 use crate::value::{render_table, ClosureData, Value};
 use indexmap::IndexMap;
 use once_cell::sync::Lazy;
-use std::io::{Read, Write};
 use std::collections::HashMap;
+use std::io::{Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::sync::Arc;
 
@@ -4597,8 +4597,8 @@ fn http_request_over_tcp(
     request.extend_from_slice(b"\r\n");
     request.extend_from_slice(body);
 
-    let mut stream = TcpStream::connect((host, port))
-        .map_err(|e| format!("http: request failed: {}", e))?;
+    let mut stream =
+        TcpStream::connect((host, port)).map_err(|e| format!("http: request failed: {}", e))?;
     stream
         .write_all(&request)
         .map_err(|e| format!("http: request failed: {}", e))?;
@@ -4702,10 +4702,7 @@ fn vb_http(
     }
 
     if as_json {
-        headers.push((
-            "Content-Type".to_string(),
-            "application/json".to_string(),
-        ));
+        headers.push(("Content-Type".to_string(), "application/json".to_string()));
     }
 
     // Body: explicit -d wins; else use the pipeline input if non-empty.

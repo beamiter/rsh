@@ -153,9 +153,11 @@ fn spawn_stub_server(
     Some((url, handle))
 }
 
+#[cfg(feature = "ai")]
 #[test]
 fn http_get_parses_json_body() {
-    let Some((url, _h)) = spawn_stub_server(r#"{"hello":"world","n":42}"#, "application/json") else {
+    let Some((url, _h)) = spawn_stub_server(r#"{"hello":"world","n":42}"#, "application/json")
+    else {
         return;
     };
     let (out, _, code) = run(&format!("http get {} | get body | get hello", url), "");
@@ -163,6 +165,7 @@ fn http_get_parses_json_body() {
     assert_eq!(out.trim(), "world");
 }
 
+#[cfg(feature = "ai")]
 #[test]
 fn http_get_returns_status_code() {
     let Some((url, _h)) = spawn_stub_server(r#"{"ok":true}"#, "application/json") else {
@@ -173,6 +176,7 @@ fn http_get_returns_status_code() {
     assert_eq!(out.trim(), "200");
 }
 
+#[cfg(feature = "ai")]
 #[test]
 fn http_get_plain_text_body_kept_as_string() {
     let Some((url, _h)) = spawn_stub_server("plain hello", "text/plain") else {
@@ -183,6 +187,7 @@ fn http_get_plain_text_body_kept_as_string() {
     assert_eq!(out.trim(), "plain hello");
 }
 
+#[cfg(feature = "ai")]
 #[test]
 fn http_post_sends_body() {
     let Some((url, h)) = spawn_stub_server(r#"{"ok":1}"#, "application/json") else {
@@ -195,6 +200,7 @@ fn http_post_sends_body() {
     assert!(req.contains("abc=123"), "request was: {}", req);
 }
 
+#[cfg(feature = "ai")]
 #[test]
 fn http_unknown_method_errors() {
     let (_, err, code) = run("http bogus https://example.com", "");
@@ -202,6 +208,7 @@ fn http_unknown_method_errors() {
     assert!(err.contains("unknown method"), "stderr was: {}", err);
 }
 
+#[cfg(feature = "ai")]
 #[test]
 fn http_missing_url_errors() {
     let (_, err, code) = run("http get", "");

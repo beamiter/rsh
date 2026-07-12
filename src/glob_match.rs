@@ -263,7 +263,7 @@ fn try_match_subpattern_from(
                 }
                 loop {
                     if try_match_subpattern_from(pattern, pi + 1, value, vi).is_some() {
-                        return Some(vi - vi);
+                        return Some(0);
                     }
                     if vi >= value.len() {
                         break;
@@ -288,7 +288,7 @@ fn try_match_subpattern_from(
     }
 
     if pi == pattern.len() {
-        Some(vi - vi)
+        Some(0)
     } else {
         None
     }

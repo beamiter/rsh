@@ -747,8 +747,16 @@ mod tests {
             )
         );
         assert_eq!(tokens[1].token, Token::Newline, "{tokens:#?}");
-        assert_eq!(tokens[2].token, Token::Word("echo".to_string()), "{tokens:#?}");
-        assert_eq!(tokens[3].token, Token::Word("done".to_string()), "{tokens:#?}");
+        assert_eq!(
+            tokens[2].token,
+            Token::Word("echo".to_string()),
+            "{tokens:#?}"
+        );
+        assert_eq!(
+            tokens[3].token,
+            Token::Word("done".to_string()),
+            "{tokens:#?}"
+        );
         assert_eq!(tokens[4].token, Token::Newline, "{tokens:#?}");
         assert_eq!(tokens[5].token, Token::Eof, "{tokens:#?}");
     }
