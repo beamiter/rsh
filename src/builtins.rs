@@ -1938,7 +1938,7 @@ fn builtin_popd(state: &mut ShellState) -> i32 {
                     1
                 }
             }
-        },
+        }
         None => {
             eprintln!("rsh: popd: directory stack empty");
             1
@@ -3375,7 +3375,10 @@ const HELP_ENTRIES: &[(&str, &str)] = &[
         "exec",
         "exec cmd [args] — Replace shell with command (no fork).",
     ),
-    ("hash", "hash [-r] — Refresh command lookup cache (currently a no-op)."),
+    (
+        "hash",
+        "hash [-r] — Refresh command lookup cache (currently a no-op).",
+    ),
     (
         "z",
         "z [query] — Jump to frecency-ranked directory matching query.",

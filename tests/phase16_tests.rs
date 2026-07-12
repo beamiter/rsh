@@ -155,7 +155,8 @@ fn spawn_stub_server(
 
 #[test]
 fn http_get_parses_json_body() {
-    let Some((url, _h)) = spawn_stub_server(r#"{"hello":"world","n":42}"#, "application/json") else {
+    let Some((url, _h)) = spawn_stub_server(r#"{"hello":"world","n":42}"#, "application/json")
+    else {
         return;
     };
     let (out, _, code) = run(&format!("http get {} | get body | get hello", url), "");

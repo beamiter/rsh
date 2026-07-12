@@ -1,8 +1,8 @@
 // Integration tests for RSH shell functionality
 // Tests verify that features parse and execute correctly
 
-use rsh::parser::parse;
 use rsh::parser::ast::{Command, WordPart};
+use rsh::parser::parse;
 
 #[test]
 fn test_simple_arithmetic() {
@@ -175,7 +175,18 @@ fn test_unquoted_backslash_newline_is_line_continuation() {
 
     assert_eq!(
         words,
-        ["find", "/tmp", "-type", "f", "-exec", "sed", "-i", "s#old#new#g", "{}", "+"]
+        [
+            "find",
+            "/tmp",
+            "-type",
+            "f",
+            "-exec",
+            "sed",
+            "-i",
+            "s#old#new#g",
+            "{}",
+            "+"
+        ]
     );
 }
 
