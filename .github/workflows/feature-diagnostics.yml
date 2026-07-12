@@ -1,0 +1,55 @@
+name: Feature diagnostics
+
+on:
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  clippy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: clippy
+      - name: Capture Clippy output
+        run: |
+          set +e
+          cargo clippy --all-targets --all-features --locked 2>&1 | tee clippy.log
+          exit ${PIPESTATUS[0]}
+      - name: Upload Clippy log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rsh-clippy-log
+          path: clippy.log
+          retention-days: 1
+
+  core-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: tests-core
+      - name: Capture core-only tests
+        run: |
+          set +e
+          cargo test --no-default-features --locked -- --nocapture 2>&1 | tee core-tests.log
+          exit ${PIPESTATUS[0]}
+      - name: Upload core test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rsh-core-tests-log
+          path: core-tests.log
+          retention-days: 1
