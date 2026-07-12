@@ -1377,7 +1377,7 @@ fn eval_arith_expr(
     state: &mut ShellState,
 ) -> Result<i64, String> {
     let val = eval_arith_assign(tokens, pos, state)?;
-    while *pos < tokens.len() && matches!(tokens.get(*pos), Some(ArithToken::Comma)) {
+    if *pos < tokens.len() && matches!(tokens.get(*pos), Some(ArithToken::Comma)) {
         *pos += 1;
         return eval_arith_expr(tokens, pos, state);
     }

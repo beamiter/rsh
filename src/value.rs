@@ -290,7 +290,7 @@ mod tests {
     fn as_f64_coercions() {
         assert_eq!(Value::Int(5).as_f64(), Some(5.0));
         assert_eq!(Value::Float(2.5).as_f64(), Some(2.5));
-        assert_eq!(Value::String("3.14".to_string()).as_f64(), Some(3.14));
+        assert_eq!(Value::String("2.5".to_string()).as_f64(), Some(2.5));
         assert_eq!(Value::Bool(true).as_f64(), Some(1.0));
         assert_eq!(Value::Null.as_f64(), None);
     }
