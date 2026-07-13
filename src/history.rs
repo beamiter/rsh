@@ -182,6 +182,25 @@ impl History {
         None
     }
 
+    /// Prefer a matching command previously used in the current directory,
+    /// then fall back to the global history. This keeps project-specific build
+    /// and deploy commands from leaking into unrelated repositories.
+    pub fn search_prefix_in_cwd(&self, prefix: &str, cwd: &str) -> Option<&str> {
+        if prefix.is_empty() {
+            return None;
+        }
+        self.entries
+            .iter()
+            .rev()
+            .find(|entry| {
+                entry.cwd.as_deref() == Some(cwd)
+                    && entry.command.starts_with(prefix)
+                    && entry.command.len() > prefix.len()
+            })
+            .map(|entry| entry.command.as_str())
+            .or_else(|| self.search_prefix(prefix))
+    }
+
     pub fn search_substring(&self, query: &str) -> Vec<&str> {
         if query.is_empty() {
             return Vec::new();
@@ -293,5 +312,40 @@ fn fuzzy_match_score(query: &[char], candidate: &[char]) -> Option<(Vec<usize>, 
         Some((indices, score))
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prefix_search_prefers_current_directory_then_falls_back() {
+        let history = History {
+            entries: vec![
+                HistoryEntry {
+                    command: "cargo test --workspace".into(),
+                    timestamp: 1,
+                    cwd: Some("/project/a".into()),
+                },
+                HistoryEntry {
+                    command: "cargo test --release".into(),
+                    timestamp: 2,
+                    cwd: Some("/project/b".into()),
+                },
+            ],
+            max_size: 10,
+            file_path: PathBuf::new(),
+            position: 2,
+        };
+
+        assert_eq!(
+            history.search_prefix_in_cwd("cargo t", "/project/a"),
+            Some("cargo test --workspace")
+        );
+        assert_eq!(
+            history.search_prefix_in_cwd("cargo t", "/project/unknown"),
+            Some("cargo test --release")
+        );
     }
 }

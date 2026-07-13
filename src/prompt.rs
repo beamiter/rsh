@@ -7,6 +7,11 @@ use std::env;
 pub struct GitContext {
     pub branch: Option<String>,
     pub remote: Option<String>,
+    pub has_staged: bool,
+    pub has_unstaged: bool,
+    pub has_conflicts: bool,
+    pub ahead: usize,
+    pub behind: usize,
 }
 
 pub fn render_prompt(state: &ShellState) -> String {
@@ -228,6 +233,24 @@ fn parse_git_status_header(status: &str) -> GitContext {
             context.remote = upstream
                 .split_once('/')
                 .map(|(remote, _)| remote.to_string());
+        } else if let Some(ab) = line.strip_prefix("# branch.ab ") {
+            for value in ab.split_whitespace() {
+                if let Some(ahead) = value.strip_prefix('+') {
+                    context.ahead = ahead.parse().unwrap_or(0);
+                } else if let Some(behind) = value.strip_prefix('-') {
+                    context.behind = behind.parse().unwrap_or(0);
+                }
+            }
+        } else if line.starts_with("? ") {
+            context.has_unstaged = true;
+        } else if line.starts_with("u ") {
+            context.has_conflicts = true;
+        } else if line.starts_with("1 ") || line.starts_with("2 ") {
+            if let Some(status) = line.split_whitespace().nth(1) {
+                let mut chars = status.chars();
+                context.has_staged |= !matches!(chars.next(), None | Some('.'));
+                context.has_unstaged |= !matches!(chars.next(), None | Some('.'));
+            }
         }
     }
     context
@@ -310,13 +333,18 @@ mod tests {
     #[test]
     fn parses_main_or_master_and_tracking_remote_from_one_status() {
         let main = parse_git_status_header(
-            "# branch.oid abc\n# branch.head main\n# branch.upstream origin/main\n",
+            "# branch.oid abc\n# branch.head main\n# branch.upstream origin/main\n# branch.ab +2 -1\n1 M. N... file.rs\n? new.rs\n",
         );
         assert_eq!(
             main,
             GitContext {
                 branch: Some("main".into()),
                 remote: Some("origin".into()),
+                has_staged: true,
+                has_unstaged: true,
+                ahead: 2,
+                behind: 1,
+                ..GitContext::default()
             }
         );
 

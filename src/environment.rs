@@ -149,6 +149,12 @@ pub struct ShellState {
     pub cached_git_branch: Option<String>,
     /// Tracking remote for the current branch, discovered together with the branch.
     pub cached_git_remote: Option<String>,
+    /// Git worktree state, refreshed once before each prompt.
+    pub cached_git_has_staged: bool,
+    pub cached_git_has_unstaged: bool,
+    pub cached_git_has_conflicts: bool,
+    pub cached_git_ahead: usize,
+    pub cached_git_behind: usize,
     /// Extensible completion spec registry (Phase 3: spec system)
     pub spec_registry: crate::completion_spec::SpecRegistry,
     /// Workflow registry (Phase 4: parameterized command templates)
@@ -232,6 +238,11 @@ impl ShellState {
             last_command: None,
             cached_git_branch: None,
             cached_git_remote: None,
+            cached_git_has_staged: false,
+            cached_git_has_unstaged: false,
+            cached_git_has_conflicts: false,
+            cached_git_ahead: 0,
+            cached_git_behind: 0,
             spec_registry: crate::completion_spec::SpecRegistry::new(),
             workflow_registry: crate::workflows::WorkflowRegistry::new(),
             let_vars: HashMap::new(),

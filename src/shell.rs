@@ -291,6 +291,11 @@ impl Shell {
             let git = prompt::probe_git_context();
             self.state.cached_git_branch = git.branch;
             self.state.cached_git_remote = git.remote;
+            self.state.cached_git_has_staged = git.has_staged;
+            self.state.cached_git_has_unstaged = git.has_unstaged;
+            self.state.cached_git_has_conflicts = git.has_conflicts;
+            self.state.cached_git_ahead = git.ahead;
+            self.state.cached_git_behind = git.behind;
 
             match self.editor.read_line(&mut self.state, &mut self.history) {
                 Ok(Some(line)) => {
@@ -351,6 +356,10 @@ impl Shell {
                         }
                     }
                     self.state.last_command_duration = Some(cmd_start.elapsed());
+
+                    // Files, variables, Git state, PATH and CWD may all have
+                    // changed. Never carry dynamic Tab results across commands.
+                    crate::completer::clear_cache();
 
                     // Capture error info for AI fix suggestions
                     if self.state.last_exit_code != 0 {

@@ -5,9 +5,15 @@ use crate::probe;
 use std::collections::HashMap;
 
 /// Context passed to the suggestion engine (zero-allocation, borrows from ShellState).
+#[derive(Default)]
 pub struct SuggestionContext<'a> {
     pub git_branch: Option<&'a str>,
     pub git_remote: Option<&'a str>,
+    pub git_has_staged: bool,
+    pub git_has_unstaged: bool,
+    pub git_has_conflicts: bool,
+    pub git_ahead: usize,
+    pub git_behind: usize,
     pub last_command: Option<&'a str>,
     pub last_exit_code: i32,
 }
@@ -150,7 +156,12 @@ pub fn suggest(buffer: &str, history: &History, ctx: &SuggestionContext) -> Opti
     }
 
     // 1. Exact prefix match from history
-    if let Some(entry) = history.search_prefix(buffer) {
+    let cwd = std::env::current_dir().ok();
+    let cwd = cwd
+        .as_deref()
+        .and_then(std::path::Path::to_str)
+        .unwrap_or("");
+    if let Some(entry) = history.search_prefix_in_cwd(buffer, cwd) {
         return Some(entry[buffer.len()..].to_string());
     }
 
@@ -336,14 +347,40 @@ fn suggest_next_command(ctx: &SuggestionContext, history: &History) -> Option<St
         return None;
     }
 
+    // Prefer live repository state over a generic static command chain.
+    if last_cmd.starts_with("git status") {
+        if ctx.git_has_conflicts {
+            return Some("git diff --name-only --diff-filter=U".to_string());
+        }
+        if ctx.git_has_unstaged {
+            return Some("git add -A".to_string());
+        }
+        if ctx.git_has_staged {
+            return Some("git commit -m ".to_string());
+        }
+        if ctx.git_behind > 0 {
+            return Some("git pull --rebase".to_string());
+        }
+        if ctx.git_ahead > 0 {
+            return git_push_command(ctx);
+        }
+    }
+
+    if last_cmd.starts_with("git add") {
+        if ctx.git_has_staged && !ctx.git_has_conflicts {
+            // Return the full commit prompt at once; the cursor is ready for the message.
+            return Some("git commit -m ".to_string());
+        }
+        return Some("git status".to_string());
+    }
+
     // 1. Check static chain patterns first
     for (prefix, suggestion) in COMMAND_CHAINS {
         if last_cmd.starts_with(prefix) {
             // Enrich git push with branch info
             if *suggestion == "git push" {
-                if let Some(branch) = ctx.git_branch {
-                    let remote = ctx.git_remote.unwrap_or("origin");
-                    return Some(format!("git push {} {}", remote, branch));
+                if let Some(command) = git_push_command(ctx) {
+                    return Some(command);
                 }
             }
             return Some(suggestion.to_string());
@@ -352,6 +389,12 @@ fn suggest_next_command(ctx: &SuggestionContext, history: &History) -> Option<St
 
     // 2. Fall back to history-based chain learning
     suggest_from_history_chains(last_cmd, history)
+}
+
+fn git_push_command(ctx: &SuggestionContext) -> Option<String> {
+    let branch = ctx.git_branch?;
+    let remote = ctx.git_remote.unwrap_or("origin");
+    Some(format!("git push {} {}", remote, branch))
 }
 
 /// Learn command chains from history: find the most common successor command.
@@ -485,8 +528,7 @@ mod tests {
         let ctx = SuggestionContext {
             git_branch: Some("master"),
             git_remote: Some("upstream"),
-            last_command: None,
-            last_exit_code: 0,
+            ..SuggestionContext::default()
         };
 
         assert_eq!(
@@ -504,14 +546,37 @@ mod tests {
         let history = History::new(0);
         let ctx = SuggestionContext {
             git_branch: Some("main"),
-            git_remote: None,
             last_command: Some("git commit -m 'done'"),
-            last_exit_code: 0,
+            ..SuggestionContext::default()
         };
 
         assert_eq!(
             suggest_next_command(&ctx, &history),
             Some("git push origin main".to_string())
+        );
+    }
+
+    #[test]
+    fn git_status_and_add_follow_live_worktree_state() {
+        let history = History::new(0);
+        let unstaged = SuggestionContext {
+            git_has_unstaged: true,
+            last_command: Some("git status"),
+            ..SuggestionContext::default()
+        };
+        assert_eq!(
+            suggest_next_command(&unstaged, &history),
+            Some("git add -A".to_string())
+        );
+
+        let staged = SuggestionContext {
+            git_has_staged: true,
+            last_command: Some("git add -A"),
+            ..SuggestionContext::default()
+        };
+        assert_eq!(
+            suggest_next_command(&staged, &history),
+            Some("git commit -m ".to_string())
         );
     }
 }
