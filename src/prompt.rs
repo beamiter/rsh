@@ -3,6 +3,12 @@ use crate::environment::{PromptStyle, ShellState};
 use crossterm::style::{Color, Stylize};
 use std::env;
 
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct GitContext {
+    pub branch: Option<String>,
+    pub remote: Option<String>,
+}
+
 pub fn render_prompt(state: &ShellState) -> String {
     // Determine effective style
     let style = match state.prompt_style {
@@ -35,7 +41,7 @@ fn render_prompt_full(state: &ShellState) -> String {
     let user = env::var("USER").unwrap_or_else(|_| String::from("user"));
     let hostname = &state.hostname;
     let cwd = get_short_cwd(state);
-    let git_branch = get_git_branch();
+    let git_branch = state.cached_git_branch.as_deref();
     let env_hint = get_env_hint();
     let exit_indicator = if state.last_exit_code == 0 {
         "❯".green().bold().to_string()
@@ -74,7 +80,7 @@ fn render_prompt_full(state: &ShellState) -> String {
     ));
 
     // Git branch in magenta
-    if let Some(branch) = &git_branch {
+    if let Some(branch) = git_branch {
         prompt.push_str(&format!(" {}", format!("({})", branch).magenta()));
     }
 
@@ -100,7 +106,7 @@ fn render_prompt_full(state: &ShellState) -> String {
 fn render_prompt_compact(state: &ShellState) -> String {
     let user = env::var("USER").unwrap_or_else(|_| String::from("user"));
     let cwd = get_short_cwd(state);
-    let git_branch = get_git_branch();
+    let git_branch = state.cached_git_branch.as_deref();
     let env_hint = get_env_hint();
     let exit_indicator = if state.last_exit_code == 0 {
         "❯".green().bold().to_string()
@@ -138,7 +144,7 @@ fn render_prompt_compact(state: &ShellState) -> String {
     ));
 
     // Git branch in magenta
-    if let Some(branch) = &git_branch {
+    if let Some(branch) = git_branch {
         prompt.push_str(&format!(" {}", format!("({})", branch).magenta()));
     }
 
@@ -196,25 +202,39 @@ pub fn get_short_cwd(state: &ShellState) -> String {
     }
 }
 
-pub fn get_git_branch() -> Option<String> {
-    // Walk up from current directory looking for .git
-    let mut dir = env::current_dir().ok()?;
-    loop {
-        let git_head = dir.join(".git/HEAD");
-        if git_head.exists() {
-            let content = std::fs::read_to_string(git_head).ok()?;
-            let content = content.trim();
-            if let Some(branch) = content.strip_prefix("ref: refs/heads/") {
-                return Some(branch.to_string());
+/// Discover the current branch and its tracking remote with one Git process.
+/// `status --porcelain=v2 --branch` works for normal repositories, worktrees,
+/// submodules, and repositories whose `.git` directory lives elsewhere.
+pub fn probe_git_context() -> GitContext {
+    let output = match std::process::Command::new("git")
+        .args(["status", "--porcelain=v2", "--branch"])
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return GitContext::default(),
+    };
+
+    parse_git_status_header(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_git_status_header(status: &str) -> GitContext {
+    let mut context = GitContext::default();
+    for line in status.lines() {
+        if let Some(branch) = line.strip_prefix("# branch.head ") {
+            if branch != "(detached)" {
+                context.branch = Some(branch.to_string());
             }
-            // Detached HEAD
-            return Some(content[..8.min(content.len())].to_string());
-        }
-        if !dir.pop() {
-            break;
+        } else if let Some(upstream) = line.strip_prefix("# branch.upstream ") {
+            context.remote = upstream
+                .split_once('/')
+                .map(|(remote, _)| remote.to_string());
         }
     }
-    None
+    context
+}
+
+pub fn get_git_branch() -> Option<String> {
+    probe_git_context().branch
 }
 
 fn get_env_hint() -> Option<String> {
@@ -282,10 +302,32 @@ pub fn format_duration(d: std::time::Duration) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::get_env_hint;
+    use super::{get_env_hint, parse_git_status_header, GitContext};
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn parses_main_or_master_and_tracking_remote_from_one_status() {
+        let main = parse_git_status_header(
+            "# branch.oid abc\n# branch.head main\n# branch.upstream origin/main\n",
+        );
+        assert_eq!(
+            main,
+            GitContext {
+                branch: Some("main".into()),
+                remote: Some("origin".into()),
+            }
+        );
+
+        let master = parse_git_status_header("# branch.oid def\n# branch.head master\n");
+        assert_eq!(master.branch.as_deref(), Some("master"));
+        assert_eq!(master.remote, None);
+    }
 
     #[test]
     fn env_hint_prefers_conda_prompt_modifier() {
+        let _guard = ENV_LOCK.lock().unwrap();
         unsafe {
             std::env::set_var("CONDA_PROMPT_MODIFIER", "(GPTSoVits) ");
             std::env::set_var("VIRTUAL_ENV", "/tmp/.venv");
@@ -299,6 +341,7 @@ mod tests {
 
     #[test]
     fn env_hint_falls_back_to_virtual_env_name() {
+        let _guard = ENV_LOCK.lock().unwrap();
         unsafe {
             std::env::remove_var("CONDA_PROMPT_MODIFIER");
             std::env::set_var("VIRTUAL_ENV", "/tmp/myenv");

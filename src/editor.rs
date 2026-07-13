@@ -1179,6 +1179,7 @@ impl Editor {
         }
         let ctx = suggest::SuggestionContext {
             git_branch: state.cached_git_branch.as_deref(),
+            git_remote: state.cached_git_remote.as_deref(),
             last_command: state.last_command.as_deref(),
             last_exit_code: state.last_exit_code,
         };

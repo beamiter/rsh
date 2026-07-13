@@ -285,8 +285,12 @@ impl Shell {
                 osc::set_title(&format!("rsh: {}", title));
             }
 
-            // Refresh git branch cache for the suggestion engine
-            self.state.cached_git_branch = prompt::get_git_branch();
+            // Probe Git once per prompt. Both prompt rendering and smart suggestions
+            // consume this cache, so commands such as `git commit` do not trigger a
+            // second Git lookup while the next prompt is being drawn.
+            let git = prompt::probe_git_context();
+            self.state.cached_git_branch = git.branch;
+            self.state.cached_git_remote = git.remote;
 
             match self.editor.read_line(&mut self.state, &mut self.history) {
                 Ok(Some(line)) => {

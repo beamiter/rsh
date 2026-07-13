@@ -121,7 +121,16 @@ pub fn complete(buffer: &str, cursor: usize, state: &mut ShellState) -> (usize, 
     } else if word.starts_with('$') {
         format!("var:{}", &word[1..])
     } else {
-        format!("path:{}", word)
+        // Argument completion depends on the full command and repository
+        // context, not just the last word (which is often empty after a space).
+        format!(
+            "arg:{}:{}:{}:{}:{}",
+            cmd,
+            &buf[..word_start],
+            word,
+            state.cached_git_branch.as_deref().unwrap_or(""),
+            state.cached_git_remote.as_deref().unwrap_or("")
+        )
     };
 
     // Try to get from cache
@@ -171,7 +180,7 @@ pub fn complete(buffer: &str, cursor: usize, state: &mut ShellState) -> (usize, 
             cmd_completions.extend(project);
         }
         cmd_completions
-    } else if let Some(subs) = subcommand_completions(&cmd, &word, buf, word_start) {
+    } else if let Some(subs) = subcommand_completions(&cmd, &word, buf, word_start, state) {
         subs
     } else if let Some(spec_completions) = complete_from_spec(&cmd, &word, buf, state) {
         spec_completions
@@ -306,6 +315,7 @@ fn subcommand_completions(
     prefix: &str,
     buf: &str,
     word_start: usize,
+    state: &ShellState,
 ) -> Option<Vec<Completion>> {
     let before = buf[..word_start].trim_end();
     let words: Vec<&str> = before.split_whitespace().collect();
@@ -639,10 +649,18 @@ fn subcommand_completions(
                 return Some(complete_git_remotes(prefix));
             }
             "push" | "pull" | "fetch" if word_count == 2 => {
-                return Some(complete_git_remotes(prefix));
+                let mut results = complete_git_remotes(prefix);
+                if let Some(remote) = state.cached_git_remote.as_deref() {
+                    promote_git_context(&mut results, remote, prefix, "tracking remote");
+                }
+                return Some(results);
             }
             "push" | "pull" | "fetch" if word_count >= 3 => {
-                return Some(complete_git_refs(prefix));
+                let mut results = complete_git_refs(prefix);
+                if let Some(branch) = state.cached_git_branch.as_deref() {
+                    promote_git_context(&mut results, branch, prefix, "current branch");
+                }
+                return Some(results);
             }
             _ => {}
         }
@@ -782,6 +800,36 @@ fn subcommand_completions(
     }
 
     None
+}
+
+fn promote_git_context(
+    completions: &mut Vec<Completion>,
+    value: &str,
+    prefix: &str,
+    description: &str,
+) {
+    if !value.starts_with(prefix) {
+        return;
+    }
+    if let Some(index) = completions
+        .iter()
+        .position(|completion| completion.text == value)
+    {
+        let mut completion = completions.remove(index);
+        completion.description = Some(description.to_string());
+        completions.insert(0, completion);
+    } else {
+        completions.insert(
+            0,
+            Completion {
+                text: value.to_string(),
+                display: value.to_string(),
+                description: Some(description.to_string()),
+                kind: CompletionKind::Other,
+                is_dir: false,
+            },
+        );
+    }
 }
 
 fn complete_git_refs(prefix: &str) -> Vec<Completion> {

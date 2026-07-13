@@ -7,6 +7,7 @@ use std::collections::HashMap;
 /// Context passed to the suggestion engine (zero-allocation, borrows from ShellState).
 pub struct SuggestionContext<'a> {
     pub git_branch: Option<&'a str>,
+    pub git_remote: Option<&'a str>,
     pub last_command: Option<&'a str>,
     pub last_exit_code: i32,
 }
@@ -139,24 +140,26 @@ pub fn suggest(buffer: &str, history: &History, ctx: &SuggestionContext) -> Opti
         return suggest_next_command(ctx, history);
     }
 
-    // 1. Exact prefix match from history (best, current behavior)
-    if let Some(entry) = history.search_prefix(buffer) {
-        return Some(entry[buffer.len()..].to_string());
-    }
-
-    // 2. Git-aware suggestions (context-sensitive)
+    // Repository context must beat history here. A command copied from another
+    // repository may contain `main` while this repository is on `master` (or the
+    // other way around).
     if buffer.starts_with("git ") {
         if let Some(s) = suggest_git_command(buffer, ctx) {
             return Some(s);
         }
     }
 
-    // 3. Subcommand abbreviation expansion (git l → git log, cargo b → cargo build)
+    // 1. Exact prefix match from history
+    if let Some(entry) = history.search_prefix(buffer) {
+        return Some(entry[buffer.len()..].to_string());
+    }
+
+    // 2. Subcommand abbreviation expansion (git l → git log, cargo b → cargo build)
     if let Some(s) = suggest_subcommand(buffer) {
         return Some(s);
     }
 
-    // 4. For "cd " commands, suggest from z-jump database
+    // 3. For "cd " commands, suggest from z-jump database
     if buffer.starts_with("cd ") {
         let current_arg = &buffer[3..];
         let query = current_arg.trim();
@@ -177,7 +180,7 @@ pub fn suggest(buffer: &str, history: &History, ctx: &SuggestionContext) -> Opti
         }
     }
 
-    // 5. Filesystem probe: context-aware completion based on command + filesystem state
+    // 4. Filesystem probe: context-aware completion based on command + filesystem state
     if let Some(suggestion) = probe_filesystem_suggestion(buffer) {
         return Some(suggestion);
     }
@@ -223,33 +226,35 @@ fn probe_filesystem_suggestion(buffer: &str) -> Option<String> {
     }
 }
 
-/// Git-aware suggestions: auto-complete `git push/pull` with `origin <branch>`.
+/// Git-aware suggestions: auto-complete `git push/pull` with the tracking remote
+/// and current branch.
 fn suggest_git_command(buffer: &str, ctx: &SuggestionContext) -> Option<String> {
     let branch = ctx.git_branch?;
+    let remote = ctx.git_remote.unwrap_or("origin");
 
     for cmd in &["git push", "git pull"] {
         // "git push" or "git pull" (no trailing space)
         if buffer == *cmd {
-            return Some(format!(" origin {}", branch));
+            return Some(format!(" {} {}", remote, branch));
         }
         // "git push " (with trailing space, no remote yet)
         let with_space = format!("{} ", cmd);
         if buffer == with_space {
-            return Some(format!("origin {}", branch));
+            return Some(format!("{} {}", remote, branch));
         }
         // "git push origin" (no trailing space after origin)
-        let with_origin = format!("{} origin", cmd);
-        if buffer == with_origin {
+        let with_remote = format!("{} {}", cmd, remote);
+        if buffer == with_remote {
             return Some(format!(" {}", branch));
         }
         // "git push origin " (with trailing space, ready for branch)
-        let origin_space = format!("{} origin ", cmd);
-        if buffer == origin_space {
+        let remote_space = format!("{} {} ", cmd, remote);
+        if buffer == remote_space {
             return Some(branch.to_string());
         }
         // "git push origin ma" -> suggest "ster" if branch is "master"
-        if buffer.starts_with(&origin_space) {
-            let partial = &buffer[origin_space.len()..];
+        if buffer.starts_with(&remote_space) {
+            let partial = &buffer[remote_space.len()..];
             if !partial.is_empty() && branch.starts_with(partial) && branch.len() > partial.len() {
                 return Some(branch[partial.len()..].to_string());
             }
@@ -337,7 +342,8 @@ fn suggest_next_command(ctx: &SuggestionContext, history: &History) -> Option<St
             // Enrich git push with branch info
             if *suggestion == "git push" {
                 if let Some(branch) = ctx.git_branch {
-                    return Some(format!("git push origin {}", branch));
+                    let remote = ctx.git_remote.unwrap_or("origin");
+                    return Some(format!("git push {} {}", remote, branch));
                 }
             }
             return Some(suggestion.to_string());
@@ -472,5 +478,40 @@ mod tests {
         // If user has already typed the full subcommand, no suggestion
         assert_eq!(suggest_subcommand("git log"), None);
         assert_eq!(suggest_subcommand("cargo build"), None);
+    }
+
+    #[test]
+    fn git_push_and_pull_use_probed_branch_and_remote_in_one_suggestion() {
+        let ctx = SuggestionContext {
+            git_branch: Some("master"),
+            git_remote: Some("upstream"),
+            last_command: None,
+            last_exit_code: 0,
+        };
+
+        assert_eq!(
+            suggest_git_command("git push", &ctx),
+            Some(" upstream master".to_string())
+        );
+        assert_eq!(
+            suggest_git_command("git pull ", &ctx),
+            Some("upstream master".to_string())
+        );
+    }
+
+    #[test]
+    fn next_command_after_commit_is_not_split_into_multiple_suggestions() {
+        let history = History::new(0);
+        let ctx = SuggestionContext {
+            git_branch: Some("main"),
+            git_remote: None,
+            last_command: Some("git commit -m 'done'"),
+            last_exit_code: 0,
+        };
+
+        assert_eq!(
+            suggest_next_command(&ctx, &history),
+            Some("git push origin main".to_string())
+        );
     }
 }
