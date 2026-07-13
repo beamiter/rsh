@@ -210,10 +210,11 @@ fn glob_field(expanded: &str, state: &mut ShellState) -> Vec<String> {
                 }
 
                 if results.is_empty() {
-                    if state.shell_opts.nullglob {
+                    if state.shell_opts.failglob {
+                        state.expansion_error = Some(format!("no match: {}", expanded));
                         vec![]
-                    } else if state.shell_opts.failglob {
-                        vec![expanded.to_string()]
+                    } else if state.shell_opts.nullglob {
+                        vec![]
                     } else {
                         vec![expanded.to_string()]
                     }
@@ -221,6 +222,10 @@ fn glob_field(expanded: &str, state: &mut ShellState) -> Vec<String> {
                     results.sort();
                     results
                 }
+            }
+            Err(_) if state.shell_opts.failglob => {
+                state.expansion_error = Some(format!("no match: {}", expanded));
+                vec![]
             }
             Err(_) => vec![expanded.to_string()],
         }
@@ -451,12 +456,7 @@ fn parameter_value(name: &str, state: &ShellState) -> Option<String> {
         "!" => Some(state.last_bg_pid.map_or(String::new(), |p| p.to_string())),
         "#" => Some(state.positional_params.len().to_string()),
         "@" | "*" => Some(state.positional_params.join(" ")),
-        "0" => Some(
-            std::env::current_exe()
-                .ok()
-                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-                .unwrap_or_else(|| "rsh".into()),
-        ),
+        "0" => Some(state.arg0.clone()),
         _ if name.len() <= 3 && name.chars().all(|c| c.is_ascii_digit()) => {
             let idx: usize = name.parse().unwrap_or(0);
             if idx > 0 && idx <= state.positional_params.len() {
@@ -476,10 +476,7 @@ fn expand_variable(name: &str, state: &mut ShellState) -> String {
         "!" => state.last_bg_pid.map_or(String::new(), |p| p.to_string()),
         "#" => state.positional_params.len().to_string(),
         "@" | "*" => state.positional_params.join(" "),
-        "0" => std::env::current_exe()
-            .ok()
-            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-            .unwrap_or_else(|| "rsh".into()),
+        "0" => state.arg0.clone(),
         _ if name.len() <= 3 && name.chars().all(|c| c.is_ascii_digit()) => {
             let idx: usize = name.parse().unwrap_or(0);
             if idx > 0 && idx <= state.positional_params.len() {
@@ -1833,7 +1830,7 @@ fn pattern_explicitly_includes_dot(pattern: &str) -> bool {
 }
 
 /// Handle extglob pattern expansion by directory traversal
-fn expand_with_extglob(pattern: &str, state: &ShellState) -> Vec<String> {
+fn expand_with_extglob(pattern: &str, state: &mut ShellState) -> Vec<String> {
     use std::fs;
 
     // Split pattern into directory and file pattern parts
@@ -1872,7 +1869,10 @@ fn expand_with_extglob(pattern: &str, state: &ShellState) -> Vec<String> {
     }
 
     if results.is_empty() {
-        if state.shell_opts.nullglob {
+        if state.shell_opts.failglob {
+            state.expansion_error = Some(format!("no match: {}", pattern));
+            vec![]
+        } else if state.shell_opts.nullglob {
             vec![]
         } else {
             vec![pattern.to_string()]
@@ -1925,9 +1925,13 @@ fn split_pattern_dir(pattern: &str) -> (String, String) {
 
 /// Expand all words in a command, performing word splitting on the results.
 pub fn expand_words(words: &[Word], state: &mut ShellState) -> Vec<String> {
+    state.expansion_error = None;
     let mut result = Vec::new();
     for word in words {
         result.extend(expand_word(word, state));
+        if state.expansion_error.is_some() {
+            break;
+        }
     }
     result
 }

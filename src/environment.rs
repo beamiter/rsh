@@ -112,12 +112,28 @@ pub struct ShellState {
     path_cache: Option<Vec<String>>,
     path_hash: u64,
     path_scan_rx: Option<mpsc::Receiver<Vec<String>>>,
+    /// Invocation name exposed as shell parameter `$0`.
+    ///
+    /// Unlike ordinary positional parameters, this is preserved across shell
+    /// function calls and `source` invocations.
+    pub arg0: String,
     pub positional_params: Vec<String>,
     pub positional_stack: Vec<Vec<String>>,
     pub dir_stack: Vec<PathBuf>,
     pub shell_opts: ShellOpts,
     pub traps: HashMap<String, String>,
     pub pipestatus: Vec<i32>,
+    /// Deferred word-expansion failure (for example an unmatched failglob).
+    /// Expansion returns vectors for compatibility, so the executor consumes
+    /// this immediately after `expand_words`.
+    pub expansion_error: Option<String>,
+    /// Stop the remainder of the currently parsed program after a fatal
+    /// expansion error. Unlike `errexit`, failglob aborts the list even when
+    /// `set -e` is disabled.
+    pub abort_current_program: bool,
+    /// Nesting depth for contexts where Bash ignores `errexit` (the tested
+    /// operands of `&&`, `||`, `!`, and shell-condition command lists).
+    pub errexit_suppression_depth: usize,
     // PIDs of process-substitution children awaiting non-blocking reaping.
     pub procsub_pids: Vec<i32>,
     pub jobs: JobTable,
@@ -140,9 +156,13 @@ pub struct ShellState {
     // Loop control flow (break/continue)
     pub loop_break: bool,
     pub loop_continue: bool,
+    /// Number of active loop constructs in the current execution context.
+    pub loop_depth: usize,
     // Function return control flow
     pub return_requested: bool,
     pub return_value: i32,
+    /// Number of active function/source contexts in which `return` is valid.
+    pub return_depth: usize,
     /// Last executed command line (for sequential command suggestions)
     pub last_command: Option<String>,
     /// Cached git branch for current directory (avoids filesystem I/O per keystroke)
@@ -200,6 +220,7 @@ impl ShellState {
             .unwrap_or_else(|_| String::from("localhost"));
 
         let path_hash = Self::hash_path(env_vars.get("PATH").map(|s| s.as_str()).unwrap_or(""));
+        let arg0 = env::args().next().unwrap_or_else(|| "rsh".to_string());
 
         ShellState {
             env_vars,
@@ -214,12 +235,16 @@ impl ShellState {
             path_cache: None,
             path_hash,
             path_scan_rx: None,
+            arg0,
             positional_params: Vec::new(),
             positional_stack: Vec::new(),
             dir_stack: Vec::new(),
             shell_opts: ShellOpts::default(),
             traps: HashMap::new(),
             pipestatus: Vec::new(),
+            expansion_error: None,
+            abort_current_program: false,
+            errexit_suppression_depth: 0,
             procsub_pids: Vec::new(),
             jobs: JobTable::new(),
             arrays: HashMap::new(),
@@ -233,8 +258,10 @@ impl ShellState {
             terminal_width: Self::detect_terminal_width(),
             loop_break: false,
             loop_continue: false,
+            loop_depth: 0,
             return_requested: false,
             return_value: 0,
+            return_depth: 0,
             last_command: None,
             cached_git_branch: None,
             cached_git_remote: None,
@@ -252,6 +279,16 @@ impl ShellState {
             user_signatures: HashMap::new(),
             user_typed_fns: HashMap::new(),
         }
+    }
+
+    /// Set `$0` and the positional parameters for a new shell invocation.
+    pub fn set_invocation(&mut self, arg0: impl Into<String>, args: &[String]) {
+        self.arg0 = arg0.into();
+        self.positional_params = args.to_vec();
+    }
+
+    pub fn take_expansion_error(&mut self) -> Option<String> {
+        self.expansion_error.take()
     }
 
     /// Phase 14a: record a structured error. `msg` is the human-readable

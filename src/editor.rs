@@ -47,8 +47,11 @@ pub struct Editor {
     vi_mode: ViMode,
     vi_pending: Option<char>,
     ai_worker: Option<AiWorker>,
+    ai_include_extended_context: bool,
     ai_pending: bool,
     ai_explain_mode: bool,
+    ai_saved_input: Option<AiInputSnapshot>,
+    ai_error: Option<String>,
     pub last_error_info: Option<(String, String, i32)>,
     pub key_bindings: crate::keybindings::KeyBindingManager,
     cached_prompt: String,
@@ -56,6 +59,14 @@ pub struct Editor {
     last_cursor_snapshot: usize,
     last_suggestion_snapshot: Option<String>,
     last_menu_snapshot: Option<usize>,
+    last_ai_error_snapshot: Option<String>,
+}
+
+#[derive(Clone)]
+struct AiInputSnapshot {
+    buffer: String,
+    cursor: usize,
+    suggestion: Option<String>,
 }
 
 struct WorkflowMode {
@@ -81,7 +92,11 @@ struct SearchMode {
 impl Editor {
     pub fn new() -> Self {
         let (w, h) = terminal::size().unwrap_or((80, 24));
-        let ai_worker = AiConfig::from_env().map(AiWorker::new);
+        let ai_config = AiConfig::from_env();
+        let ai_include_extended_context = ai_config
+            .as_ref()
+            .is_some_and(AiConfig::allows_extended_context);
+        let ai_worker = ai_config.map(AiWorker::new);
         Editor {
             buffer: String::new(),
             cursor: 0,
@@ -97,8 +112,11 @@ impl Editor {
             vi_mode: ViMode::Insert,
             vi_pending: None,
             ai_worker,
+            ai_include_extended_context,
             ai_pending: false,
             ai_explain_mode: false,
+            ai_saved_input: None,
+            ai_error: None,
             last_error_info: None,
             key_bindings: crate::keybindings::KeyBindingManager::new(
                 crate::keybindings::EditorMode::Emacs,
@@ -108,6 +126,7 @@ impl Editor {
             last_cursor_snapshot: 0,
             last_suggestion_snapshot: None,
             last_menu_snapshot: None,
+            last_ai_error_snapshot: None,
         }
     }
 
@@ -123,6 +142,7 @@ impl Editor {
         self.completion_menu = None;
         self.search_mode = None;
         self.workflow_mode = None;
+        self.ai_error = None;
         self.vi_mode = ViMode::Insert;
         self.vi_pending = None;
         history.reset_position();
@@ -200,6 +220,10 @@ impl Editor {
                 consecutive_timeouts = 0;
                 match event::read()? {
                     Event::Key(key) => {
+                        // AI failures are rendered as a transient status line. Any
+                        // subsequent key dismisses it while leaving the restored
+                        // command buffer intact.
+                        self.ai_error = None;
                         if key.code != KeyCode::Tab && key.code != KeyCode::BackTab {
                             if key.code != KeyCode::Enter {
                                 if let Some(menu) = self.completion_menu.take() {
@@ -243,6 +267,7 @@ impl Editor {
                         self.repaint(state)?;
                     }
                     Event::Paste(text) => {
+                        self.ai_error = None;
                         self.buffer.insert_str(self.cursor, &text);
                         self.cursor += text.len();
                         self.update_suggestion(history, state);
@@ -270,14 +295,7 @@ impl Editor {
                         if let Some(ref worker) = self.ai_worker {
                             if let Some(resp) = worker.try_recv() {
                                 self.ai_pending = false;
-                                match resp {
-                                    AiResponse::Suggestion(cmd) => {
-                                        self.buffer.clear();
-                                        self.cursor = 0;
-                                        self.suggestion = Some(cmd);
-                                    }
-                                    AiResponse::Error(_) => {}
-                                }
+                                self.apply_ai_response(resp);
                                 self.repaint(state)?;
                             }
                         }
@@ -353,11 +371,13 @@ impl Editor {
                     }
                     return Ok(KeyAction::Continue);
                 }
-                // AI natural language: "# describe what you want" → generate command
-                if self.buffer.starts_with("# ") && self.buffer.len() > 2 {
-                    let prompt_text = self.buffer[2..].to_string();
-                    self.trigger_ai_generate(&prompt_text, state, history);
-                    return Ok(KeyAction::Continue);
+                // AI natural language: "# describe what you want" → generate command.
+                // With AI disabled this remains an ordinary shell comment and is
+                // submitted normally.
+                if let Some(prompt_text) = self.ai_generation_prompt().map(str::to_string) {
+                    if self.trigger_ai_generate(&prompt_text, state, history) {
+                        return Ok(KeyAction::Continue);
+                    }
                 }
                 // Check if input is incomplete (multiline)
                 if crate::parser::is_incomplete(&self.buffer) {
@@ -1102,19 +1122,27 @@ impl Editor {
             .map(|p| p.display().to_string())
             .unwrap_or_default();
         let os = std::env::consts::OS.to_string();
-        let recent_history: Vec<String> = history
-            .entries()
-            .iter()
-            .rev()
-            .take(5)
-            .map(|s| s.to_string())
-            .collect();
-        let git_status = std::process::Command::new("git")
-            .args(["status", "--short"])
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .filter(|s| !s.is_empty());
+        let recent_history = if self.ai_include_extended_context {
+            history
+                .entries()
+                .iter()
+                .rev()
+                .take(5)
+                .map(|s| s.to_string())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let git_status = if self.ai_include_extended_context {
+            std::process::Command::new("git")
+                .args(["status", "--short"])
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .filter(|s| !s.is_empty())
+        } else {
+            None
+        };
         AiContext {
             cwd,
             os,
@@ -1124,51 +1152,100 @@ impl Editor {
         }
     }
 
-    fn trigger_ai_generate(&mut self, prompt_text: &str, state: &ShellState, history: &History) {
-        if let Some(ref worker) = self.ai_worker {
-            let ctx = self.build_ai_context(state, history);
-            worker.request(AiRequest {
-                prompt: prompt_text.to_string(),
-                context: ctx,
-            });
-            self.ai_pending = true;
-            self.buffer.clear();
-            self.buffer.push_str("[AI...]");
-            self.cursor = self.buffer.len();
-        }
+    fn ai_generation_prompt(&self) -> Option<&str> {
+        self.ai_worker.as_ref()?;
+        self.buffer
+            .strip_prefix("# ")
+            .filter(|prompt| !prompt.is_empty())
     }
 
-    fn trigger_ai_fix(&mut self, state: &ShellState, history: &History) {
-        if self.last_error_info.is_none() {
-            return;
-        }
-        if let Some(ref worker) = self.ai_worker {
-            let ctx = self.build_ai_context(state, history);
-            worker.request(AiRequest {
-                prompt: String::new(),
-                context: ctx,
-            });
-            self.ai_pending = true;
-            self.buffer.clear();
-            self.buffer.push_str("[AI fixing...]");
-            self.cursor = self.buffer.len();
-        }
+    fn snapshot_ai_input(&mut self) {
+        self.ai_saved_input = Some(AiInputSnapshot {
+            buffer: self.buffer.clone(),
+            cursor: self.cursor,
+            suggestion: self.suggestion.clone(),
+        });
+        self.ai_error = None;
     }
 
-    fn trigger_ai_explain(&mut self, state: &ShellState, history: &History) {
-        if let Some(ref worker) = self.ai_worker {
-            let mut ctx = self.build_ai_context(state, history);
-            ctx.last_error = None;
-            let prompt = format!(
-                "Explain this shell command briefly (one line per flag/component): {}",
-                self.buffer
-            );
-            worker.request(AiRequest {
-                prompt,
-                context: ctx,
-            });
-            self.ai_pending = true;
-            self.ai_explain_mode = true;
+    fn trigger_ai_generate(
+        &mut self,
+        prompt_text: &str,
+        state: &ShellState,
+        history: &History,
+    ) -> bool {
+        if self.ai_worker.is_none() {
+            return false;
+        }
+        let ctx = self.build_ai_context(state, history);
+        self.snapshot_ai_input();
+        self.ai_worker.as_ref().unwrap().request(AiRequest {
+            prompt: prompt_text.to_string(),
+            context: ctx,
+        });
+        self.ai_pending = true;
+        self.buffer.clear();
+        self.buffer.push_str("[AI...]");
+        self.cursor = self.buffer.len();
+        true
+    }
+
+    fn trigger_ai_fix(&mut self, state: &ShellState, history: &History) -> bool {
+        if self.last_error_info.is_none() || self.ai_worker.is_none() {
+            return false;
+        }
+        let ctx = self.build_ai_context(state, history);
+        self.snapshot_ai_input();
+        self.ai_worker.as_ref().unwrap().request(AiRequest {
+            prompt: String::new(),
+            context: ctx,
+        });
+        self.ai_pending = true;
+        self.buffer.clear();
+        self.buffer.push_str("[AI fixing...]");
+        self.cursor = self.buffer.len();
+        true
+    }
+
+    fn trigger_ai_explain(&mut self, state: &ShellState, history: &History) -> bool {
+        if self.ai_worker.is_none() {
+            return false;
+        }
+        let mut ctx = self.build_ai_context(state, history);
+        ctx.last_error = None;
+        let prompt = format!(
+            "Explain this shell command briefly (one line per flag/component): {}",
+            self.buffer
+        );
+        self.snapshot_ai_input();
+        self.ai_worker.as_ref().unwrap().request(AiRequest {
+            prompt,
+            context: ctx,
+        });
+        self.ai_pending = true;
+        self.ai_explain_mode = true;
+        true
+    }
+
+    fn apply_ai_response(&mut self, response: AiResponse) {
+        self.ai_pending = false;
+        self.ai_explain_mode = false;
+        match response {
+            AiResponse::Suggestion(command) => {
+                self.ai_saved_input = None;
+                self.ai_error = None;
+                self.buffer.clear();
+                self.cursor = 0;
+                self.suggestion = Some(command);
+            }
+            AiResponse::Error(error) => {
+                if let Some(saved) = self.ai_saved_input.take() {
+                    self.buffer = saved.buffer;
+                    self.cursor = saved.cursor.min(self.buffer.len());
+                    self.suggestion = saved.suggestion;
+                }
+                self.ai_error = Some(format_ai_error(&error));
+            }
         }
     }
 
@@ -1209,12 +1286,14 @@ impl Editor {
             && self.buffer == self.last_buffer_snapshot
             && self.suggestion == self.last_suggestion_snapshot
             && menu_sel == self.last_menu_snapshot
+            && self.ai_error == self.last_ai_error_snapshot
             && self.cursor != self.last_cursor_snapshot;
 
         self.last_buffer_snapshot = self.buffer.clone();
         self.last_cursor_snapshot = self.cursor;
         self.last_suggestion_snapshot = self.suggestion.clone();
         self.last_menu_snapshot = menu_sel;
+        self.last_ai_error_snapshot = self.ai_error.clone();
 
         let mut out = stdout();
 
@@ -1458,9 +1537,15 @@ impl Editor {
                 prompt_width + display_width(buf_cursor_last) as u16
             };
 
-            // Phase 16d — signature hint line below the input
-            // Only when nothing else owns this slot: no completion menu, no widget mode.
-            if show_signature_hint
+            if let Some(ref error) = self.ai_error {
+                out.queue(Print("\r\n"))?;
+                out.queue(SetForegroundColor(Color::Red))?;
+                out.queue(Print(error))?;
+                out.queue(ResetColor)?;
+                rendered_lines += 1;
+            // Phase 16d — signature hint line below the input. Only when nothing
+            // else owns this slot: no completion menu, widget mode, or AI error.
+            } else if show_signature_hint
                 && self.completion_menu.is_none()
                 && self.workflow_mode.is_none()
                 && self.search_mode.is_none()
@@ -2002,6 +2087,37 @@ enum KeyAction {
     Interrupt,
 }
 
+fn format_ai_error(error: &str) -> String {
+    let mut clean = String::new();
+    let mut in_escape = false;
+    for ch in error.chars() {
+        if in_escape {
+            if ch.is_ascii_alphabetic() {
+                in_escape = false;
+            }
+            continue;
+        }
+        if ch == '\x1b' {
+            in_escape = true;
+        } else if ch.is_control() {
+            if ch.is_whitespace() {
+                clean.push(' ');
+            }
+        } else {
+            clean.push(ch);
+        }
+        if clean.chars().count() >= 240 {
+            break;
+        }
+    }
+    let detail = clean.split_whitespace().collect::<Vec<_>>().join(" ");
+    if detail.is_empty() {
+        "AI error: request failed".to_string()
+    } else {
+        format!("AI error: {}", detail)
+    }
+}
+
 /// Outcome of waiting on stdin: input ready, timed out, or the terminal hung up.
 enum StdinPoll {
     Ready,
@@ -2079,5 +2195,46 @@ fn find_next_word_boundary(s: &str) -> usize {
         s.len()
     } else {
         i
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn comments_are_not_ai_prompts_without_an_enabled_worker() {
+        let mut editor = Editor::new();
+        editor.ai_worker = None;
+        editor.buffer = "# keep this as a comment".to_string();
+
+        assert_eq!(editor.ai_generation_prompt(), None);
+        assert_eq!(editor.buffer, "# keep this as a comment");
+    }
+
+    #[test]
+    fn ai_errors_restore_the_input_and_expose_a_safe_status() {
+        let mut editor = Editor::new();
+        editor.ai_worker = None;
+        editor.buffer = "# list project files".to_string();
+        editor.cursor = editor.buffer.len();
+        editor.suggestion = Some(" previous suggestion".to_string());
+        editor.snapshot_ai_input();
+        editor.buffer = "[AI...]".to_string();
+        editor.cursor = editor.buffer.len();
+        editor.ai_pending = true;
+
+        editor.apply_ai_response(AiResponse::Error(
+            "\x1b[31mservice unavailable\x1b[0m\ntry again".to_string(),
+        ));
+
+        assert_eq!(editor.buffer, "# list project files");
+        assert_eq!(editor.cursor, editor.buffer.len());
+        assert_eq!(editor.suggestion.as_deref(), Some(" previous suggestion"));
+        assert_eq!(
+            editor.ai_error.as_deref(),
+            Some("AI error: service unavailable try again")
+        );
+        assert!(!editor.ai_pending);
     }
 }

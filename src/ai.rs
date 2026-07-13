@@ -4,7 +4,7 @@
 use std::sync::mpsc;
 use std::thread;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AiProvider {
     OpenAI,
     Anthropic,
@@ -17,40 +17,52 @@ pub struct AiConfig {
     pub api_key: Option<String>,
     pub model: String,
     pub base_url: String,
+    /// Whether cloud providers may receive recent history and Git status.
+    pub share_context: bool,
 }
 
 impl AiConfig {
     pub fn from_env() -> Option<Self> {
-        let provider_str = std::env::var("RSH_AI_PROVIDER").unwrap_or_default();
-        let provider = match provider_str.to_lowercase().as_str() {
-            "openai" => AiProvider::OpenAI,
-            "anthropic" => AiProvider::Anthropic,
-            "ollama" => AiProvider::Ollama,
-            "" => {
-                // Auto-detect: check for API keys or default to ollama
-                if std::env::var("OPENAI_API_KEY").is_ok() {
-                    AiProvider::OpenAI
-                } else if std::env::var("ANTHROPIC_API_KEY").is_ok() {
-                    AiProvider::Anthropic
-                } else {
-                    AiProvider::Ollama
-                }
+        Self::from_lookup(|name| std::env::var(name).ok())
+    }
+
+    fn from_lookup(mut get: impl FnMut(&str) -> Option<String>) -> Option<Self> {
+        let provider_name = get("RSH_AI_PROVIDER").unwrap_or_default();
+        let provider_name = provider_name.trim();
+        let explicitly_enabled = !provider_name.is_empty()
+            || get("RSH_AI_ENABLED")
+                .as_deref()
+                .is_some_and(env_value_is_truthy);
+        if !explicitly_enabled {
+            return None;
+        }
+
+        let provider = if provider_name.is_empty() {
+            // Provider auto-detection is only reached after RSH_AI_ENABLED opted in.
+            if get("OPENAI_API_KEY").as_deref().is_some_and(nonempty) {
+                AiProvider::OpenAI
+            } else if get("ANTHROPIC_API_KEY").as_deref().is_some_and(nonempty) {
+                AiProvider::Anthropic
+            } else {
+                AiProvider::Ollama
             }
-            _ => return None,
+        } else {
+            match provider_name.to_ascii_lowercase().as_str() {
+                "openai" => AiProvider::OpenAI,
+                "anthropic" => AiProvider::Anthropic,
+                "ollama" => AiProvider::Ollama,
+                _ => return None,
+            }
         };
 
         let (api_key, default_model, default_url) = match &provider {
             AiProvider::OpenAI => (
-                std::env::var("OPENAI_API_KEY")
-                    .ok()
-                    .or_else(|| std::env::var("RSH_AI_API_KEY").ok()),
+                get("OPENAI_API_KEY").or_else(|| get("RSH_AI_API_KEY")),
                 "gpt-4o-mini".to_string(),
                 "https://api.openai.com/v1".to_string(),
             ),
             AiProvider::Anthropic => (
-                std::env::var("ANTHROPIC_API_KEY")
-                    .ok()
-                    .or_else(|| std::env::var("RSH_AI_API_KEY").ok()),
+                get("ANTHROPIC_API_KEY").or_else(|| get("RSH_AI_API_KEY")),
                 "claude-sonnet-4-20250514".to_string(),
                 "https://api.anthropic.com".to_string(),
             ),
@@ -61,16 +73,41 @@ impl AiConfig {
             ),
         };
 
-        let model = std::env::var("RSH_AI_MODEL").unwrap_or(default_model);
-        let base_url = std::env::var("RSH_AI_BASE_URL").unwrap_or(default_url);
+        let model = get("RSH_AI_MODEL")
+            .filter(|value| nonempty(value))
+            .unwrap_or(default_model);
+        let base_url = get("RSH_AI_BASE_URL")
+            .filter(|value| nonempty(value))
+            .unwrap_or(default_url);
+        let share_context = get("RSH_AI_SHARE_CONTEXT")
+            .as_deref()
+            .is_some_and(env_value_is_truthy);
 
         Some(AiConfig {
             provider,
             api_key,
             model,
             base_url,
+            share_context,
         })
     }
+
+    /// Local inference stays local. Cloud inference only gets optional shell
+    /// context after the user explicitly opts in with RSH_AI_SHARE_CONTEXT.
+    pub fn allows_extended_context(&self) -> bool {
+        self.provider == AiProvider::Ollama || self.share_context
+    }
+}
+
+fn nonempty(value: &str) -> bool {
+    !value.trim().is_empty()
+}
+
+fn env_value_is_truthy(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
 }
 
 #[derive(Debug)]
@@ -329,5 +366,53 @@ fn parse_ollama_response(text: &str) -> AiResponse {
             }
         }
         Err(e) => AiResponse::Error(format!("Parse error: {}", e)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn config(vars: &[(&str, &str)]) -> Option<AiConfig> {
+        let vars: HashMap<String, String> = vars
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+            .collect();
+        AiConfig::from_lookup(|name| vars.get(name).cloned())
+    }
+
+    #[test]
+    fn api_keys_do_not_enable_ai_implicitly() {
+        assert!(config(&[("OPENAI_API_KEY", "secret")]).is_none());
+        assert!(config(&[("RSH_AI_ENABLED", "false"), ("OPENAI_API_KEY", "secret")]).is_none());
+    }
+
+    #[test]
+    fn provider_or_truthy_enabled_flag_explicitly_enables_ai() {
+        let explicit = config(&[("RSH_AI_PROVIDER", "ollama")]).unwrap();
+        assert_eq!(explicit.provider, AiProvider::Ollama);
+
+        let detected = config(&[("RSH_AI_ENABLED", "YeS"), ("OPENAI_API_KEY", "secret")]).unwrap();
+        assert_eq!(detected.provider, AiProvider::OpenAI);
+
+        let local_default = config(&[("RSH_AI_ENABLED", "1")]).unwrap();
+        assert_eq!(local_default.provider, AiProvider::Ollama);
+    }
+
+    #[test]
+    fn cloud_extended_context_requires_separate_opt_in() {
+        let private = config(&[("RSH_AI_PROVIDER", "openai")]).unwrap();
+        assert!(!private.allows_extended_context());
+
+        let shared = config(&[
+            ("RSH_AI_PROVIDER", "anthropic"),
+            ("RSH_AI_SHARE_CONTEXT", "on"),
+        ])
+        .unwrap();
+        assert!(shared.allows_extended_context());
+
+        let local = config(&[("RSH_AI_PROVIDER", "ollama")]).unwrap();
+        assert!(local.allows_extended_context());
     }
 }

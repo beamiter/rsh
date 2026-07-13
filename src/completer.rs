@@ -1789,21 +1789,16 @@ fn complete_variable(prefix: &str, state: &ShellState) -> Vec<Completion> {
         }
     }
 
-    // Add environment variables with values shown as descriptions
+    // Never echo environment values into the completion UI: values commonly
+    // contain API keys, access tokens, and other screen-recording-sensitive data.
     let mut env_vars: Vec<_> = state.env_vars.keys().collect();
     env_vars.sort();
     for name in env_vars {
         if name.starts_with(prefix) || prefix.is_empty() {
-            let value = state.env_vars.get(name).cloned().unwrap_or_default();
-            let desc = if value.len() > 50 {
-                format!("{}...", &value[..50])
-            } else {
-                value
-            };
             completions.push(Completion {
                 text: format!("${}", name),
                 display: name.clone(),
-                description: Some(desc),
+                description: Some("environment variable".to_string()),
                 kind: CompletionKind::Variable,
                 is_dir: false,
             });
@@ -1868,21 +1863,23 @@ fn complete_variable(prefix: &str, state: &ShellState) -> Vec<Completion> {
 }
 
 pub fn common_prefix(completions: &[Completion]) -> String {
-    if completions.is_empty() {
+    let Some(first) = completions.first() else {
         return String::new();
-    }
-    let first = &completions[0].text;
-    let mut len = first.len();
-    for c in &completions[1..] {
-        len = len.min(c.text.len());
-        for (i, (a, b)) in first.chars().zip(c.text.chars()).enumerate() {
-            if a != b && i < len {
-                len = i;
-                break;
-            }
+    };
+    let mut prefix: Vec<char> = first.text.chars().collect();
+    for completion in &completions[1..] {
+        let common_chars = prefix
+            .iter()
+            .copied()
+            .zip(completion.text.chars())
+            .take_while(|(left, right)| left == right)
+            .count();
+        prefix.truncate(common_chars);
+        if prefix.is_empty() {
+            break;
         }
     }
-    first[..len].to_string()
+    prefix.into_iter().collect()
 }
 
 /// Fuzzy match score: higher is better
@@ -1973,38 +1970,27 @@ pub fn clear_cache() {
 /// Complete history commands based on prefix
 /// Returns a list of historical commands sorted by relevance
 pub fn complete_from_history(prefix: &str) -> Vec<Completion> {
+    let entries = crate::history::History::load_default_entries(10_000);
+    complete_history_entries(&entries, prefix)
+}
+
+fn complete_history_entries(
+    entries: &[crate::history::HistoryEntry],
+    prefix: &str,
+) -> Vec<Completion> {
     let mut completions = Vec::new();
+    let mut seen = std::collections::HashSet::new();
 
-    // Try to load history file
-    if let Ok(file) = std::fs::File::open(
-        dirs::home_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-            .join(".rsh_history"),
-    ) {
-        use std::io::BufRead;
-        let reader = std::io::BufReader::new(file);
-        let mut seen = std::collections::HashSet::new();
-
-        for line in reader.lines() {
-            if let Ok(cmd_line) = line {
-                let cmd = cmd_line.split_whitespace().next().unwrap_or("");
-
-                // Avoid duplicates
-                if seen.contains(cmd) {
-                    continue;
-                }
-                seen.insert(cmd.to_string());
-
-                if !cmd.is_empty() {
-                    completions.push(Completion {
-                        text: cmd.to_string(),
-                        display: cmd.to_string(),
-                        description: Some("history".to_string()),
-                        kind: CompletionKind::Command,
-                        is_dir: false,
-                    });
-                }
-            }
+    for entry in entries {
+        let cmd = entry.command.split_whitespace().next().unwrap_or("");
+        if !cmd.is_empty() && seen.insert(cmd.to_string()) {
+            completions.push(Completion {
+                text: cmd.to_string(),
+                display: cmd.to_string(),
+                description: Some("history".to_string()),
+                kind: CompletionKind::Command,
+                is_dir: false,
+            });
         }
     }
 
@@ -2484,6 +2470,53 @@ pub fn complete_project_commands(prefix: &str) -> Vec<Completion> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn variable_completion_never_displays_environment_values() {
+        let mut state = ShellState::new(false);
+        state.env_vars.insert(
+            "RSH_TEST_SECRET".to_string(),
+            "super-secret-token".to_string(),
+        );
+
+        let completions = complete_variable("RSH_TEST_SECRET", &state);
+        let secret = completions
+            .iter()
+            .find(|completion| completion.text == "$RSH_TEST_SECRET")
+            .unwrap();
+        assert_eq!(secret.description.as_deref(), Some("environment variable"));
+        assert!(!format!("{:?}", secret.description).contains("super-secret-token"));
+    }
+
+    #[test]
+    fn common_prefix_is_unicode_safe() {
+        let cjk = [
+            Completion::new("你好".to_string(), CompletionKind::File),
+            Completion::new("你们".to_string(), CompletionKind::File),
+        ];
+        assert_eq!(common_prefix(&cjk), "你");
+
+        let emoji = [
+            Completion::new("🦀cargo".to_string(), CompletionKind::Command),
+            Completion::new("🦀cache".to_string(), CompletionKind::Command),
+        ];
+        assert_eq!(common_prefix(&emoji), "🦀ca");
+    }
+
+    #[test]
+    fn history_completion_consumes_decoded_entries() {
+        let entries = vec![crate::history::HistoryEntry {
+            command: "git status --short".to_string(),
+            timestamp: 1_700_000_000,
+            cwd: Some("/workspace".to_string()),
+        }];
+
+        let completions = complete_history_entries(&entries, "git");
+        assert_eq!(completions.len(), 1);
+        assert_eq!(completions[0].text, "git");
+        assert!(!completions[0].text.contains("1700000000"));
+        assert!(!completions[0].text.contains("/workspace"));
+    }
 
     #[test]
     fn git_dynamic_arguments_do_not_hide_spec_flags() {

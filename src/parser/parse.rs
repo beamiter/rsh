@@ -135,14 +135,14 @@ impl<'a> Parser<'a> {
         delimiter: &str,
         strip_tabs: bool,
         after_delim: usize,
-    ) -> String {
+    ) -> Result<String, ParseError> {
         let input = self.input;
         let after_delim = after_delim.min(input.len());
 
         // Find the newline that ends the line carrying the `<<` operator.
         let nl1 = match input[after_delim..].find('\n') {
             Some(off) => after_delim + off,
-            None => return String::new(), // no body present
+            None => return Err(ParseError::Incomplete),
         };
         let body_start = nl1 + 1;
 
@@ -150,6 +150,7 @@ impl<'a> Parser<'a> {
         let mut content = String::new();
         let mut line_start = 0usize;
         let mut resume = input.len();
+        let mut found_delimiter = false;
 
         for line in remaining.lines() {
             let line_len = line.len();
@@ -161,6 +162,7 @@ impl<'a> Parser<'a> {
 
             if trimmed == delimiter {
                 resume = (body_start + line_start + line_len + 1).min(input.len());
+                found_delimiter = true;
                 break;
             }
 
@@ -171,12 +173,16 @@ impl<'a> Parser<'a> {
             line_start += line_len + 1;
         }
 
+        if !found_delimiter {
+            return Err(ParseError::Incomplete);
+        }
+
         // Defer the body skip until the line-ending newline at nl1 is consumed.
         self.heredoc_skips.push((nl1, resume));
         // If that newline is the current (or buffered) token, the skip must fire now.
         self.apply_heredoc_skip();
 
-        content
+        Ok(content)
     }
 
     fn skip_newlines(&mut self) {
@@ -262,7 +268,7 @@ impl<'a> Parser<'a> {
                     .trim_matches(|c| c == '\\' || c == '\'' || c == '"')
                     .to_string();
                 let c =
-                    self.collect_here_doc_content(&clean_delim, is_heredoc_strip, delim_span_end);
+                    self.collect_here_doc_content(&clean_delim, is_heredoc_strip, delim_span_end)?;
                 (c, !quoted)
             } else {
                 // HereString: content is the target string itself; expansion happens
@@ -343,6 +349,9 @@ impl<'a> Parser<'a> {
         }
 
         if words.is_empty() && assignments.is_empty() && redirects.is_empty() {
+            if self.current.token == Token::Eof {
+                return Err(ParseError::Incomplete);
+            }
             return Err(ParseError::Unexpected(format!(
                 "expected command, got {:?}",
                 self.current.token
@@ -1007,7 +1016,14 @@ impl<'a> Parser<'a> {
     }
 
     pub fn parse_program(&mut self) -> Result<Vec<CompleteCommand>, ParseError> {
-        let cmds = self.parse_command_list()?;
+        let parsed = self.parse_command_list();
+        // A strict lexer preserves word tokens for downstream parsing, but records
+        // any construct that reached EOF without its delimiter. Check that state
+        // even when the recursive-descent parser produced another error first.
+        if self.lexer.has_incomplete_construct() {
+            return Err(ParseError::Incomplete);
+        }
+        let cmds = parsed?;
         if self.current.token != Token::Eof {
             return Err(ParseError::Unexpected(format!(
                 "unexpected token {:?}",
@@ -1020,37 +1036,8 @@ impl<'a> Parser<'a> {
 
 /// Check if input is syntactically incomplete (for multiline editing).
 pub fn is_incomplete(input: &str) -> bool {
-    // Check for unclosed quotes
-    let mut in_single = false;
-    let mut in_double = false;
-    let mut escaped = false;
-    for c in input.chars() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        match c {
-            '\\' if !in_single => escaped = true,
-            '\'' if !in_double => in_single = !in_single,
-            '"' if !in_single => in_double = !in_double,
-            _ => {}
-        }
-    }
-    if in_single || in_double {
-        return true;
-    }
-
-    // Check for trailing pipe, &&, ||, or backslash
-    let trimmed = input.trim_end();
-    if trimmed.ends_with('|')
-        || trimmed.ends_with("&&")
-        || trimmed.ends_with("||")
-        || trimmed.ends_with('\\')
-    {
-        return true;
-    }
-
-    // Try parsing - if Incomplete, return true
+    // Use the real parser/lexer state so comment and here-doc text is not
+    // mistaken for active shell syntax.
     let mut parser = Parser::new(input);
     matches!(parser.parse_program(), Err(ParseError::Incomplete))
 }

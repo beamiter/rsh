@@ -1,10 +1,10 @@
 /// Structured data pipeline: JSON-based data processing builtins.
 use serde_json::Value;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 
 /// Read JSON from stdin (array or newline-delimited objects).
 pub fn read_json_stdin() -> Vec<Value> {
-    if atty::is(atty::Stream::Stdin) {
+    if io::stdin().is_terminal() {
         eprintln!("rsh: this command requires piped JSON input");
         return Vec::new();
     }

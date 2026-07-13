@@ -2,6 +2,7 @@
 /// Provides CSV, JSON, filtering, aggregation, and transformation utilities
 use crate::environment::ShellState;
 use std::collections::HashMap;
+use std::io::IsTerminal;
 
 /// filter - Keep only lines matching a pattern
 pub fn builtin_filter(args: &[String]) -> i32 {
@@ -9,7 +10,7 @@ pub fn builtin_filter(args: &[String]) -> i32 {
         eprintln!("Usage: filter <pattern>");
         return 1;
     }
-    if atty::is(atty::Stream::Stdin) {
+    if std::io::stdin().is_terminal() {
         eprintln!("filter: requires piped input, e.g.: cat file | filter <pattern>");
         return 1;
     }
@@ -34,7 +35,7 @@ pub fn builtin_map(args: &[String]) -> i32 {
         eprintln!("Usage: map <transform_pattern>");
         return 1;
     }
-    if atty::is(atty::Stream::Stdin) {
+    if std::io::stdin().is_terminal() {
         eprintln!("map: requires piped input, e.g.: cat file | map <pattern>");
         return 1;
     }
@@ -63,7 +64,7 @@ pub fn builtin_group_by(args: &[String], _state: &mut ShellState) -> i32 {
         eprintln!("Usage: group-by <field_index>");
         return 1;
     }
-    if atty::is(atty::Stream::Stdin) {
+    if std::io::stdin().is_terminal() {
         eprintln!("group-by: requires piped input, e.g.: cat file | group-by <field>");
         return 1;
     }
@@ -109,7 +110,7 @@ pub fn builtin_select(args: &[String]) -> i32 {
         eprintln!("Usage: select <field1> [field2] ...");
         return 1;
     }
-    if atty::is(atty::Stream::Stdin) {
+    if std::io::stdin().is_terminal() {
         eprintln!("select: requires piped input, e.g.: cat file | select <fields>");
         return 1;
     }
@@ -141,7 +142,7 @@ pub fn builtin_select(args: &[String]) -> i32 {
 
 /// uniq - Remove duplicate consecutive lines
 pub fn builtin_uniq(args: &[String]) -> i32 {
-    if atty::is(atty::Stream::Stdin) {
+    if std::io::stdin().is_terminal() {
         eprintln!("uniq: requires piped input, e.g.: cat file | uniq");
         return 1;
     }
@@ -184,7 +185,7 @@ pub fn builtin_uniq(args: &[String]) -> i32 {
 
 /// shuffle - Randomly shuffle lines
 pub fn builtin_shuffle(_args: &[String]) -> i32 {
-    if atty::is(atty::Stream::Stdin) {
+    if std::io::stdin().is_terminal() {
         eprintln!("shuffle: requires piped input, e.g.: cat file | shuffle");
         return 1;
     }
@@ -215,7 +216,7 @@ pub fn builtin_shuffle(_args: &[String]) -> i32 {
 
 /// dedupe - Remove all duplicates (unordered)
 pub fn builtin_dedupe(_args: &[String]) -> i32 {
-    if atty::is(atty::Stream::Stdin) {
+    if std::io::stdin().is_terminal() {
         eprintln!("dedupe: requires piped input, e.g.: cat file | dedupe");
         return 1;
     }

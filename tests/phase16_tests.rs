@@ -119,8 +119,10 @@ fn par_each_on_empty_input_returns_empty() {
 // 16c — http client (uses a tiny in-process TCP listener; no external net)
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "ai")]
 use std::net::TcpListener;
 
+#[cfg(feature = "ai")]
 fn spawn_stub_server(
     response_body: &'static str,
     content_type: &'static str,

@@ -1,12 +1,26 @@
 /// Signal handling for the shell.
 use nix::libc;
 use nix::sys::signal::{self, SaFlags, SigAction, SigHandler, SigSet, Signal};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 pub static SIGCHLD_RECEIVED: AtomicBool = AtomicBool::new(false);
 pub static SIGWINCH_RECEIVED: AtomicBool = AtomicBool::new(false);
 pub static SIGINT_RECEIVED: AtomicBool = AtomicBool::new(false);
 pub static SIGHUP_RECEIVED: AtomicBool = AtomicBool::new(false);
+pub static TERMINATION_SIGNAL: AtomicI32 = AtomicI32::new(0);
+static FOREGROUND_PGID: AtomicI32 = AtomicI32::new(0);
+
+fn forward_to_foreground(signal: libc::c_int) {
+    let pgid = FOREGROUND_PGID.load(Ordering::SeqCst);
+    if pgid > 0 {
+        // `kill` is async-signal-safe. The shell itself is not a member of the
+        // foreground child's process group, so this cannot recurse back into
+        // the shell handler.
+        unsafe {
+            libc::kill(-pgid, signal);
+        }
+    }
+}
 
 extern "C" fn sigchld_handler(_: libc::c_int) {
     SIGCHLD_RECEIVED.store(true, Ordering::SeqCst);
@@ -18,14 +32,48 @@ extern "C" fn sigwinch_handler(_: libc::c_int) {
 
 extern "C" fn sigint_handler(_: libc::c_int) {
     SIGINT_RECEIVED.store(true, Ordering::SeqCst);
+    forward_to_foreground(libc::SIGINT);
 }
 
 extern "C" fn sighup_handler(_: libc::c_int) {
     SIGHUP_RECEIVED.store(true, Ordering::SeqCst);
+    TERMINATION_SIGNAL.store(libc::SIGHUP, Ordering::SeqCst);
+    forward_to_foreground(libc::SIGHUP);
 }
 
 extern "C" fn sigterm_handler(_: libc::c_int) {
     SIGHUP_RECEIVED.store(true, Ordering::SeqCst);
+    TERMINATION_SIGNAL.store(libc::SIGTERM, Ordering::SeqCst);
+    forward_to_foreground(libc::SIGTERM);
+}
+
+pub fn set_foreground_pgid(pgid: Option<i32>) {
+    FOREGROUND_PGID.store(pgid.unwrap_or(0), Ordering::SeqCst);
+}
+
+pub fn reset_pending_signals() {
+    SIGINT_RECEIVED.store(false, Ordering::SeqCst);
+    SIGHUP_RECEIVED.store(false, Ordering::SeqCst);
+    TERMINATION_SIGNAL.store(0, Ordering::SeqCst);
+    set_foreground_pgid(None);
+}
+
+/// Consume a pending terminating signal and return its shell exit status.
+pub fn take_pending_status() -> Option<i32> {
+    if SIGINT_RECEIVED.swap(false, Ordering::SeqCst) {
+        return Some(128 + libc::SIGINT);
+    }
+    let signal = TERMINATION_SIGNAL.swap(0, Ordering::SeqCst);
+    (signal != 0).then_some(128 + signal)
+}
+
+/// Inspect, but do not consume, a pending terminating signal.
+pub fn pending_status() -> Option<i32> {
+    if SIGINT_RECEIVED.load(Ordering::SeqCst) {
+        return Some(128 + libc::SIGINT);
+    }
+    let signal = TERMINATION_SIGNAL.load(Ordering::SeqCst);
+    (signal != 0).then_some(128 + signal)
 }
 
 pub fn install_shell_signals() {
@@ -74,6 +122,25 @@ pub fn install_shell_signals() {
             SigSet::empty(),
         );
         signal::sigaction(Signal::SIGINT, &sa_int).ok();
+    }
+}
+
+/// Install shell handlers without `SA_RESTART` for signals that must wake a
+/// noninteractive shell blocked while reading its program from stdin.
+pub fn install_noninteractive_signals() {
+    install_shell_signals();
+    unsafe {
+        let empty = SigSet::empty();
+        let sigint = SigAction::new(SigHandler::Handler(sigint_handler), SaFlags::empty(), empty);
+        let sighup = SigAction::new(SigHandler::Handler(sighup_handler), SaFlags::empty(), empty);
+        let sigterm = SigAction::new(
+            SigHandler::Handler(sigterm_handler),
+            SaFlags::empty(),
+            empty,
+        );
+        signal::sigaction(Signal::SIGINT, &sigint).ok();
+        signal::sigaction(Signal::SIGHUP, &sighup).ok();
+        signal::sigaction(Signal::SIGTERM, &sigterm).ok();
     }
 }
 

@@ -8,7 +8,9 @@ use crate::value::{render_table, ClosureData, Value};
 use indexmap::IndexMap;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
+#[cfg(feature = "ai")]
 use std::io::{Read, Write};
+#[cfg(feature = "ai")]
 use std::net::{Shutdown, TcpStream};
 use std::sync::Arc;
 

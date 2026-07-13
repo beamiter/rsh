@@ -2,7 +2,7 @@
 use crate::environment::{ConfigSource, ShellState};
 use crate::executor;
 use crate::parser;
-use std::path::PathBuf;
+use std::path::Path;
 use std::process::Command;
 
 pub fn load_config(state: &mut ShellState) {
@@ -14,6 +14,14 @@ pub fn load_config(state: &mut ShellState) {
 
 pub fn refresh_shell_integrations(state: &mut ShellState) {
     load_conda_hook(state);
+}
+
+/// Load an explicitly selected startup file.
+///
+/// Native rsh syntax is attempted first. Files using syntax that rsh cannot
+/// parse are imported through the same Bash compatibility bridge as `.bashrc`.
+pub fn load_config_file(path: &Path, state: &mut ShellState) {
+    source_file_lenient(path, state);
 }
 
 /// Load ~/.bashrc directly via bash, without attempting rsh parsing
@@ -33,37 +41,34 @@ fn load_rshrc(state: &mut ShellState) {
 }
 
 /// Load bash file with lenient error handling - use bash as fallback for complex scripts
-fn source_file_lenient(path: &PathBuf, state: &mut ShellState) {
-    match std::fs::read_to_string(path) {
-        Ok(content) => {
-            // Try parsing entire file first
-            match parser::parse(&content) {
-                Ok(commands) => {
-                    // Full parse succeeded, execute all commands
-                    for cmd in &commands {
-                        executor::execute_complete_command(cmd, state);
-                    }
-                }
-                Err(_) => {
-                    // Full parse failed, use bash as fallback for complex scripts
-                    source_via_bash(path, state);
-                }
-            }
+fn source_file_lenient(path: &Path, state: &mut ShellState) {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return; // Missing default startup files are normal.
+    };
+    // Try parsing the entire file first.
+    match parser::parse(&content) {
+        Ok(commands) => {
+            // Execute the startup file as one program so exit, failglob, and
+            // errexit stop the remaining rc commands.
+            executor::execute_program(&commands, state);
         }
-        Err(_) => {} // Silent if can't read
+        Err(_) => {
+            // Full parse failed, use bash as fallback for complex scripts.
+            source_via_bash(path, state);
+        }
     }
 }
 
 /// Use bash to source a script file and extract environment variables, aliases, functions, and options
-fn source_via_bash(path: &PathBuf, state: &mut ShellState) {
-    let path_str = path.to_string_lossy().to_string();
-    let bash_script = format!(
-        r#"
+fn source_via_bash(path: &Path, state: &mut ShellState) {
+    // `$1` transports the path as data. Interpolating it into this program would
+    // make quotes, command substitutions, or newlines in a filename executable.
+    let bash_script = r#"
 # Set PS1 to make bash think it's interactive (some .bashrc check [ -z "$PS1" ] && return)
 export PS1='$ '
 
 set -a
-source "{path}"
+source -- "$1"
 set +a
 
 # Output all environment variables in key=value format
@@ -81,14 +86,14 @@ declare -F 2>/dev/null | awk '{{print $3}}' || true
 # Output shell options (shopt)
 echo "=== SHOPTS ==="
 shopt 2>/dev/null || true
-"#,
-        path = path_str.replace("'", "\\'")
-    );
+"#;
 
     // Execute bash script to capture the environment, aliases, and functions
     if let Ok(output) = std::process::Command::new("bash")
         .arg("-c")
-        .arg(&bash_script)
+        .arg(bash_script)
+        .arg("rsh-config")
+        .arg(path)
         .output()
     {
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -119,9 +124,7 @@ fn load_conda_hook(state: &mut ShellState) {
     }
 
     if let Ok(commands) = parser::parse(&hook) {
-        for cmd in &commands {
-            executor::execute_complete_command(cmd, state);
-        }
+        executor::execute_program(&commands, state);
     }
 }
 
@@ -298,5 +301,50 @@ extglob         on"#;
         assert_eq!(state.get_var("APP_NAME"), Some("myapp"));
         assert_eq!(state.aliases.get("ll"), Some(&"ls -lah".to_string()));
         assert_eq!(state.shell_opts.extglob, true);
+    }
+
+    #[test]
+    fn bash_bridge_treats_special_config_path_as_data() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("startup \"$(false)\" file");
+        std::fs::write(&path, "export RSH_SPECIAL_RC_PATH=loaded\n").expect("write rc file");
+
+        let mut state = ShellState::new(false);
+        source_via_bash(&path, &mut state);
+
+        assert_eq!(state.get_var("RSH_SPECIAL_RC_PATH"), Some("loaded"));
+        state.unset_var("RSH_SPECIAL_RC_PATH");
+    }
+
+    #[test]
+    fn native_config_uses_program_control_flow() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let errexit_path = dir.path().join("errexit.rsh");
+        std::fs::write(
+            &errexit_path,
+            "set -e; false; export RSH_AFTER_FAILED_RC=bad\n",
+        )
+        .expect("write rc file");
+
+        let mut state = ShellState::new(false);
+        load_config_file(&errexit_path, &mut state);
+        assert_eq!(state.last_exit_code, 1);
+        assert_eq!(state.get_var("RSH_AFTER_FAILED_RC"), None);
+
+        let exit_path = dir.path().join("exit.rsh");
+        std::fs::write(&exit_path, "exit 7; export RSH_AFTER_EXIT_RC=bad\n")
+            .expect("write rc file");
+        crate::builtins::reset_exit_request();
+        load_config_file(&exit_path, &mut state);
+        assert_eq!(state.last_exit_code, 7);
+        assert_eq!(state.get_var("RSH_AFTER_EXIT_RC"), None);
+        assert!(crate::builtins::EXIT_REQUESTED.load(std::sync::atomic::Ordering::SeqCst));
+
+        let integration = parser::parse("export RSH_AFTER_PREEXISTING_EXIT=bad")
+            .expect("parse integration command");
+        executor::execute_program(&integration, &mut state);
+        assert_eq!(state.last_exit_code, 7);
+        assert_eq!(state.get_var("RSH_AFTER_PREEXISTING_EXIT"), None);
+        crate::builtins::reset_exit_request();
     }
 }

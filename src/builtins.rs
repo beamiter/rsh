@@ -2,6 +2,7 @@
 use crate::environment::ShellState;
 use crate::parser;
 use std::env;
+use std::io::IsTerminal;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
@@ -9,6 +10,11 @@ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 /// (allowing session save, history save, EXIT trap to run).
 pub static EXIT_REQUESTED: AtomicBool = AtomicBool::new(false);
 pub static EXIT_CODE: AtomicI32 = AtomicI32::new(0);
+
+pub fn reset_exit_request() {
+    EXIT_CODE.store(0, Ordering::SeqCst);
+    EXIT_REQUESTED.store(false, Ordering::SeqCst);
+}
 
 pub const BUILTIN_NAMES: &[&str] = &[
     "cd",
@@ -99,7 +105,7 @@ pub fn is_builtin(name: &str) -> bool {
 pub fn run_builtin(name: &str, args: &[String], state: &mut ShellState) -> i32 {
     match name {
         "cd" => builtin_cd(args, state),
-        "exit" => builtin_exit(args),
+        "exit" => builtin_exit(args, state),
         "export" => builtin_export(args, state),
         "unset" => builtin_unset(args, state),
         "echo" => builtin_echo(args),
@@ -116,25 +122,10 @@ pub fn run_builtin(name: &str, args: &[String], state: &mut ShellState) -> i32 {
         "test" | "[" => builtin_test(args),
         "set" => builtin_set(args, state),
         "local" => builtin_local(args, state),
-        "return" => {
-            let code = if args.len() > 0 {
-                args[0].parse::<i32>().unwrap_or(0)
-            } else {
-                0
-            };
-            state.return_requested = true;
-            state.return_value = code;
-            code
-        }
-        "break" => {
-            state.loop_break = true;
-            0
-        }
-        "continue" => {
-            state.loop_continue = true;
-            0
-        }
-        "shift" => builtin_shift(state),
+        "return" => builtin_return(args, state),
+        "break" => builtin_loop_control("break", args, state),
+        "continue" => builtin_loop_control("continue", args, state),
+        "shift" => builtin_shift(args, state),
         "exec" => builtin_exec(args, state),
         "help" => builtin_help(args, state),
         "history" => builtin_history(state),
@@ -274,7 +265,7 @@ fn run_value_builtin_in_fork(
     use crate::pipeline_data::PipelineData;
     use std::io::{Read, Write};
     let mut buf = Vec::new();
-    if !atty::is(atty::Stream::Stdin) {
+    if !std::io::stdin().is_terminal() {
         let _ = std::io::stdin().lock().read_to_end(&mut buf);
     }
     let input = if buf.is_empty() {
@@ -450,14 +441,83 @@ fn update_directory_vars(
     }
 }
 
-fn builtin_exit(args: &[String]) -> i32 {
-    let code = args
-        .first()
-        .and_then(|s| s.parse::<i32>().ok())
-        .unwrap_or(0);
+fn builtin_exit(args: &[String], state: &ShellState) -> i32 {
+    let code = match args.first() {
+        Some(value) => match value.parse::<i32>() {
+            Ok(code) => code,
+            Err(_) => {
+                eprintln!("rsh: exit: {}: numeric argument required", value);
+                EXIT_CODE.store(2, Ordering::SeqCst);
+                EXIT_REQUESTED.store(true, Ordering::SeqCst);
+                return 2;
+            }
+        },
+        None => state.last_exit_code,
+    };
+
+    if args.len() > 1 {
+        eprintln!("rsh: exit: too many arguments");
+        if !state.interactive {
+            EXIT_CODE.store(1, Ordering::SeqCst);
+            EXIT_REQUESTED.store(true, Ordering::SeqCst);
+        }
+        return 1;
+    }
+
     EXIT_CODE.store(code, Ordering::SeqCst);
     EXIT_REQUESTED.store(true, Ordering::SeqCst);
     code
+}
+
+fn builtin_return(args: &[String], state: &mut ShellState) -> i32 {
+    let code = match args.first() {
+        Some(value) => match value.parse::<i32>() {
+            Ok(code) => code,
+            Err(_) => {
+                eprintln!("rsh: return: {}: numeric argument required", value);
+                if state.return_depth > 0 {
+                    state.return_requested = true;
+                    state.return_value = 2;
+                } else {
+                    eprintln!("rsh: return: can only return from a function or sourced script");
+                }
+                return 2;
+            }
+        },
+        None => state.last_exit_code,
+    };
+
+    if args.len() > 1 {
+        eprintln!("rsh: return: too many arguments");
+        if state.return_depth > 0 {
+            state.return_requested = true;
+            state.return_value = 1;
+        }
+        return 1;
+    }
+
+    if state.return_depth == 0 {
+        eprintln!("rsh: return: can only return from a function or sourced script");
+        return 2;
+    }
+
+    state.return_requested = true;
+    state.return_value = code;
+    code
+}
+
+fn builtin_loop_control(name: &str, _args: &[String], state: &mut ShellState) -> i32 {
+    if state.loop_depth == 0 {
+        eprintln!("rsh: {}: only meaningful in a loop", name);
+        return 1;
+    }
+
+    if name == "break" {
+        state.loop_break = true;
+    } else {
+        state.loop_continue = true;
+    }
+    0
 }
 
 fn builtin_export(args: &[String], state: &mut ShellState) -> i32 {
@@ -676,12 +736,11 @@ fn find_in_path(cmd: &str) -> Option<String> {
 
 /// Use bash to source a script file when rsh's parser can't handle it,
 /// then reload environment variables and simple functions back into rsh.
-fn source_via_bash(path: &str, state: &mut ShellState) -> i32 {
+fn source_via_bash(path: &str, source_args: &[String], state: &mut ShellState) -> i32 {
     // Create a bash script that sources the file and outputs environment variables
-    let bash_script = format!(
-        r#"
+    let bash_script = r#"
 set -a
-source "{path}"
+source -- "$1" "${@:2}"
 set +a
 
 # Output all environment variables in key=value format
@@ -691,17 +750,18 @@ declare -p | grep 'declare -x' | sed 's/declare -x //' | sed "s/='/'=/g"
 alias 2>/dev/null || true
 
 # Output function names
-declare -F | awk '{{print $3}}'
-"#,
-        path = path.replace("'", "\\'")
-    );
+declare -F | awk '{print $3}'
+"#;
 
     // Execute bash script to capture the environment
-    match std::process::Command::new("bash")
+    let mut command = std::process::Command::new("bash");
+    command
         .arg("-c")
-        .arg(&bash_script)
-        .output()
-    {
+        .arg(bash_script)
+        .arg("rsh-source")
+        .arg(path)
+        .args(source_args);
+    match command.output() {
         Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -776,36 +836,36 @@ fn builtin_source(args: &[String], state: &mut ShellState) -> i32 {
         return 1;
     };
 
-    // Set $0 to script name for this invocation
-    let old_0 = state.get_var("0").map(|s| s.to_string());
-    state.export_var("0", filename);
-
-    // Manage positional parameters for arguments
+    // Bash preserves `$0` while sourcing. Explicit source arguments temporarily
+    // replace `$1..`; without arguments, the caller's parameters stay visible.
     let old_params = state.positional_params.clone();
-    let mut new_params = vec![filename.clone()];
-    new_params.extend(additional_args.iter().cloned());
-    state.positional_params = new_params;
+    let source_params = if additional_args.is_empty() {
+        old_params.clone()
+    } else {
+        additional_args.to_vec()
+    };
+    if !additional_args.is_empty() {
+        state.positional_params = source_params.clone();
+    }
 
+    state.return_depth += 1;
     let result = match std::fs::read_to_string(&resolved_path) {
         Ok(content) => {
             match parser::parse(&content) {
                 Ok(commands) => {
                     // Parse succeeded, execute all commands in current shell context
-                    let mut last = 0;
-                    for cmd in &commands {
-                        last = crate::executor::execute_complete_command(cmd, state);
-                        // Stop on early return
-                        if state.return_requested {
-                            state.return_requested = false;
-                            break;
-                        }
+                    let last = crate::executor::execute_program(&commands, state);
+                    // `return` exits a sourced file but must not leak into the
+                    // caller's command list.
+                    if state.return_requested {
+                        state.return_requested = false;
                     }
                     last
                 }
                 Err(e) => {
                     eprintln!("rsh: source: {}: parse error: {}", resolved_path, e);
                     // Try bash as fallback only for complex scripts
-                    source_via_bash(&resolved_path, state)
+                    source_via_bash(&resolved_path, &source_params, state)
                 }
             }
         }
@@ -814,12 +874,10 @@ fn builtin_source(args: &[String], state: &mut ShellState) -> i32 {
             1
         }
     };
+    state.return_depth -= 1;
 
     // Restore state
     state.positional_params = old_params;
-    if let Some(val) = old_0 {
-        state.export_var("0", &val);
-    }
 
     result
 }
@@ -954,26 +1012,46 @@ fn read_exact_chars(
     read_array: bool,
     state: &mut ShellState,
 ) -> i32 {
-    use std::io::Read;
-
     let mut buffer = vec![0u8; count];
-    match std::io::stdin().read_exact(&mut buffer) {
-        Ok(()) => {
-            let line = String::from_utf8_lossy(&buffer).into_owned();
-            if read_array {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if let Some(arr_name) = var_names.first() {
-                    state.arrays.insert(
-                        arr_name.to_string(),
-                        parts.into_iter().map(|s| s.to_string()).collect(),
-                    );
-                }
-            } else if var_names.len() == 1 {
-                state.set_var(var_names[0], &line);
-            }
-            0
+    let mut filled = 0;
+    let mut stdin = std::io::stdin().lock();
+    while filled < buffer.len() {
+        match read_interruptibly(&mut stdin, &mut buffer[filled..]) {
+            Ok(0) => return 1,
+            Ok(read) => filled += read,
+            Err(status) => return status,
         }
-        Err(_) => 1,
+    }
+
+    let line = String::from_utf8_lossy(&buffer).into_owned();
+    if read_array {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if let Some(arr_name) = var_names.first() {
+            state.arrays.insert(
+                arr_name.to_string(),
+                parts.into_iter().map(|s| s.to_string()).collect(),
+            );
+        }
+    } else if var_names.len() == 1 {
+        state.set_var(var_names[0], &line);
+    }
+    0
+}
+
+fn read_interruptibly(reader: &mut impl std::io::Read, buffer: &mut [u8]) -> Result<usize, i32> {
+    loop {
+        if let Some(status) = crate::signal::pending_status() {
+            return Err(status);
+        }
+        match reader.read(buffer) {
+            Ok(read) => return Ok(read),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                if let Some(status) = crate::signal::pending_status() {
+                    return Err(status);
+                }
+            }
+            Err(_) => return Err(1),
+        }
     }
 }
 
@@ -984,10 +1062,9 @@ fn read_limited_chars(
     read_array: bool,
     state: &mut ShellState,
 ) -> i32 {
-    use std::io::Read;
-
     let mut buffer = vec![0u8; max_count];
-    match std::io::stdin().read(&mut buffer) {
+    let mut stdin = std::io::stdin().lock();
+    match read_interruptibly(&mut stdin, &mut buffer) {
         Ok(n) if n > 0 => {
             buffer.truncate(n);
             let line = String::from_utf8_lossy(&buffer).into_owned();
@@ -1014,19 +1091,37 @@ fn read_limited_chars(
 }
 
 fn read_line_with_delimiter(
-    _delim: char,
+    delim: char,
     raw: bool,
     var_names: &[&str],
     read_array: bool,
     state: &mut ShellState,
 ) -> i32 {
-    let stdin = std::io::stdin();
-    let mut line = String::new();
+    let mut stdin = std::io::stdin().lock();
+    let mut bytes = Vec::new();
+    let mut encoded_delim = [0_u8; 4];
+    let delimiter = delim.encode_utf8(&mut encoded_delim).as_bytes();
 
-    let result = match stdin.read_line(&mut line) {
-        Ok(0) => 1,
-        Ok(_) => {
-            let line = line.trim_end_matches('\n').trim_end_matches('\r');
+    let read_status = loop {
+        let mut byte = [0_u8; 1];
+        match read_interruptibly(&mut stdin, &mut byte) {
+            Ok(0) if bytes.is_empty() => break Err(1),
+            Ok(0) => break Ok(()),
+            Ok(_) => {
+                bytes.push(byte[0]);
+                if bytes.ends_with(delimiter) {
+                    bytes.truncate(bytes.len() - delimiter.len());
+                    break Ok(());
+                }
+            }
+            Err(status) => break Err(status),
+        }
+    };
+
+    match read_status {
+        Ok(()) => {
+            let line = String::from_utf8_lossy(&bytes);
+            let line = line.trim_end_matches('\r');
             let line = if !raw {
                 line.replace("\\\n", "")
             } else {
@@ -1061,10 +1156,8 @@ fn read_line_with_delimiter(
             }
             0
         }
-        Err(_) => 1,
-    };
-
-    result
+        Err(status) => status,
+    }
 }
 
 fn builtin_test(args: &[String]) -> i32 {
@@ -1605,13 +1698,11 @@ fn builtin_local(args: &[String], state: &mut ShellState) -> i32 {
 }
 
 fn builtin_history(_state: &ShellState) -> i32 {
-    let path = dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-        .join(".rsh_history");
-    if let Ok(content) = std::fs::read_to_string(&path) {
-        for (i, line) in content.lines().enumerate() {
-            println!("{:5}  {}", i + 1, line);
-        }
+    for (i, entry) in crate::history::History::load_default_entries(usize::MAX)
+        .iter()
+        .enumerate()
+    {
+        println!("{:5}  {}", i + 1, entry.command);
     }
     0
 }
@@ -1685,10 +1776,26 @@ fn builtin_printf(args: &[String]) -> i32 {
     0
 }
 
-fn builtin_shift(state: &mut ShellState) -> i32 {
-    if !state.positional_params.is_empty() {
-        state.positional_params.remove(0);
+fn builtin_shift(args: &[String], state: &mut ShellState) -> i32 {
+    if args.len() > 1 {
+        eprintln!("rsh: shift: too many arguments");
+        return 1;
     }
+    let count = match args.first() {
+        Some(value) => match value.parse::<usize>() {
+            Ok(count) => count,
+            Err(_) => {
+                eprintln!("rsh: shift: {}: numeric argument required", value);
+                return 1;
+            }
+        },
+        None => 1,
+    };
+    if count > state.positional_params.len() {
+        eprintln!("rsh: shift: shift count out of range");
+        return 1;
+    }
+    state.positional_params.drain(..count);
     0
 }
 
@@ -3414,7 +3521,7 @@ const HELP_ENTRIES: &[(&str, &str)] = &[
 fn builtin_help(args: &[String], state: &ShellState) -> i32 {
     // Phase 14b: prefer signature-driven help when available.
     if args.is_empty() {
-        println!("rsh — a modern shell with bash compatibility and AI features\n");
+        println!("rsh — a Bash-inspired shell with structured data pipelines\n");
         println!("Core builtins:");
         for (name, desc) in HELP_ENTRIES {
             println!("  {:12} {}", name, desc.split(" — ").nth(1).unwrap_or(desc));

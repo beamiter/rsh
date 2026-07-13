@@ -47,10 +47,22 @@ pub struct SpannedToken {
     pub span: (usize, usize),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LexicalIssue {
+    UnterminatedSingleQuote,
+    UnterminatedDoubleQuote,
+    UnterminatedAnsiCQuote,
+    UnclosedCommandSubstitution,
+    UnclosedParameterExpansion,
+    UnclosedProcessSubstitution,
+    TrailingEscape,
+}
+
 pub struct Lexer<'a> {
     input: &'a str,
     pos: usize,
     lenient: bool,
+    issue: Option<LexicalIssue>,
 }
 
 impl<'a> Lexer<'a> {
@@ -59,6 +71,7 @@ impl<'a> Lexer<'a> {
             input,
             pos: 0,
             lenient: false,
+            issue: None,
         }
     }
 
@@ -67,7 +80,18 @@ impl<'a> Lexer<'a> {
             input,
             pos: 0,
             lenient: true,
+            issue: None,
         }
+    }
+
+    fn record_issue(&mut self, issue: LexicalIssue) {
+        if !self.lenient && self.issue.is_none() {
+            self.issue = Some(issue);
+        }
+    }
+
+    pub(super) fn has_incomplete_construct(&self) -> bool {
+        self.issue.is_some()
     }
 
     fn peek_char(&self) -> Option<char> {
@@ -106,95 +130,198 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn read_single_quoted(&mut self) -> String {
+    fn read_single_quoted(&mut self) -> (String, bool) {
         let mut s = String::new();
         loop {
             match self.next_char() {
-                Some('\'') => break,
+                Some('\'') => return (s, true),
                 Some(c) => s.push(c),
                 None => {
-                    if !self.lenient {
-                        // incomplete
-                    }
-                    break;
+                    self.record_issue(LexicalIssue::UnterminatedSingleQuote);
+                    return (s, false);
                 }
             }
         }
-        s
     }
 
-    fn read_paren_body(&mut self, word: &mut String) {
-        let mut depth = 1;
-        let mut in_single = false;
-        let mut in_double = false;
-
-        while let Some(c) = self.next_char() {
-            if in_single {
-                word.push(c);
-                if c == '\'' {
-                    in_single = false;
+    fn read_ansi_c_quoted(&mut self) -> (String, bool) {
+        let mut s = String::new();
+        loop {
+            match self.next_char() {
+                Some('\'') => return (s, true),
+                Some('\\') => {
+                    s.push('\\');
+                    if let Some(next) = self.next_char() {
+                        s.push(next);
+                    }
                 }
-                continue;
-            }
-
-            if in_double {
-                word.push(c);
-                match c {
-                    '\\' => {
-                        if let Some(next) = self.next_char() {
-                            word.push(next);
-                        }
-                    }
-                    '"' => in_double = false,
-                    '$' if self.peek_char() == Some('(') => {
-                        self.next_char();
-                        word.push('(');
-                        depth += 1;
-                    }
-                    ')' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            break;
-                        }
-                    }
-                    _ => {}
+                Some(c) => s.push(c),
+                None => {
+                    self.record_issue(LexicalIssue::UnterminatedAnsiCQuote);
+                    return (s, false);
                 }
-                continue;
             }
+        }
+    }
+
+    fn read_backtick_substitution(&mut self) -> (String, bool) {
+        let mut s = String::new();
+        loop {
+            match self.next_char() {
+                Some('`') => return (s, true),
+                Some('\\') => {
+                    s.push('\\');
+                    if let Some(next) = self.next_char() {
+                        s.push(next);
+                    }
+                }
+                Some(c) => s.push(c),
+                None => {
+                    self.record_issue(LexicalIssue::UnclosedCommandSubstitution);
+                    return (s, false);
+                }
+            }
+        }
+    }
+
+    /// Read through a command/process substitution body. Recursive descent keeps
+    /// delimiters inside quotes and nested substitutions from closing the outer
+    /// construct. Comments are skipped lexically, so punctuation inside them is
+    /// never treated as shell syntax.
+    fn read_paren_body(&mut self, word: &mut String, issue: LexicalIssue) -> bool {
+        let mut at_word_start = true;
+
+        loop {
+            let c = match self.next_char() {
+                Some(c) => c,
+                None => {
+                    self.record_issue(issue);
+                    return false;
+                }
+            };
 
             match c {
-                '\\' => {
+                '#' if at_word_start => {
                     word.push(c);
-                    if let Some(next) = self.next_char() {
-                        word.push(next);
+                    loop {
+                        match self.next_char() {
+                            Some(next) => {
+                                word.push(next);
+                                if next == '\n' {
+                                    at_word_start = true;
+                                    break;
+                                }
+                            }
+                            None => {
+                                self.record_issue(issue);
+                                return false;
+                            }
+                        }
                     }
                 }
-                '\'' => {
-                    in_single = true;
+                ')' => {
                     word.push(c);
+                    return true;
+                }
+                '\\' => {
+                    word.push(c);
+                    match self.next_char() {
+                        Some(next) => word.push(next),
+                        None => {
+                            self.record_issue(issue);
+                            return false;
+                        }
+                    }
+                    at_word_start = false;
+                }
+                '\'' => {
+                    word.push(c);
+                    let (body, closed) = self.read_single_quoted();
+                    word.push_str(&body);
+                    if !closed {
+                        return false;
+                    }
+                    word.push('\'');
+                    at_word_start = false;
                 }
                 '"' => {
-                    in_double = true;
                     word.push(c);
+                    let (body, closed) = self.read_double_quoted();
+                    word.push_str(&body);
+                    if !closed {
+                        return false;
+                    }
+                    word.push('"');
+                    at_word_start = false;
+                }
+                '$' if self.peek_char() == Some('\'') => {
+                    self.next_char();
+                    word.push('$');
+                    word.push('\'');
+                    let (body, closed) = self.read_ansi_c_quoted();
+                    word.push_str(&body);
+                    if !closed {
+                        return false;
+                    }
+                    word.push('\'');
+                    at_word_start = false;
                 }
                 '$' if self.peek_char() == Some('(') => {
                     self.next_char();
                     word.push('$');
                     word.push('(');
-                    depth += 1;
+                    if !self.read_paren_body(word, LexicalIssue::UnclosedCommandSubstitution) {
+                        return false;
+                    }
+                    at_word_start = false;
+                }
+                '$' if self.peek_char() == Some('{') => {
+                    self.next_char();
+                    word.push('$');
+                    word.push('{');
+                    if !self.read_brace_body(word) {
+                        return false;
+                    }
+                    at_word_start = false;
+                }
+                '<' | '>' if self.peek_char() == Some('(') => {
+                    self.next_char();
+                    word.push(c);
+                    word.push('(');
+                    if !self.read_paren_body(word, LexicalIssue::UnclosedProcessSubstitution) {
+                        return false;
+                    }
+                    at_word_start = false;
+                }
+                '`' => {
+                    word.push(c);
+                    let (body, closed) = self.read_backtick_substitution();
+                    word.push_str(&body);
+                    if !closed {
+                        return false;
+                    }
+                    word.push('`');
+                    at_word_start = false;
                 }
                 '(' => {
-                    depth += 1;
                     word.push(c);
-                }
-                ')' => {
-                    depth -= 1;
-                    word.push(c);
-                    if depth == 0 {
-                        break;
+                    if !self.read_paren_body(word, issue) {
+                        return false;
                     }
+                    at_word_start = false;
                 }
-                _ => word.push(c),
+                c if c.is_whitespace() => {
+                    word.push(c);
+                    at_word_start = true;
+                }
+                ';' | '|' | '&' | '<' | '>' => {
+                    word.push(c);
+                    at_word_start = true;
+                }
+                _ => {
+                    word.push(c);
+                    at_word_start = false;
+                }
             }
         }
     }
@@ -204,61 +331,100 @@ impl<'a> Lexer<'a> {
         self.next_char(); // (
         word.push('$');
         word.push('(');
-        self.read_paren_body(word);
+        self.read_paren_body(word, LexicalIssue::UnclosedCommandSubstitution);
     }
 
-    fn read_brace_body(&mut self, word: &mut String) {
-        let mut depth = 1;
-        let mut in_single = false;
-        let mut in_double = false;
-
-        while let Some(c) = self.next_char() {
-            if in_single {
-                word.push(c);
-                if c == '\'' {
-                    in_single = false;
+    fn read_brace_body(&mut self, word: &mut String) -> bool {
+        loop {
+            let c = match self.next_char() {
+                Some(c) => c,
+                None => {
+                    self.record_issue(LexicalIssue::UnclosedParameterExpansion);
+                    return false;
                 }
-                continue;
-            }
-
-            if in_double {
-                word.push(c);
-                match c {
-                    '\\' => {
-                        if let Some(next) = self.next_char() {
-                            word.push(next);
-                        }
-                    }
-                    '"' => in_double = false,
-                    _ => {}
-                }
-                continue;
-            }
+            };
 
             match c {
+                '}' => {
+                    word.push(c);
+                    return true;
+                }
                 '\\' => {
                     word.push(c);
-                    if let Some(next) = self.next_char() {
-                        word.push(next);
+                    match self.next_char() {
+                        Some(next) => word.push(next),
+                        None => {
+                            self.record_issue(LexicalIssue::UnclosedParameterExpansion);
+                            return false;
+                        }
                     }
                 }
                 '\'' => {
-                    in_single = true;
                     word.push(c);
+                    let (body, closed) = self.read_single_quoted();
+                    word.push_str(&body);
+                    if !closed {
+                        return false;
+                    }
+                    word.push('\'');
                 }
                 '"' => {
-                    in_double = true;
                     word.push(c);
+                    let (body, closed) = self.read_double_quoted();
+                    word.push_str(&body);
+                    if !closed {
+                        return false;
+                    }
+                    word.push('"');
+                }
+                '$' if self.peek_char() == Some('\'') => {
+                    self.next_char();
+                    word.push('$');
+                    word.push('\'');
+                    let (body, closed) = self.read_ansi_c_quoted();
+                    word.push_str(&body);
+                    if !closed {
+                        return false;
+                    }
+                    word.push('\'');
+                }
+                '$' if self.peek_char() == Some('(') => {
+                    self.next_char();
+                    word.push('$');
+                    word.push('(');
+                    if !self.read_paren_body(word, LexicalIssue::UnclosedCommandSubstitution) {
+                        return false;
+                    }
+                }
+                '$' if self.peek_char() == Some('{') => {
+                    self.next_char();
+                    word.push('$');
+                    word.push('{');
+                    if !self.read_brace_body(word) {
+                        return false;
+                    }
+                }
+                '<' | '>' if self.peek_char() == Some('(') => {
+                    self.next_char();
+                    word.push(c);
+                    word.push('(');
+                    if !self.read_paren_body(word, LexicalIssue::UnclosedProcessSubstitution) {
+                        return false;
+                    }
+                }
+                '`' => {
+                    word.push(c);
+                    let (body, closed) = self.read_backtick_substitution();
+                    word.push_str(&body);
+                    if !closed {
+                        return false;
+                    }
+                    word.push('`');
                 }
                 '{' => {
-                    depth += 1;
                     word.push(c);
-                }
-                '}' => {
-                    depth -= 1;
-                    word.push(c);
-                    if depth == 0 {
-                        break;
+                    if !self.read_brace_body(word) {
+                        return false;
                     }
                 }
                 _ => word.push(c),
@@ -274,25 +440,38 @@ impl<'a> Lexer<'a> {
         self.read_brace_body(word);
     }
 
-    fn read_double_quoted(&mut self) -> String {
+    fn read_double_quoted(&mut self) -> (String, bool) {
         // Preserve backslash escapes verbatim so the parser's word-part stage can
         // decide how to handle them (a backslash only escapes $ ` " \ newline inside
         // double quotes). Backslash-newline is a line continuation and is removed.
         let mut s = String::new();
         loop {
             match self.next_char() {
-                Some('"') => break,
+                Some('"') => return (s, true),
                 Some('$') if self.peek_char() == Some('(') => {
                     s.push('$');
                     s.push('(');
                     self.next_char(); // consume '(' after $
-                    self.read_paren_body(&mut s);
+                    if !self.read_paren_body(&mut s, LexicalIssue::UnclosedCommandSubstitution) {
+                        return (s, false);
+                    }
                 }
                 Some('$') if self.peek_char() == Some('{') => {
                     s.push('$');
                     self.next_char(); // consume {
                     s.push('{');
-                    self.read_brace_body(&mut s);
+                    if !self.read_brace_body(&mut s) {
+                        return (s, false);
+                    }
+                }
+                Some('`') => {
+                    s.push('`');
+                    let (body, closed) = self.read_backtick_substitution();
+                    s.push_str(&body);
+                    if !closed {
+                        return (s, false);
+                    }
+                    s.push('`');
                 }
                 Some('\\') => {
                     match self.next_char() {
@@ -303,15 +482,18 @@ impl<'a> Lexer<'a> {
                         }
                         None => {
                             s.push('\\');
-                            break;
+                            self.record_issue(LexicalIssue::UnterminatedDoubleQuote);
+                            return (s, false);
                         }
                     }
                 }
                 Some(c) => s.push(c),
-                None => break,
+                None => {
+                    self.record_issue(LexicalIssue::UnterminatedDoubleQuote);
+                    return (s, false);
+                }
             }
         }
-        s
     }
 
     fn read_word(&mut self) -> String {
@@ -394,19 +576,10 @@ impl<'a> Lexer<'a> {
                             self.next_char(); // consume (
                             word.push(c);
                             word.push('(');
-                            let mut depth = 1;
-                            while let Some(c2) = self.next_char() {
-                                word.push(c2);
-                                if c2 == '(' {
-                                    depth += 1;
-                                }
-                                if c2 == ')' {
-                                    depth -= 1;
-                                    if depth == 0 {
-                                        break;
-                                    }
-                                }
-                            }
+                            self.read_paren_body(
+                                &mut word,
+                                LexicalIssue::UnclosedProcessSubstitution,
+                            );
                         } else {
                             break; // normal redirect
                         }
@@ -418,21 +591,10 @@ impl<'a> Lexer<'a> {
                         self.next_char(); // '
                         word.push('$');
                         word.push('\'');
-                        loop {
-                            match self.next_char() {
-                                Some('\'') => {
-                                    word.push('\'');
-                                    break;
-                                }
-                                Some('\\') => {
-                                    word.push('\\');
-                                    if let Some(c2) = self.next_char() {
-                                        word.push(c2);
-                                    }
-                                }
-                                Some(c2) => word.push(c2),
-                                None => break,
-                            }
+                        let (body, closed) = self.read_ansi_c_quoted();
+                        word.push_str(&body);
+                        if closed {
+                            word.push('\'');
                         }
                     }
                     '$' if self.peek_char_at(1) == Some('(') => {
@@ -448,16 +610,28 @@ impl<'a> Lexer<'a> {
                     '\'' => {
                         self.next_char();
                         word.push('\'');
-                        let s = self.read_single_quoted();
+                        let (s, _closed) = self.read_single_quoted();
                         word.push_str(&s);
+                        // Preserve the historical lenient token shape. Strict mode
+                        // rejects a synthesized close via `issue` before execution.
                         word.push('\'');
                     }
                     '"' => {
                         self.next_char();
                         word.push('"');
-                        let s = self.read_double_quoted();
+                        let (s, _closed) = self.read_double_quoted();
                         word.push_str(&s);
+                        // See the single-quote case above.
                         word.push('"');
+                    }
+                    '`' => {
+                        self.next_char();
+                        word.push('`');
+                        let (body, closed) = self.read_backtick_substitution();
+                        word.push_str(&body);
+                        if closed {
+                            word.push('`');
+                        }
                     }
                     '\\' => {
                         self.next_char();
@@ -469,6 +643,8 @@ impl<'a> Lexer<'a> {
                             word.push('\\');
                             if let Some(c2) = self.next_char() {
                                 word.push(c2);
+                            } else {
+                                self.record_issue(LexicalIssue::TrailingEscape);
                             }
                         }
                     }
@@ -719,7 +895,7 @@ pub fn tokenize_lenient(input: &str) -> Vec<SpannedToken> {
 
 #[cfg(test)]
 mod tests {
-    use super::{tokenize, Token};
+    use super::{tokenize, Lexer, Token};
 
     #[test]
     fn assignment_with_command_substitution_stays_one_word() {
@@ -759,5 +935,40 @@ mod tests {
         );
         assert_eq!(tokens[4].token, Token::Newline, "{tokens:#?}");
         assert_eq!(tokens[5].token, Token::Eof, "{tokens:#?}");
+    }
+
+    #[test]
+    fn strict_lexer_records_unclosed_shell_constructs() {
+        for input in [
+            "echo 'unterminated",
+            "echo \"unterminated",
+            "echo $'unterminated",
+            "echo $(printf hi",
+            "echo ${value:-fallback",
+            "echo <(printf hi",
+            "echo >(printf hi",
+            "echo `printf hi",
+            "echo trailing\\",
+        ] {
+            let mut lexer = Lexer::new(input);
+            lexer.tokenize_all();
+            assert!(
+                lexer.has_incomplete_construct(),
+                "strict lexer accepted {input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn lenient_lexer_keeps_tokens_and_spans_for_unclosed_quotes() {
+        let input = "echo 'unterminated";
+        let mut lexer = Lexer::new_lenient(input);
+        let tokens = lexer.tokenize_all();
+
+        assert_eq!(tokens[0].token, Token::Word("echo".to_string()));
+        assert_eq!(tokens[1].token, Token::Word("'unterminated'".to_string()));
+        assert_eq!(tokens[1].span, (5, input.len()));
+        assert_eq!(&input[tokens[1].span.0..tokens[1].span.1], "'unterminated");
+        assert!(!lexer.has_incomplete_construct());
     }
 }

@@ -11,9 +11,14 @@ use crate::parser;
 use crate::prompt;
 use crate::session;
 use crate::signal;
+use nix::errno::Errno;
+use nix::fcntl::{open, OFlag};
 use nix::libc;
+use nix::sys::stat::Mode;
 use nix::unistd::{getpgrp, getpid, setpgid, tcsetpgrp};
+use std::fs::File;
 use std::io::{self, Read, Write};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
 pub struct Shell {
@@ -23,6 +28,149 @@ pub struct Shell {
     pub session_id: Option<String>,
     /// True if a session snapshot was successfully restored (skip config loading).
     session_restored: bool,
+    load_startup_config: bool,
+    startup_file: Option<PathBuf>,
+}
+
+fn execute_text(source: &str, state: &mut ShellState) -> i32 {
+    match parser::parse(source) {
+        Ok(commands) => executor::execute_program(&commands, state),
+        Err(e) => {
+            eprintln!("rsh: {}", e);
+            state.last_exit_code = 2;
+            2
+        }
+    }
+}
+
+fn finish_noninteractive(mut state: ShellState, status: i32) -> i32 {
+    state.last_exit_code = status;
+    run_exit_trap(&mut state)
+}
+
+fn noninteractive_state(arg0: &str, args: &[String]) -> ShellState {
+    builtins::reset_exit_request();
+    signal::reset_pending_signals();
+    signal::install_noninteractive_signals();
+    let mut state = ShellState::new(false);
+    state.set_invocation(arg0, args);
+    state
+}
+
+enum ProgramReadError {
+    Signaled(i32),
+    Io(io::Error),
+}
+
+/// Read a complete noninteractive program, waking promptly for INT/HUP/TERM.
+/// Any bytes received before a terminating signal are intentionally discarded:
+/// a shell must never execute a truncated program.
+fn read_program_interruptibly(mut reader: impl Read) -> Result<String, ProgramReadError> {
+    let mut input = Vec::new();
+    let mut buffer = [0_u8; 8192];
+
+    loop {
+        if let Some(status) = signal::take_pending_status() {
+            return Err(ProgramReadError::Signaled(status));
+        }
+        match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => input.extend_from_slice(&buffer[..read]),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                if let Some(status) = signal::take_pending_status() {
+                    return Err(ProgramReadError::Signaled(status));
+                }
+            }
+            Err(error) => return Err(ProgramReadError::Io(error)),
+        }
+    }
+
+    if let Some(status) = signal::take_pending_status() {
+        return Err(ProgramReadError::Signaled(status));
+    }
+    String::from_utf8(input)
+        .map_err(|error| ProgramReadError::Io(io::Error::new(io::ErrorKind::InvalidData, error)))
+}
+
+fn read_noninteractive_stdin() -> Result<String, ProgramReadError> {
+    read_program_interruptibly(io::stdin().lock())
+}
+
+fn read_script_interruptibly(path: &Path) -> Result<String, ProgramReadError> {
+    let file = loop {
+        if let Some(status) = signal::take_pending_status() {
+            return Err(ProgramReadError::Signaled(status));
+        }
+        match open(path, OFlag::O_RDONLY | OFlag::O_CLOEXEC, Mode::empty()) {
+            Ok(fd) => break File::from(fd),
+            Err(Errno::EINTR) => {
+                if let Some(status) = signal::take_pending_status() {
+                    return Err(ProgramReadError::Signaled(status));
+                }
+            }
+            Err(error) => {
+                return Err(ProgramReadError::Io(io::Error::from_raw_os_error(
+                    error as i32,
+                )));
+            }
+        }
+    };
+    read_program_interruptibly(file)
+}
+
+/// Execute a `-c` command without loading startup files, history, or sessions.
+pub fn run_command(command: &str, arg0: &str, args: &[String]) -> i32 {
+    let mut state = noninteractive_state(arg0, args);
+    let status = execute_text(command, &mut state);
+    finish_noninteractive(state, status)
+}
+
+/// Execute a script file without loading startup files, history, or sessions.
+pub fn run_script(path: &Path, args: &[String]) -> i32 {
+    let arg0 = path.to_string_lossy().into_owned();
+    let mut state = noninteractive_state(&arg0, args);
+    let status = match read_script_interruptibly(path) {
+        Ok(content) => {
+            let source = match content.strip_prefix("#!") {
+                Some(rest) => rest.split_once('\n').map_or("", |(_, body)| body),
+                None => &content,
+            };
+            execute_text(source, &mut state)
+        }
+        Err(ProgramReadError::Signaled(status)) => {
+            state.last_exit_code = status;
+            status
+        }
+        Err(ProgramReadError::Io(e)) => {
+            eprintln!("rsh: {}: {}", path.display(), e);
+            let code = if e.kind() == std::io::ErrorKind::NotFound {
+                127
+            } else {
+                126
+            };
+            state.last_exit_code = code;
+            code
+        }
+    };
+    finish_noninteractive(state, status)
+}
+
+/// Read and execute standard input without loading or writing user state.
+pub fn run_stdin(arg0: &str, args: &[String]) -> i32 {
+    let mut state = noninteractive_state(arg0, args);
+    let status = match read_noninteractive_stdin() {
+        Ok(source) => execute_text(&source, &mut state),
+        Err(ProgramReadError::Signaled(status)) => {
+            state.last_exit_code = status;
+            status
+        }
+        Err(ProgramReadError::Io(error)) => {
+            eprintln!("rsh: stdin: {}", error);
+            state.last_exit_code = 1;
+            1
+        }
+    };
+    finish_noninteractive(state, status)
 }
 
 /// Run non-interactive modes (-c command, script file) without creating
@@ -31,73 +179,16 @@ pub fn run_noninteractive() -> Option<i32> {
     let args: Vec<String> = std::env::args().collect();
 
     if args.len() >= 3 && args[1] == "-c" {
-        let mut state = ShellState::new(false);
-        signal::install_shell_signals();
         let cmd_str = &args[2];
-        if args.len() > 3 {
-            state.positional_params = args[3..].to_vec();
-        }
-        match parser::parse(cmd_str) {
-            Ok(commands) => {
-                for cmd in &commands {
-                    let code = executor::execute_complete_command(cmd, &mut state);
-                    state.last_exit_code = code;
-                    if builtins::EXIT_REQUESTED.load(Ordering::SeqCst) {
-                        state.last_exit_code = builtins::EXIT_CODE.load(Ordering::SeqCst);
-                        break;
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("rsh: {}", e);
-                state.last_exit_code = 2;
-            }
-        }
-        run_exit_trap(&mut state);
-        return Some(state.last_exit_code);
+        let (arg0, positional) = match args.get(3) {
+            Some(arg0) => (arg0.as_str(), &args[4..]),
+            None => (args[0].as_str(), &args[0..0]),
+        };
+        return Some(run_command(cmd_str, arg0, positional));
     }
 
     if args.len() >= 2 && !args[1].starts_with('-') {
-        let mut state = ShellState::new(false);
-        signal::install_shell_signals();
-        let script = &args[1];
-        if args.len() > 2 {
-            state.positional_params = args[2..].to_vec();
-        }
-        match std::fs::read_to_string(script) {
-            Ok(content) => {
-                let content = if content.starts_with("#!") {
-                    content.splitn(2, '\n').nth(1).unwrap_or("").to_string()
-                } else {
-                    content
-                };
-                match parser::parse(&content) {
-                    Ok(commands) => {
-                        for cmd in &commands {
-                            let code = executor::execute_complete_command(cmd, &mut state);
-                            state.last_exit_code = code;
-                            if builtins::EXIT_REQUESTED.load(Ordering::SeqCst) {
-                                state.last_exit_code = builtins::EXIT_CODE.load(Ordering::SeqCst);
-                                break;
-                            }
-                            if state.shell_opts.errexit && code != 0 {
-                                break;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("rsh: {}: {}", script, e);
-                        state.last_exit_code = 2;
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("rsh: {}: {}", script, e);
-                state.last_exit_code = 127;
-            }
-        }
-        run_exit_trap(&mut state);
-        return Some(state.last_exit_code);
+        return Some(run_script(Path::new(&args[1]), &args[2..]));
     }
 
     None // interactive mode
@@ -175,14 +266,43 @@ fn expand_history(line: &str, history: &crate::history::History) -> Option<Strin
     Some(result)
 }
 
-fn run_exit_trap(state: &mut ShellState) {
+fn run_exit_trap(state: &mut ShellState) -> i32 {
+    let incoming_status = state.last_exit_code;
+    let prior_exit_requested = builtins::EXIT_REQUESTED.swap(false, Ordering::SeqCst);
+    let prior_exit_code = builtins::EXIT_CODE.load(Ordering::SeqCst);
+    let prior_abort = std::mem::replace(&mut state.abort_current_program, false);
     if let Some(cmd) = state.traps.get("EXIT").cloned() {
         if let Ok(commands) = parser::parse(&cmd) {
             for c in &commands {
                 executor::execute_complete_command(c, state);
+                if builtins::EXIT_REQUESTED.load(Ordering::SeqCst)
+                    || signal::pending_status().is_some()
+                {
+                    break;
+                }
             }
         }
     }
+    let trap_requested_exit = builtins::EXIT_REQUESTED.load(Ordering::SeqCst);
+    let requested_status = if trap_requested_exit {
+        builtins::EXIT_CODE.load(Ordering::SeqCst)
+    } else if prior_exit_requested {
+        prior_exit_code
+    } else {
+        incoming_status
+    };
+    // A terminating signal wins over the command or EXIT-trap status, including
+    // when it arrived while an EXIT-trap child was in the foreground.
+    let pending_status = signal::take_pending_status();
+    let final_status = pending_status.unwrap_or(requested_status);
+    builtins::EXIT_CODE.store(final_status, Ordering::SeqCst);
+    builtins::EXIT_REQUESTED.store(
+        prior_exit_requested || trap_requested_exit || pending_status.is_some(),
+        Ordering::SeqCst,
+    );
+    state.abort_current_program = prior_abort;
+    state.last_exit_code = final_status;
+    final_status
 }
 
 impl Shell {
@@ -193,7 +313,17 @@ impl Shell {
             editor: Editor::new(),
             session_id: None,
             session_restored: false,
+            load_startup_config: true,
+            startup_file: None,
         }
+    }
+
+    /// Configure interactive startup-file loading.
+    ///
+    /// `rcfile` replaces the default `.bashrc`/`.rshrc` choice when present.
+    pub fn configure_startup(&mut self, load_config: bool, rcfile: Option<PathBuf>) {
+        self.load_startup_config = load_config;
+        self.startup_file = rcfile;
     }
 
     /// Restore session state from a snapshot file.
@@ -207,11 +337,17 @@ impl Shell {
                 let ctx = snapshot.environment_context.clone();
                 snapshot.apply(&mut self.state);
                 session::reactivate_environment(&ctx, &mut self.state);
-                session::SessionSnapshot::delete(session_id);
                 self.session_restored = true;
             }
-            Err(_) => {
-                // No snapshot found or parse error — normal startup with config
+            Err(error) => {
+                // A missing snapshot is normal on first launch. Corrupt,
+                // unsupported, or insecure snapshots need a visible diagnostic.
+                let not_found = error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|io_error| io_error.kind() == std::io::ErrorKind::NotFound);
+                if !not_found {
+                    eprintln!("rsh: session restore: {error}");
+                }
             }
         }
     }
@@ -231,34 +367,50 @@ impl Shell {
         }
     }
 
-    pub fn run(&mut self) {
+    pub fn run(&mut self) -> i32 {
+        builtins::reset_exit_request();
+        signal::reset_pending_signals();
         signal::install_shell_signals();
 
-        // Only load config if NOT restoring from a snapshot
-        // (the snapshot already contains the accumulated state from config)
-        if !self.session_restored {
-            config::load_config(&mut self.state);
-        }
-        config::refresh_shell_integrations(&mut self.state);
-
         // Check if stdin is a TTY for interactive mode
-        // Use libc::isatty directly to catch deleted/invalid ptys that atty might miss
+        // Use libc::isatty directly to catch deleted/invalid ptys that a
+        // high-level terminal check might miss.
         let stdin_is_tty = unsafe { libc::isatty(libc::STDIN_FILENO) == 1 };
 
         // Update interactive mode based on stdin
         self.state.interactive = stdin_is_tty;
 
         if stdin_is_tty {
+            // Only interactive shells load startup configuration. A restored
+            // snapshot already contains the accumulated startup state.
+            if self.load_startup_config && !self.session_restored {
+                if let Some(path) = self.startup_file.as_deref() {
+                    config::load_config_file(path, &mut self.state);
+                } else {
+                    config::load_config(&mut self.state);
+                }
+            }
+            if builtins::EXIT_REQUESTED.load(Ordering::SeqCst) {
+                self.state.last_exit_code = builtins::EXIT_CODE.load(Ordering::SeqCst);
+                return self.finish_interactive();
+            }
+            config::refresh_shell_integrations(&mut self.state);
+            if builtins::EXIT_REQUESTED.load(Ordering::SeqCst) {
+                self.state.last_exit_code = builtins::EXIT_CODE.load(Ordering::SeqCst);
+                return self.finish_interactive();
+            }
             init_interactive_job_control();
             // Interactive mode with editor
-            self.run_interactive();
+            self.run_interactive()
         } else {
-            // Non-interactive mode reading from stdin
-            self.run_from_stdin();
+            // Defensive fallback for legacy callers. The CLI normally calls
+            // `run_stdin` directly, avoiding Editor/History construction too.
+            signal::install_noninteractive_signals();
+            self.run_from_stdin()
         }
     }
 
-    fn run_interactive(&mut self) {
+    fn run_interactive(&mut self) -> i32 {
         // Report session ID to the terminal emulator via OSC 7770
         if let Some(ref id) = self.session_id {
             osc::report_session_id(id);
@@ -342,13 +494,7 @@ impl Shell {
                     let cmd_start = std::time::Instant::now();
                     match parser::parse(&line) {
                         Ok(commands) => {
-                            for cmd in &commands {
-                                let code = executor::execute_complete_command(cmd, &mut self.state);
-                                self.state.last_exit_code = code;
-                                if self.state.shell_opts.errexit && code != 0 {
-                                    eprintln!("rsh: errexit: command exited with status {}", code);
-                                }
-                            }
+                            executor::execute_program(&commands, &mut self.state);
                         }
                         Err(e) => {
                             eprintln!("rsh: {}", e);
@@ -395,41 +541,44 @@ impl Shell {
             }
         }
 
-        run_exit_trap(&mut self.state);
+        self.finish_interactive()
+    }
+
+    fn finish_interactive(&mut self) -> i32 {
+        let mut final_status = run_exit_trap(&mut self.state);
         self.save_session();
         self.history.save();
 
         // Opportunistically clean up stale session files (older than 7 days)
         session::cleanup_stale_sessions(std::time::Duration::from_secs(7 * 24 * 3600));
+        if let Some(signal_status) = signal::take_pending_status() {
+            final_status = signal_status;
+            self.state.last_exit_code = signal_status;
+            builtins::EXIT_CODE.store(signal_status, Ordering::SeqCst);
+            builtins::EXIT_REQUESTED.store(true, Ordering::SeqCst);
+        }
+        final_status
     }
 
-    fn run_from_stdin(&mut self) {
+    fn run_from_stdin(&mut self) -> i32 {
         // Non-interactive stdin commonly contains shell scripts and hook payloads
         // with multi-line function definitions. Parse the whole buffer at once.
-        let mut script = String::new();
-        if io::stdin().read_to_string(&mut script).is_err() {
-            self.state.last_exit_code = 1;
-            run_exit_trap(&mut self.state);
-            self.save_session();
-            self.history.save();
-            return;
-        }
+        let script = match read_noninteractive_stdin() {
+            Ok(script) => script,
+            Err(ProgramReadError::Signaled(status)) => {
+                self.state.last_exit_code = status;
+                return run_exit_trap(&mut self.state);
+            }
+            Err(ProgramReadError::Io(error)) => {
+                eprintln!("rsh: stdin: {}", error);
+                self.state.last_exit_code = 1;
+                return run_exit_trap(&mut self.state);
+            }
+        };
 
         if script.trim().is_empty() {
-            run_exit_trap(&mut self.state);
-            self.save_session();
-            self.history.save();
-            return;
+            return run_exit_trap(&mut self.state);
         }
-
-        self.history.add_with_cwd(
-            script.trim_end(),
-            std::env::current_dir()
-                .ok()
-                .as_ref()
-                .map(|p| p.to_string_lossy().as_ref().to_string())
-                .as_deref(),
-        );
 
         let preexec = self.state.hooks.preexec.clone();
         hooks::run_hooks(&preexec, &mut self.state);
@@ -437,17 +586,7 @@ impl Shell {
         let cmd_start = std::time::Instant::now();
         match parser::parse(&script) {
             Ok(commands) => {
-                for cmd in &commands {
-                    let code = executor::execute_complete_command(cmd, &mut self.state);
-                    self.state.last_exit_code = code;
-                    if self.state.shell_opts.errexit && code != 0 {
-                        eprintln!("rsh: errexit: command exited with status {}", code);
-                    }
-                    if builtins::EXIT_REQUESTED.load(Ordering::SeqCst) {
-                        self.state.last_exit_code = builtins::EXIT_CODE.load(Ordering::SeqCst);
-                        break;
-                    }
-                }
+                executor::execute_program(&commands, &mut self.state);
             }
             Err(e) => {
                 eprintln!("rsh: {}", e);
@@ -456,9 +595,7 @@ impl Shell {
         }
         self.state.last_command_duration = Some(cmd_start.elapsed());
 
-        run_exit_trap(&mut self.state);
-        self.save_session();
-        self.history.save();
+        run_exit_trap(&mut self.state)
     }
 }
 

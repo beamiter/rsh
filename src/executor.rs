@@ -10,14 +10,45 @@ use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::{close, execvp, fork, pipe, setpgid, tcsetpgrp, ForkResult, Pid};
 use std::ffi::CString;
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::os::unix::io::{AsRawFd, BorrowedFd, IntoRawFd, OwnedFd, RawFd};
 
 fn shell_error(msg: &str) {
-    if atty::is(atty::Stream::Stderr) {
-        eprintln!("\x1b[1;31mrsh:\x1b[0m {}", msg);
+    eprintln!("{}", format_shell_error(msg, stderr_supports_color()));
+}
+
+fn shell_command_hint(suggestion: &str) {
+    eprintln!(
+        "{}",
+        format_command_hint(suggestion, stderr_supports_color())
+    );
+}
+
+fn stderr_supports_color() -> bool {
+    should_use_color(
+        std::io::stderr().is_terminal(),
+        std::env::var_os("NO_COLOR").is_some(),
+    )
+}
+
+fn should_use_color(is_terminal: bool, no_color_is_set: bool) -> bool {
+    is_terminal && !no_color_is_set
+}
+
+fn format_shell_error(msg: &str, color: bool) -> String {
+    if color {
+        format!("\x1b[1;31mrsh:\x1b[0m {}", msg)
     } else {
-        eprintln!("rsh: {}", msg);
+        format!("rsh: {}", msg)
+    }
+}
+
+fn format_command_hint(suggestion: &str, color: bool) -> String {
+    let hint = format!("       did you mean '{suggestion}'?");
+    if color {
+        format!("\x1b[2;33m{}\x1b[0m", hint)
+    } else {
+        hint
     }
 }
 
@@ -122,13 +153,68 @@ fn exec_error_info(_cmd_name: &str) -> (&'static str, i32) {
 }
 
 pub fn execute_program(commands: &[CompleteCommand], state: &mut ShellState) -> i32 {
+    // A parsed command line/script is the lifetime of a fatal expansion
+    // failure. Keep the flag set while unwinding nested compound lists, then
+    // allow the next independently parsed program to run.
+    state.abort_current_program = false;
+    if exit_requested() {
+        let status = builtins::EXIT_CODE.load(std::sync::atomic::Ordering::SeqCst);
+        state.last_exit_code = status;
+        return status;
+    }
+    if let Some(status) = signal::take_pending_status() {
+        state.last_exit_code = status;
+        return status;
+    }
     let mut last = 0;
     for cmd in commands {
-        last = execute_complete_command(cmd, state);
-        if last != 0 {
+        if let Some(status) = signal::take_pending_status() {
+            last = status;
+            state.last_exit_code = status;
+            break;
+        }
+        let outcome = execute_complete_command_outcome(cmd, state);
+        last = outcome.status;
+
+        if let Some(signal_status) = signal::take_pending_status() {
+            last = signal_status;
+            state.last_exit_code = last;
+            break;
+        }
+
+        if exit_requested() {
+            last = builtins::EXIT_CODE.load(std::sync::atomic::Ordering::SeqCst);
+            state.last_exit_code = last;
+            break;
+        }
+
+        if state.abort_current_program {
+            state.last_exit_code = last;
+            break;
+        }
+
+        if last != 0 && !outcome.failure_exempt {
             fire_err_trap(state);
         }
+
+        if let Some(signal_status) = signal::take_pending_status() {
+            last = signal_status;
+            state.last_exit_code = last;
+            break;
+        }
+        if exit_requested() {
+            last = builtins::EXIT_CODE.load(std::sync::atomic::Ordering::SeqCst);
+            state.last_exit_code = last;
+            break;
+        }
+        if control_flow_requested(state) {
+            break;
+        }
+        if errexit_active(state) && last != 0 && !outcome.failure_exempt {
+            break;
+        }
     }
+    state.last_exit_code = last;
     last
 }
 
@@ -136,15 +222,86 @@ fn fire_err_trap(state: &mut ShellState) {
     if let Some(action) = state.traps.get("ERR").cloned() {
         if !action.is_empty() {
             if let Ok(cmds) = crate::parser::parse(&action) {
+                let failed_status = state.last_exit_code;
                 for cmd in &cmds {
                     execute_complete_command(cmd, state);
+                    if exit_requested() || signal::pending_status().is_some() {
+                        break;
+                    }
+                }
+                if !exit_requested() && signal::pending_status().is_none() {
+                    state.last_exit_code = failed_status;
                 }
             }
         }
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct CommandOutcome {
+    status: i32,
+    /// A non-zero result produced in a shell conditional context (`&&`, `||`,
+    /// or `!`) does not trigger ERR/errexit.
+    failure_exempt: bool,
+}
+
+fn exit_requested() -> bool {
+    builtins::EXIT_REQUESTED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+fn control_flow_requested(state: &ShellState) -> bool {
+    exit_requested()
+        || signal::pending_status().is_some()
+        || state.abort_current_program
+        || state.return_requested
+        || state.loop_break
+        || state.loop_continue
+}
+
+fn errexit_active(state: &ShellState) -> bool {
+    state.shell_opts.errexit && state.errexit_suppression_depth == 0
+}
+
+fn with_errexit_suppressed<F>(state: &mut ShellState, f: F) -> i32
+where
+    F: FnOnce(&mut ShellState) -> i32,
+{
+    state.errexit_suppression_depth += 1;
+    let result = f(state);
+    state.errexit_suppression_depth -= 1;
+    result
+}
+
+fn execute_pipeline_in_context(
+    pipeline: &Pipeline,
+    state: &mut ShellState,
+    conditional: bool,
+) -> i32 {
+    if conditional {
+        with_errexit_suppressed(state, |state| execute_pipeline(pipeline, state))
+    } else {
+        execute_pipeline(pipeline, state)
+    }
+}
+
+fn report_expansion_error(state: &mut ShellState) -> Option<i32> {
+    state.take_expansion_error().map(|message| {
+        eprintln!("rsh: {}", message);
+        state.set_error(message, 1);
+        state.last_exit_code = 1;
+        state.abort_current_program = true;
+        1
+    })
+}
+
 pub fn execute_complete_command(cmd: &CompleteCommand, state: &mut ShellState) -> i32 {
+    execute_complete_command_outcome(cmd, state).status
+}
+
+fn execute_complete_command_outcome(
+    cmd: &CompleteCommand,
+    state: &mut ShellState,
+) -> CommandOutcome {
     // Sweep up any finished process-substitution children (non-blocking).
     state.reap_procsubs();
     // Phase 5b: drop inline-closure stash from the prior top-level command.
@@ -156,7 +313,7 @@ pub fn execute_complete_command(cmd: &CompleteCommand, state: &mut ShellState) -
                 signal::reset_child_signals();
                 let pid = nix::unistd::getpid();
                 setpgid(pid, pid).ok();
-                let code = execute_and_or(&cmd.list, state);
+                let code = execute_and_or(&cmd.list, state).status;
                 child_exit(code);
             }
             Ok(ForkResult::Parent { child }) => {
@@ -168,39 +325,61 @@ pub fn execute_complete_command(cmd: &CompleteCommand, state: &mut ShellState) -
                     eprintln!("[{}] {}", jid, child);
                 }
                 state.last_exit_code = 0;
-                return 0;
+                return CommandOutcome {
+                    status: 0,
+                    failure_exempt: true,
+                };
             }
             Err(e) => {
                 eprintln!("rsh: fork failed: {}", e);
-                return 1;
+                state.last_exit_code = 1;
+                return CommandOutcome {
+                    status: 1,
+                    failure_exempt: false,
+                };
             }
         }
     }
 
-    let code = execute_and_or(&cmd.list, state);
-    state.last_exit_code = code;
-    code
+    let outcome = execute_and_or(&cmd.list, state);
+    state.last_exit_code = outcome.status;
+    outcome
 }
 
-fn execute_and_or(list: &AndOrList, state: &mut ShellState) -> i32 {
-    let mut code = execute_pipeline(&list.first, state);
+fn execute_and_or(list: &AndOrList, state: &mut ShellState) -> CommandOutcome {
+    let first_is_conditional = list.first.negated || !list.rest.is_empty();
+    let mut code = execute_pipeline_in_context(&list.first, state, first_is_conditional);
+    // `$?` is observable while expanding the next pipeline in the same
+    // AND-OR list, not only after the complete command finishes.
+    state.last_exit_code = code;
+    let mut last_executed = 0usize;
 
-    for (conn, pipeline) in &list.rest {
-        match conn {
-            Connector::And => {
-                if code == 0 {
-                    code = execute_pipeline(pipeline, state);
-                }
-            }
-            Connector::Or => {
-                if code != 0 {
-                    code = execute_pipeline(pipeline, state);
-                }
-            }
+    for (index, (conn, pipeline)) in list.rest.iter().enumerate() {
+        if control_flow_requested(state) {
+            break;
+        }
+        let execute = match conn {
+            Connector::And => code == 0,
+            Connector::Or => code != 0,
+        };
+        if execute {
+            let has_following_connector = index + 1 < list.rest.len();
+            let conditional = pipeline.negated || has_following_connector;
+            code = execute_pipeline_in_context(pipeline, state, conditional);
+            state.last_exit_code = code;
+            last_executed = index + 1;
         }
     }
 
-    code
+    let final_pipeline = if last_executed == 0 {
+        &list.first
+    } else {
+        &list.rest[last_executed - 1].1
+    };
+    CommandOutcome {
+        status: code,
+        failure_exempt: final_pipeline.negated || last_executed < list.rest.len(),
+    }
 }
 
 /// True if `cmd` is a `Simple` command whose head literal names a value-aware
@@ -250,7 +429,7 @@ fn execute_value_pipeline(cmds: &[Command], state: &mut ShellState) -> i32 {
             }),
         Some("open" | "ls" | "ps")
     );
-    let mut data = if first_is_source || atty::is(atty::Stream::Stdin) {
+    let mut data = if first_is_source || std::io::stdin().is_terminal() {
         PipelineData::Empty
     } else {
         let mut buf = Vec::new();
@@ -268,6 +447,9 @@ fn execute_value_pipeline(cmds: &[Command], state: &mut ShellState) -> i32 {
         };
         // Expand the args (the head is known to be a literal, so expand_words is fine).
         let expanded = expand_words(&simple.words, state);
+        if let Some(code) = report_expansion_error(state) {
+            return code;
+        }
         if expanded.is_empty() {
             continue;
         }
@@ -387,10 +569,14 @@ fn execute_pipeline(pipeline: &Pipeline, state: &mut ShellState) -> i32 {
                 child_exit(code);
             }
             Ok(ForkResult::Parent { child }) => {
-                if pgid.as_raw() == 0 {
+                let first_child = pgid.as_raw() == 0;
+                if first_child {
                     pgid = child;
                 }
                 setpgid(child, pgid).ok();
+                if first_child {
+                    signal::set_foreground_pgid(Some(pgid.as_raw()));
+                }
                 child_pids.push(child);
                 if let Some(fd) = write_fd {
                     close(fd).ok();
@@ -401,6 +587,7 @@ fn execute_pipeline(pipeline: &Pipeline, state: &mut ShellState) -> i32 {
                 prev_read_fd = read_fd;
             }
             Err(e) => {
+                signal::set_foreground_pgid(None);
                 eprintln!("rsh: fork failed: {}", e);
                 return 1;
             }
@@ -431,12 +618,13 @@ fn execute_pipeline(pipeline: &Pipeline, state: &mut ShellState) -> i32 {
             }
         }
     }
+    signal::set_foreground_pgid(None);
 
     if state.interactive {
         tcsetpgrp(std::io::stdin(), shell_pgid).ok();
     }
     if state.shell_opts.pipefail {
-        if let Some(&code) = pipestatus.iter().find(|&&c| c != 0) {
+        if let Some(&code) = pipestatus.iter().rev().find(|&&c| c != 0) {
             last_status = code;
         }
     }
@@ -685,6 +873,9 @@ pub fn apply_closure(
                         _ => unreachable!(),
                     };
                     let expanded = expand_words(&simple.words, state);
+                    if let Some(code) = report_expansion_error(state) {
+                        return Err(code);
+                    }
                     if expanded.is_empty() {
                         continue;
                     }
@@ -764,6 +955,9 @@ fn execute_simple_with_mode(
 
     // Expand words
     let expanded = expand_words(&cmd.words, state);
+    if let Some(code) = report_expansion_error(state) {
+        return code;
+    }
     if expanded.is_empty() {
         return 0;
     }
@@ -803,7 +997,11 @@ fn execute_simple_with_mode(
     if let Some(func_body) = state.functions.get(cmd_name).cloned() {
         state.push_local_scope();
         state.push_positional_params(args.to_vec());
+        let caller_loop_depth = std::mem::replace(&mut state.loop_depth, 0);
+        state.return_depth += 1;
         let code = execute_compound(&func_body, state);
+        state.return_depth -= 1;
+        state.loop_depth = caller_loop_depth;
         state.pop_positional_params();
         state.pop_local_scope();
 
@@ -919,7 +1117,7 @@ fn execute_simple_with_mode(
         shell_error(&format!("{}: {}", cmd_name, msg));
         if code == 127 {
             if let Some(suggestion) = suggest_command(&cmd_name, state) {
-                eprintln!("\x1b[2;33m       did you mean '{}'?\x1b[0m", suggestion);
+                shell_command_hint(&suggestion);
             }
         }
         return code;
@@ -951,6 +1149,7 @@ fn execute_simple_with_mode(
         }
         Ok(ForkResult::Parent { child }) => {
             setpgid(child, child).ok();
+            signal::set_foreground_pgid(Some(child.as_raw()));
             let exit_code = if state.interactive {
                 wait_for_fg(child, state)
             } else {
@@ -960,9 +1159,10 @@ fn execute_simple_with_mode(
                     _ => 1,
                 }
             };
+            signal::set_foreground_pgid(None);
             if exit_code == 127 {
                 if let Some(suggestion) = suggest_command(&cmd_name, state) {
-                    eprintln!("\x1b[2;33m       did you mean '{}'?\x1b[0m", suggestion);
+                    shell_command_hint(&suggestion);
                 }
             }
             exit_code
@@ -995,20 +1195,25 @@ pub fn execute_compound(cmd: &CompoundCommand, state: &mut ShellState) -> i32 {
                 signal::reset_child_signals();
                 let pid = nix::unistd::getpid();
                 setpgid(pid, pid).ok();
+                state.loop_depth = 0;
                 apply_redirects_in_child(redirects, state);
                 let code = execute_command_list(body, state);
                 child_exit(code);
             }
             Ok(ForkResult::Parent { child }) => {
                 setpgid(child, child).ok();
-                if state.interactive {
+                signal::set_foreground_pgid(Some(child.as_raw()));
+                let code = if state.interactive {
                     wait_for_fg(child, state)
                 } else {
                     match waitpid(child, None) {
                         Ok(WaitStatus::Exited(_, code)) => code,
+                        Ok(WaitStatus::Signaled(_, sig, _)) => 128 + sig as i32,
                         _ => 1,
                     }
-                }
+                };
+                signal::set_foreground_pgid(None);
+                code
             }
             Err(_) => 1,
         },
@@ -1022,6 +1227,9 @@ pub fn execute_compound(cmd: &CompoundCommand, state: &mut ShellState) -> i32 {
 
             for (condition, body) in conditions {
                 let cond_code = execute_condition(condition, state);
+                if state.abort_current_program {
+                    return cond_code;
+                }
                 if cond_code == 0 {
                     code = execute_command_list(body, state);
                     matched = true;
@@ -1047,11 +1255,19 @@ pub fn execute_compound(cmd: &CompoundCommand, state: &mut ShellState) -> i32 {
                     Some(ws) => expand_words(ws, state),
                     None => state.positional_params.clone(),
                 };
+                if let Some(code) = report_expansion_error(state) {
+                    return code;
+                }
 
                 let mut code = 0;
+                state.loop_depth += 1;
                 for w in &word_list {
                     state.set_var(var, w);
                     code = execute_command_list(body, state);
+
+                    if exit_requested() || state.abort_current_program || state.return_requested {
+                        break;
+                    }
 
                     // Check for break/continue control flow
                     if state.loop_break {
@@ -1063,6 +1279,7 @@ pub fn execute_compound(cmd: &CompoundCommand, state: &mut ShellState) -> i32 {
                         continue;
                     }
                 }
+                state.loop_depth -= 1;
                 code
             })
         }
@@ -1081,6 +1298,7 @@ pub fn execute_compound(cmd: &CompoundCommand, state: &mut ShellState) -> i32 {
 
                 let mut code = 0;
                 let _ = code;
+                state.loop_depth += 1;
                 loop {
                     // Check condition
                     let cond_result = if condition.is_empty() {
@@ -1098,6 +1316,10 @@ pub fn execute_compound(cmd: &CompoundCommand, state: &mut ShellState) -> i32 {
                     // Execute body
                     code = execute_command_list(body, state);
 
+                    if exit_requested() || state.abort_current_program || state.return_requested {
+                        break;
+                    }
+
                     // Check for break/continue
                     if state.loop_break {
                         state.loop_break = false;
@@ -1113,6 +1335,7 @@ pub fn execute_compound(cmd: &CompoundCommand, state: &mut ShellState) -> i32 {
                         let _ = crate::expand::expand_arithmetic(update, state);
                     }
                 }
+                state.loop_depth -= 1;
 
                 code
             })
@@ -1123,12 +1346,20 @@ pub fn execute_compound(cmd: &CompoundCommand, state: &mut ShellState) -> i32 {
             redirects,
         } => with_redirects(redirects, state, |state| {
             let mut code = 0;
+            state.loop_depth += 1;
             loop {
                 let cond = execute_condition(condition, state);
+                if state.abort_current_program {
+                    code = cond;
+                    break;
+                }
                 if cond != 0 {
                     break;
                 }
                 code = execute_command_list(body, state);
+                if exit_requested() || state.abort_current_program || state.return_requested {
+                    break;
+                }
                 if state.loop_break {
                     state.loop_break = false;
                     break;
@@ -1137,6 +1368,7 @@ pub fn execute_compound(cmd: &CompoundCommand, state: &mut ShellState) -> i32 {
                     state.loop_continue = false;
                 }
             }
+            state.loop_depth -= 1;
             code
         }),
         CompoundCommand::Until {
@@ -1145,12 +1377,20 @@ pub fn execute_compound(cmd: &CompoundCommand, state: &mut ShellState) -> i32 {
             redirects,
         } => with_redirects(redirects, state, |state| {
             let mut code = 0;
+            state.loop_depth += 1;
             loop {
                 let cond = execute_condition(condition, state);
+                if state.abort_current_program {
+                    code = cond;
+                    break;
+                }
                 if cond == 0 {
                     break;
                 }
                 code = execute_command_list(body, state);
+                if exit_requested() || state.abort_current_program || state.return_requested {
+                    break;
+                }
                 if state.loop_break {
                     state.loop_break = false;
                     break;
@@ -1159,6 +1399,7 @@ pub fn execute_compound(cmd: &CompoundCommand, state: &mut ShellState) -> i32 {
                     state.loop_continue = false;
                 }
             }
+            state.loop_depth -= 1;
             code
         }),
         CompoundCommand::Case {
@@ -1182,6 +1423,10 @@ pub fn execute_compound(cmd: &CompoundCommand, state: &mut ShellState) -> i32 {
                         });
                     if hit {
                         last = execute_command_list(&arm.body, state);
+                        if exit_requested() || state.abort_current_program || state.return_requested
+                        {
+                            return last;
+                        }
                         match arm.terminator {
                             CaseTerminator::Break => return last,
                             CaseTerminator::FallThrough => {
@@ -1212,11 +1457,15 @@ pub fn execute_compound(cmd: &CompoundCommand, state: &mut ShellState) -> i32 {
                     Some(ws) => expand_words(ws, state),
                     None => state.positional_params.clone(),
                 };
+                if let Some(code) = report_expansion_error(state) {
+                    return code;
+                }
 
                 if items.is_empty() {
                     return 0;
                 }
 
+                state.loop_depth += 1;
                 let code = loop {
                     // Display menu
                     for (i, item) in items.iter().enumerate() {
@@ -1247,6 +1496,13 @@ pub fn execute_compound(cmd: &CompoundCommand, state: &mut ShellState) -> i32 {
                                     state.set_var(var, selected);
                                     let code = execute_command_list(body, state);
 
+                                    if exit_requested()
+                                        || state.abort_current_program
+                                        || state.return_requested
+                                    {
+                                        break code;
+                                    }
+
                                     // Check for break/continue control flow
                                     if state.loop_break {
                                         state.loop_break = false;
@@ -1267,6 +1523,7 @@ pub fn execute_compound(cmd: &CompoundCommand, state: &mut ShellState) -> i32 {
                         }
                     }
                 };
+                state.loop_depth -= 1;
 
                 code
             })
@@ -1369,13 +1626,17 @@ pub fn execute_compound(cmd: &CompoundCommand, state: &mut ShellState) -> i32 {
 }
 
 fn execute_command_list(cmds: &[CompleteCommand], state: &mut ShellState) -> i32 {
+    if control_flow_requested(state) {
+        return state.last_exit_code;
+    }
     let mut code = 0;
     for cmd in cmds {
-        code = execute_complete_command(cmd, state);
-        if state.loop_break || state.loop_continue || state.return_requested {
+        let outcome = execute_complete_command_outcome(cmd, state);
+        code = outcome.status;
+        if control_flow_requested(state) {
             return code;
         }
-        if state.shell_opts.errexit && code != 0 {
+        if errexit_active(state) && code != 0 && !outcome.failure_exempt {
             return code;
         }
     }
@@ -1383,11 +1644,7 @@ fn execute_command_list(cmds: &[CompleteCommand], state: &mut ShellState) -> i32
 }
 
 fn execute_condition(cmds: &[CompleteCommand], state: &mut ShellState) -> i32 {
-    let saved = state.shell_opts.errexit;
-    state.shell_opts.errexit = false;
-    let code = execute_command_list(cmds, state);
-    state.shell_opts.errexit = saved;
-    code
+    with_errexit_suppressed(state, |state| execute_command_list(cmds, state))
 }
 
 fn match_pattern(value: &str, pattern: &str) -> bool {
@@ -1605,5 +1862,29 @@ fn apply_redirects_in_child(redirects: &[Redirect], state: &mut ShellState) {
         };
 
         apply_one_redirect(&redir.kind, fd, &data, &redir.here_doc);
+    }
+}
+
+#[cfg(test)]
+mod output_tests {
+    use super::*;
+
+    #[test]
+    fn color_requires_a_terminal_and_no_color_must_be_absent() {
+        assert!(should_use_color(true, false));
+        assert!(!should_use_color(false, false));
+        assert!(!should_use_color(true, true));
+    }
+
+    #[test]
+    fn redirected_errors_and_hints_are_plain_text() {
+        let error = format_shell_error("ech: command not found", false);
+        let hint = format_command_hint("echo", false);
+
+        assert_eq!(error, "rsh: ech: command not found");
+        assert_eq!(hint, "       did you mean 'echo'?");
+        assert!(!error.contains('\x1b'));
+        assert!(!hint.contains('\x1b'));
+        assert!(format_command_hint("echo", true).contains('\x1b'));
     }
 }

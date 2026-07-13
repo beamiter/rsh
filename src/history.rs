@@ -1,15 +1,45 @@
 /// History management: file I/O, in-memory ring, search.
 /// Supports timestamped entries for rich Ctrl+R panel display.
-use std::fs::{self, OpenOptions};
-use std::io::{BufRead, Write};
-use std::path::PathBuf;
+use nix::fcntl::{Flock, FlockArg};
+use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, BufRead, Write};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[derive(Clone)]
+const HISTORY_RECORD_VERSION: u32 = 1;
+static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct HistoryEntry {
     pub command: String,
     pub timestamp: u64,
     pub cwd: Option<String>,
+}
+
+/// On-disk JSONL envelope. Keeping a format marker separate from
+/// `HistoryEntry` lets us distinguish new records from legacy commands that
+/// happen to contain JSON.
+#[derive(Deserialize, Serialize)]
+struct HistoryRecord {
+    rsh_history_version: u32,
+    command: String,
+    timestamp: u64,
+    cwd: Option<String>,
+}
+
+impl From<&HistoryEntry> for HistoryRecord {
+    fn from(entry: &HistoryEntry) -> Self {
+        Self {
+            rsh_history_version: HISTORY_RECORD_VERSION,
+            command: entry.command.clone(),
+            timestamp: entry.timestamp,
+            cwd: entry.cwd.clone(),
+        }
+    }
 }
 
 pub struct History {
@@ -25,6 +55,18 @@ impl History {
             .unwrap_or_else(|| PathBuf::from("/tmp"))
             .join(".rsh_history");
 
+        Self::new_with_path(max_size, file_path)
+    }
+
+    /// Load decoded entries from the default history file. This is the
+    /// compatibility boundary for non-editor consumers such as the `history`
+    /// builtin and command completion; callers never need to understand the
+    /// JSONL or legacy on-disk formats.
+    pub fn load_default_entries(max_size: usize) -> Vec<HistoryEntry> {
+        Self::new(max_size).entries
+    }
+
+    fn new_with_path(max_size: usize, file_path: PathBuf) -> Self {
         let mut h = History {
             entries: Vec::new(),
             max_size,
@@ -36,26 +78,38 @@ impl History {
     }
 
     fn load(&mut self) {
-        if let Ok(file) = fs::File::open(&self.file_path) {
-            let reader = std::io::BufReader::new(file);
-            for line in reader.lines() {
-                if let Ok(line) = line {
-                    if line.is_empty() {
-                        continue;
-                    }
-                    self.entries.push(Self::parse_line(&line));
-                }
-            }
-            if self.entries.len() > self.max_size {
-                let start = self.entries.len() - self.max_size;
-                self.entries = self.entries[start..].to_vec();
-            }
+        // Updated rsh processes coordinate through a stable sidecar lock.
+        // Atomic rewrites already protect readers from torn files; the lock
+        // additionally keeps us from racing an append at startup.
+        let _lock = self
+            .file_path
+            .exists()
+            .then(|| lock_history_file(&self.file_path).ok())
+            .flatten();
+        self.entries = read_entries_or_empty(&self.file_path).unwrap_or_default();
+        trim_to_limit(&mut self.entries, self.max_size);
+        if self.file_path.exists() {
+            let _ = set_private_file_permissions(&self.file_path);
         }
         self.position = self.entries.len();
     }
 
-    fn parse_line(line: &str) -> HistoryEntry {
-        // Format: "timestamp\tcwd\tcommand" or legacy plain command
+    fn parse_line(line: &str) -> Option<HistoryEntry> {
+        if line.is_empty() {
+            return None;
+        }
+
+        if let Ok(record) = serde_json::from_str::<HistoryRecord>(line) {
+            return (record.rsh_history_version == HISTORY_RECORD_VERSION).then_some(
+                HistoryEntry {
+                    command: record.command,
+                    timestamp: record.timestamp,
+                    cwd: record.cwd,
+                },
+            );
+        }
+
+        // Legacy format: "timestamp\tcwd\tcommand" or a plain command.
         let parts: Vec<&str> = line.splitn(3, '\t').collect();
         if parts.len() == 3 {
             if let Ok(ts) = parts[0].parse::<u64>() {
@@ -64,32 +118,46 @@ impl History {
                 } else {
                     Some(parts[1].to_string())
                 };
-                return HistoryEntry {
+                return Some(HistoryEntry {
                     command: parts[2].to_string(),
                     timestamp: ts,
                     cwd,
-                };
+                });
             }
         }
-        // Legacy format: plain command
-        HistoryEntry {
+        Some(HistoryEntry {
             command: line.to_string(),
             timestamp: 0,
             cwd: None,
-        }
+        })
     }
 
-    fn format_entry(entry: &HistoryEntry) -> String {
-        let cwd = entry.cwd.as_deref().unwrap_or("");
-        format!("{}\t{}\t{}", entry.timestamp, cwd, entry.command)
+    fn format_entry(entry: &HistoryEntry) -> io::Result<String> {
+        serde_json::to_string(&HistoryRecord::from(entry)).map_err(io::Error::other)
     }
 
     pub fn save(&self) {
-        if let Ok(mut file) = fs::File::create(&self.file_path) {
-            for entry in &self.entries {
-                writeln!(file, "{}", Self::format_entry(entry)).ok();
+        let _ = self.save_inner();
+    }
+
+    fn save_inner(&self) -> io::Result<()> {
+        let _lock = lock_history_file(&self.file_path)?;
+
+        // Merge with what is currently on disk while holding the lock. This
+        // preserves commands appended by shells launched after this instance.
+        let mut merged = read_entries_or_empty(&self.file_path)?;
+        let mut seen: HashSet<HistoryEntry> = merged.iter().cloned().collect();
+        for entry in &self.entries {
+            if seen.insert(entry.clone()) {
+                merged.push(entry.clone());
             }
         }
+        // A long-running shell may reintroduce old in-memory entries after a
+        // different shell pruned the file. Timestamp ordering keeps those old
+        // records at the front so the shared limit remains meaningful.
+        merged.sort_by_key(|entry| entry.timestamp);
+        trim_to_limit(&mut merged, self.max_size);
+        write_entries_atomically(&self.file_path, &merged)
     }
 
     pub fn add(&mut self, entry: &str) {
@@ -122,13 +190,7 @@ impl History {
         }
         self.position = self.entries.len();
 
-        if let Ok(mut file) = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.file_path)
-        {
-            writeln!(file, "{}", Self::format_entry(&he)).ok();
-        }
+        let _ = append_entry(&self.file_path, &he);
     }
 
     pub fn last(&self) -> Option<&str> {
@@ -278,6 +340,111 @@ impl History {
     }
 }
 
+fn trim_to_limit(entries: &mut Vec<HistoryEntry>, max_size: usize) {
+    if entries.len() > max_size {
+        let remove = entries.len() - max_size;
+        entries.drain(..remove);
+    }
+}
+
+fn read_entries(path: &Path) -> io::Result<Vec<HistoryEntry>> {
+    let file = File::open(path)?;
+    let reader = io::BufReader::new(file);
+    Ok(reader
+        .lines()
+        .map_while(Result::ok)
+        .filter_map(|line| History::parse_line(&line))
+        .collect())
+}
+
+fn read_entries_or_empty(path: &Path) -> io::Result<Vec<HistoryEntry>> {
+    match read_entries(path) {
+        Ok(entries) => Ok(entries),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(error),
+    }
+}
+
+fn append_entry(path: &Path, entry: &HistoryEntry) -> io::Result<()> {
+    let _lock = lock_history_file(path)?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(path)?;
+    set_private_file_permissions(path)?;
+
+    // Build the complete record first, then issue one append write. O_APPEND
+    // plus the sidecar lock prevents updated rsh processes from interleaving
+    // JSON records.
+    let mut record = History::format_entry(entry)?.into_bytes();
+    record.push(b'\n');
+    file.write_all(&record)
+}
+
+fn write_entries_atomically(path: &Path, entries: &[HistoryEntry]) -> io::Result<()> {
+    let counter = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let tmp_path = path.with_extension(format!(
+        "tmp.{}.{}.{}",
+        std::process::id(),
+        timestamp,
+        counter
+    ));
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp_path)?;
+        fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o600))?;
+        for entry in entries {
+            file.write_all(History::format_entry(entry)?.as_bytes())?;
+            file.write_all(b"\n")?;
+        }
+        file.sync_all()?;
+        fs::rename(&tmp_path, path)?;
+        set_private_file_permissions(path)?;
+        if let Some(parent) = path.parent() {
+            if let Ok(dir) = File::open(parent) {
+                let _ = dir.sync_all();
+            }
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp_path);
+    }
+    result
+}
+
+fn lock_history_file(path: &Path) -> io::Result<Flock<File>> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+    let mut lock_name = path.as_os_str().to_os_string();
+    lock_name.push(".lock");
+    let lock_path = PathBuf::from(lock_name);
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .open(&lock_path)?;
+    set_private_file_permissions(&lock_path)?;
+    Flock::lock(file, FlockArg::LockExclusive)
+        .map_err(|(_, errno)| io::Error::from_raw_os_error(errno as i32))
+}
+
+fn set_private_file_permissions(path: &Path) -> io::Result<()> {
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+}
+
 fn fuzzy_match_score(query: &[char], candidate: &[char]) -> Option<(Vec<usize>, i32)> {
     let mut qi = 0;
     let mut indices = Vec::new();
@@ -318,6 +485,11 @@ fn fuzzy_match_score(query: &[char], candidate: &[char]) -> Option<(Vec<usize>, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn load_test_history(path: &Path, max_size: usize) -> History {
+        History::new_with_path(max_size, path.to_path_buf())
+    }
 
     #[test]
     fn prefix_search_prefers_current_directory_then_falls_back() {
@@ -347,5 +519,99 @@ mod tests {
             history.search_prefix_in_cwd("cargo t", "/project/unknown"),
             Some("cargo test --release")
         );
+    }
+
+    #[test]
+    fn jsonl_roundtrip_preserves_multiline_commands_and_metadata() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("history");
+        let mut history = load_test_history(&path, 10);
+        history.add_with_cwd("if true\nthen echo \"hello\"\nfi", Some("/tmp/a\tb"));
+        history.save();
+
+        let restored = load_test_history(&path, 10);
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored.last(), Some("if true\nthen echo \"hello\"\nfi"));
+        assert_eq!(restored.entries[0].cwd.as_deref(), Some("/tmp/a\tb"));
+
+        let on_disk = fs::read_to_string(&path).expect("history JSONL");
+        assert_eq!(on_disk.lines().count(), 1);
+        assert!(on_disk.contains("\\n"));
+        assert!(on_disk.contains("rsh_history_version"));
+    }
+
+    #[test]
+    fn loader_accepts_legacy_and_mixed_history_records() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("history");
+        let json_entry = HistoryEntry {
+            command: "printf 'new\\nrecord'".into(),
+            timestamp: 12,
+            cwd: Some("/new".into()),
+        };
+        let content = format!(
+            "plain legacy\n10\t/old\tlegacy with metadata\n{}\n",
+            History::format_entry(&json_entry).expect("serialize")
+        );
+        fs::write(&path, content).expect("fixture");
+
+        let history = load_test_history(&path, 10);
+        assert_eq!(history.len(), 3);
+        assert_eq!(history.entries[0].command, "plain legacy");
+        assert_eq!(history.entries[1].timestamp, 10);
+        assert_eq!(history.entries[1].cwd.as_deref(), Some("/old"));
+        assert_eq!(history.entries[2], json_entry);
+    }
+
+    #[test]
+    fn save_merges_entries_appended_by_another_shell() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("history");
+        let mut first = load_test_history(&path, 10);
+        let mut second = load_test_history(&path, 10);
+
+        first.add("echo from-first");
+        second.add("echo from-second");
+        first.save();
+
+        let restored = load_test_history(&path, 10);
+        let commands = restored.entries();
+        assert!(commands.contains(&"echo from-first"));
+        assert!(commands.contains(&"echo from-second"));
+    }
+
+    #[test]
+    fn history_and_lock_files_are_private() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("history");
+        let mut history = load_test_history(&path, 10);
+        history.add("echo private");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("loosen fixture");
+        history.save();
+
+        let mode = fs::metadata(&path)
+            .expect("history metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+        let lock_mode = fs::metadata(dir.path().join("history.lock"))
+            .expect("lock metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(lock_mode, 0o600);
+    }
+
+    #[test]
+    fn writing_history_creates_a_missing_parent_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("missing").join("nested").join("history");
+        let mut history = load_test_history(&path, 10);
+        history.add("echo creates-parent");
+
+        let restored = load_test_history(&path, 10);
+        assert_eq!(restored.last(), Some("echo creates-parent"));
+        assert!(path.exists());
     }
 }

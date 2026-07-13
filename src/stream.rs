@@ -1,6 +1,8 @@
 /// Stream processing and utility commands
 /// Adds functional programming style commands to rsh
 /// sum - Add up all numbers in arguments
+use std::io::IsTerminal;
+
 pub fn builtin_sum(args: &[String]) -> i32 {
     let sum: f64 = args.iter().filter_map(|s| s.parse::<f64>().ok()).sum();
     if sum.fract() == 0.0 {
@@ -69,7 +71,7 @@ pub fn builtin_max(args: &[String]) -> i32 {
 
 /// lines - Read stdin line by line (filter for non-empty lines)
 pub fn builtin_lines(_args: &[String]) -> i32 {
-    if atty::is(atty::Stream::Stdin) {
+    if std::io::stdin().is_terminal() {
         eprintln!("lines: requires piped input, e.g.: cat file | lines");
         return 1;
     }
@@ -119,7 +121,7 @@ pub fn builtin_trim(args: &[String]) -> i32 {
 
 /// count - Count lines, words, characters
 pub fn builtin_count(args: &[String]) -> i32 {
-    if atty::is(atty::Stream::Stdin) {
+    if std::io::stdin().is_terminal() {
         eprintln!("count: requires piped input, e.g.: cat file | count");
         return 1;
     }
@@ -154,7 +156,7 @@ pub fn builtin_count(args: &[String]) -> i32 {
 /// reverse - Reverse order of arguments or lines
 pub fn builtin_reverse(args: &[String]) -> i32 {
     if args.is_empty() {
-        if atty::is(atty::Stream::Stdin) {
+        if std::io::stdin().is_terminal() {
             eprintln!("reverse: requires piped input or arguments, e.g.: cat file | reverse");
             return 1;
         }
@@ -180,7 +182,7 @@ pub fn builtin_reverse(args: &[String]) -> i32 {
 /// upper - Convert to uppercase
 pub fn builtin_upper(args: &[String]) -> i32 {
     if args.is_empty() {
-        if atty::is(atty::Stream::Stdin) {
+        if std::io::stdin().is_terminal() {
             eprintln!("upper: requires piped input or arguments, e.g.: upper hello");
             return 1;
         }
@@ -202,7 +204,7 @@ pub fn builtin_upper(args: &[String]) -> i32 {
 /// lower - Convert to lowercase
 pub fn builtin_lower(args: &[String]) -> i32 {
     if args.is_empty() {
-        if atty::is(atty::Stream::Stdin) {
+        if std::io::stdin().is_terminal() {
             eprintln!("lower: requires piped input or arguments, e.g.: lower HELLO");
             return 1;
         }
