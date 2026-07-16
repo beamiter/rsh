@@ -3,6 +3,7 @@ use crate::builtins;
 use crate::config;
 use crate::editor::Editor;
 use crate::environment::ShellState;
+use crate::execution;
 use crate::executor;
 use crate::history::History;
 use crate::hooks;
@@ -30,6 +31,7 @@ pub struct Shell {
     session_restored: bool,
     load_startup_config: bool,
     startup_file: Option<PathBuf>,
+    execution_seq: u64,
 }
 
 fn execute_text(source: &str, state: &mut ShellState) -> i32 {
@@ -315,6 +317,7 @@ impl Shell {
             session_restored: false,
             load_startup_config: true,
             startup_file: None,
+            execution_seq: 0,
         }
     }
 
@@ -487,8 +490,34 @@ impl Shell {
                     // OSC 2 — set window title to the running command
                     osc::set_title(&line);
 
+                    // Assign every accepted interactive command a stable ID shared by
+                    // OSC metadata, the execution journal, and AI error context.
+                    self.execution_seq = self.execution_seq.wrapping_add(1);
+                    if self.execution_seq == 0 {
+                        self.execution_seq = 1;
+                    }
+                    let execution_id =
+                        execution::execution_id(self.session_id.as_deref(), self.execution_seq);
+                    let cwd_before = std::env::current_dir()
+                        .map(|path| path.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    let started_at_ms = execution::unix_time_ms();
+                    let journal = execution::ExecutionJournal::configured();
+                    let journal_started = journal.as_ref().is_some_and(|journal| {
+                        journal
+                            .record_start(
+                                &execution_id,
+                                self.session_id.as_deref(),
+                                self.execution_seq,
+                                &line,
+                                &cwd_before,
+                                started_at_ms,
+                            )
+                            .is_ok()
+                    });
+
                     // OSC 133;C — command output start
-                    osc::command_output_start();
+                    osc::command_output_start(&execution_id, &line, &cwd_before);
 
                     // Parse and execute
                     let cmd_start = std::time::Instant::now();
@@ -501,7 +530,9 @@ impl Shell {
                             self.state.last_exit_code = 2;
                         }
                     }
-                    self.state.last_command_duration = Some(cmd_start.elapsed());
+                    let command_duration = cmd_start.elapsed();
+                    self.state.last_command_duration = Some(command_duration);
+                    let duration_ms = command_duration.as_millis().min(u128::from(u64::MAX)) as u64;
 
                     // Files, variables, Git state, PATH and CWD may all have
                     // changed. Never carry dynamic Tab results across commands.
@@ -514,12 +545,37 @@ impl Shell {
                             format!("exit code {}", self.state.last_exit_code),
                             self.state.last_exit_code,
                         ));
+                        self.editor.last_error_execution_id = Some(execution_id.clone());
                     } else {
                         self.editor.last_error_info = None;
+                        self.editor.last_error_execution_id = None;
                     }
 
-                    // OSC 133;D — command finished with exit code
-                    osc::command_finished(self.state.last_exit_code);
+                    let cwd_after = std::env::current_dir()
+                        .map(|path| path.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    let ended_at_ms = execution::unix_time_ms();
+
+                    // OSC 133;D must reach the terminal before the journal finish
+                    // event is appended, so the terminal can close and capture the
+                    // rendered output range associated with this execution ID.
+                    osc::command_finished(
+                        self.state.last_exit_code,
+                        &execution_id,
+                        duration_ms,
+                        &cwd_after,
+                    );
+                    if journal_started {
+                        if let Some(journal) = journal.as_ref() {
+                            let _ = journal.record_finish(
+                                &execution_id,
+                                self.state.last_exit_code,
+                                duration_ms,
+                                &cwd_after,
+                                ended_at_ms,
+                            );
+                        }
+                    }
 
                     // Check if `exit` builtin was called
                     if builtins::EXIT_REQUESTED.load(Ordering::SeqCst) {

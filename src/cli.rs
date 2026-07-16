@@ -41,6 +41,8 @@ pub struct Invocation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseResult {
     Run(Invocation),
+    /// Query the execution journal without starting or interpreting a shell.
+    Context(Vec<String>),
     Help,
     Version,
 }
@@ -70,7 +72,8 @@ pub const HELP: &str = concat!(
     "rsh — a modern Bash-inspired shell with structured data pipelines\n\n",
     "Usage:\n",
     "  rsh [OPTIONS] [SCRIPT [ARG ...]]\n",
-    "  rsh [OPTIONS] -c COMMAND [NAME [ARG ...]]\n\n",
+    "  rsh [OPTIONS] -c COMMAND [NAME [ARG ...]]\n",
+    "  rsh context <list|show|last-failed> [OPTIONS]\n\n",
     "Input:\n",
     "  -c, --command COMMAND  Execute COMMAND; NAME becomes $0\n",
     "  -s, --stdin            Read commands from standard input\n",
@@ -81,6 +84,7 @@ pub const HELP: &str = concat!(
     "      --rcfile FILE      Load FILE instead of the default startup file\n",
     "      --session ID       Restore and persist terminal session ID\n\n",
     "Other:\n",
+    "  context ...            Query structured command execution context\n",
     "  -h, --help             Print this help\n",
     "  -V, --version          Print version information\n",
     "      --                 Stop parsing options\n\n",
@@ -115,6 +119,7 @@ pub fn entrypoint() -> i32 {
             println!("{}", version());
             0
         }
+        Ok(ParseResult::Context(args)) => crate::execution_context::run_args(&args),
         Ok(ParseResult::Run(invocation)) => run(invocation),
         Err(error) => {
             eprintln!("rsh: {error}");
@@ -225,6 +230,13 @@ where
         .and_then(|s| s.into_string().ok())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "rsh".to_string());
+
+    // `context` is a process-level query action, not a script path. Keep the
+    // recognition deliberately before ordinary option/script parsing so the
+    // shell never attempts to open a file literally named `context`.
+    if args.get(1).and_then(|arg| arg.to_str()) == Some("context") {
+        return Ok(ParseResult::Context(utf8_args(&args[2..])?));
+    }
 
     let mut noexec = false;
     let mut interactive = false;
@@ -528,6 +540,31 @@ mod tests {
         assert_eq!(
             parse_from(["rsh", "--version"]).unwrap(),
             ParseResult::Version
+        );
+        assert_eq!(
+            parse_from(["rsh", "context", "list", "-n", "3", "--json"]).unwrap(),
+            ParseResult::Context(vec![
+                "list".into(),
+                "-n".into(),
+                "3".into(),
+                "--json".into(),
+            ])
+        );
+    }
+
+    #[test]
+    fn context_is_an_action_but_double_dash_still_allows_a_script_named_context() {
+        assert!(matches!(
+            parse_from(["rsh", "context", "show", "rsh-1"]).unwrap(),
+            ParseResult::Context(_)
+        ));
+        let invocation = run(&["rsh", "--", "context", "arg"]);
+        assert_eq!(
+            invocation.input,
+            Input::Script {
+                path: PathBuf::from("context"),
+                args: vec!["arg".into()],
+            }
         );
     }
 }

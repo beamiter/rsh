@@ -21,6 +21,8 @@ local workflows, and optional AI-assisted command generation.
 - Interactive Emacs/Vi editing, fuzzy history search, Git-aware prompts,
   completions for common developer tools, bookmarks, directory frecency, and
   parameterized workflows.
+- A continuous terminal with semantic command boundaries, allowing compatible
+  terminals to present a Commands timeline without turning output into blocks.
 - Optional OpenAI, Anthropic, or local Ollama integration. AI is disabled until
   explicitly enabled.
 
@@ -131,6 +133,52 @@ a newline-safe JSONL format while retaining compatibility with the previous
 tab-separated format. Session snapshots exclude process-specific variables and
 names that look like credentials, tokens, passwords, or secrets.
 
+## Semantic commands and execution context
+
+rsh keeps the terminal as one continuous scrollback while exposing semantic
+command boundaries to terminal emulators. A compatible terminal can build a
+chronological Commands timeline, jump to the original prompt, copy a command or
+its rendered output, and offer rerun actions without imposing a block-based
+layout.
+
+The integration retains the portable OSC 133 lifecycle: `A` begins a prompt,
+`B` begins command input, `C` begins output, and `D` finishes the command. rsh
+adds percent-encoded, size-bounded metadata to `C` and `D`: an execution ID,
+the exact command when it fits the protocol limit, the working directory, exit
+status, and duration. Oversized commands are explicitly marked as truncated
+rather than being presented as exact. The execution ID correlates terminal
+scrollback with rsh's structured context.
+
+Query that context either inside an interactive rsh or from another process:
+
+```sh
+context list [-n N] [--session ID] [--json]
+context show EXECUTION_ID [--json]
+context last-failed [--json]
+
+rsh context list [-n N] [--session ID] [--json]
+rsh context show EXECUTION_ID [--json]
+rsh context last-failed [--json]
+```
+
+`list` defaults to the newest 20 records and accepts a limit from 1 to 2,000.
+It reports only output availability, truncation, and byte-count metadata;
+`show` and `last-failed` include the captured output itself when available.
+
+Execution context is separate from `~/.rsh_history`. Its append-only JSONL
+journal defaults to `$XDG_STATE_HOME/rsh/executions.jsonl`, falling back to
+`~/.local/state/rsh/executions.jsonl`. The rsh state directory is mode `0700`;
+the journal and its `executions.lock` sidecar are mode `0600` and coordinated
+with `flock`. At 32 MiB the journal is compacted to the newest records, with a
+post-compaction limit of 24 MiB and 2,000 executions. Individual metadata and
+captured-output records also have hard size limits.
+
+The journal can contain sensitive commands, paths, and terminal output. Set
+`RSH_EXECUTION_JOURNAL=0` to disable disk journaling while retaining OSC
+integration for the terminal UI. Set `RSH_EXECUTION_JOURNAL_PATH` to override
+the location; the value must be an absolute path, and a relative value is
+rejected.
+
 ## AI, explicitly opt-in
 
 AI integration is opt-in. Select a provider when starting rsh:
@@ -149,6 +197,14 @@ OS, and current-directory path. Cloud requests do not additionally include
 recent history or Git status unless
 `RSH_AI_SHARE_CONTEXT=1` is set. Generated commands are suggestions: inspect
 them before execution, especially when they contain destructive operations.
+
+Local context queries never send journal data over the network. Local Ollama
+may use the most recent failed execution's captured terminal output for command
+repair. Cloud providers receive execution output only when
+`RSH_AI_SHARE_CONTEXT=1` explicitly opts in; otherwise AI repair falls back to
+the command and exit status. Review journal contents before enabling cloud
+context sharing because terminal output can contain source code, paths, tokens,
+or other secrets.
 
 ## Completion and workflows
 

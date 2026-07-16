@@ -26,6 +26,9 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 use unicode_width::UnicodeWidthChar;
 
+const MAX_AI_EXECUTION_OUTPUT_BYTES: usize = 32 * 1024;
+const AI_OUTPUT_TRUNCATION_MARKER: &str = "\n... [terminal output truncated for AI context] ...\n";
+
 #[derive(Debug, Clone, PartialEq)]
 enum ViMode {
     Normal,
@@ -53,6 +56,7 @@ pub struct Editor {
     ai_saved_input: Option<AiInputSnapshot>,
     ai_error: Option<String>,
     pub last_error_info: Option<(String, String, i32)>,
+    pub last_error_execution_id: Option<String>,
     pub key_bindings: crate::keybindings::KeyBindingManager,
     cached_prompt: String,
     last_buffer_snapshot: String,
@@ -118,6 +122,7 @@ impl Editor {
             ai_saved_input: None,
             ai_error: None,
             last_error_info: None,
+            last_error_execution_id: None,
             key_bindings: crate::keybindings::KeyBindingManager::new(
                 crate::keybindings::EditorMode::Emacs,
             ),
@@ -1148,7 +1153,16 @@ impl Editor {
             os,
             recent_history,
             git_status,
-            last_error: self.last_error_info.clone(),
+            last_error: last_error_with_execution_output(
+                self.last_error_info.clone(),
+                self.last_error_execution_id.as_deref(),
+                self.ai_include_extended_context,
+                |execution_id| {
+                    let journal = crate::execution::ExecutionJournal::configured()?;
+                    let record = journal.get(execution_id).ok().flatten()?;
+                    record.output.map(|output| output.text)
+                },
+            ),
         }
     }
 
@@ -2087,6 +2101,56 @@ enum KeyAction {
     Interrupt,
 }
 
+fn last_error_with_execution_output<F>(
+    last_error: Option<(String, String, i32)>,
+    execution_id: Option<&str>,
+    include_extended_context: bool,
+    load_output: F,
+) -> Option<(String, String, i32)>
+where
+    F: FnOnce(&str) -> Option<String>,
+{
+    let mut last_error = last_error?;
+    if !include_extended_context {
+        return Some(last_error);
+    }
+    let Some(execution_id) = execution_id else {
+        return Some(last_error);
+    };
+    let Some(output) = load_output(execution_id).filter(|output| !output.is_empty()) else {
+        return Some(last_error);
+    };
+
+    last_error.1 = bounded_ai_execution_output(output);
+    Some(last_error)
+}
+
+fn bounded_ai_execution_output(output: String) -> String {
+    if output.len() <= MAX_AI_EXECUTION_OUTPUT_BYTES {
+        return output;
+    }
+
+    let retained_budget =
+        MAX_AI_EXECUTION_OUTPUT_BYTES.saturating_sub(AI_OUTPUT_TRUNCATION_MARKER.len());
+    let head_budget = retained_budget / 2;
+    let tail_budget = retained_budget - head_budget;
+
+    let mut head_end = head_budget;
+    while !output.is_char_boundary(head_end) {
+        head_end -= 1;
+    }
+    let mut tail_start = output.len() - tail_budget;
+    while !output.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
+
+    let mut bounded = String::with_capacity(MAX_AI_EXECUTION_OUTPUT_BYTES);
+    bounded.push_str(&output[..head_end]);
+    bounded.push_str(AI_OUTPUT_TRUNCATION_MARKER);
+    bounded.push_str(&output[tail_start..]);
+    bounded
+}
+
 fn format_ai_error(error: &str) -> String {
     let mut clean = String::new();
     let mut in_escape = false;
@@ -2236,5 +2300,77 @@ mod tests {
             Some("AI error: service unavailable try again")
         );
         assert!(!editor.ai_pending);
+    }
+
+    #[test]
+    fn execution_output_replaces_exit_code_fallback_when_context_is_allowed() {
+        let fallback = Some(("cargo test".to_string(), "exit code 101".to_string(), 101));
+        let enriched = last_error_with_execution_output(fallback, Some("rsh-1"), true, |id| {
+            assert_eq!(id, "rsh-1");
+            Some("error[E0425]: missing value\n".to_string())
+        });
+
+        assert_eq!(
+            enriched,
+            Some((
+                "cargo test".to_string(),
+                "error[E0425]: missing value\n".to_string(),
+                101,
+            ))
+        );
+    }
+
+    #[test]
+    fn private_ai_context_never_loads_execution_output() {
+        let fallback = Some(("false".to_string(), "exit code 1".to_string(), 1));
+        let mut loaded = false;
+        let result =
+            last_error_with_execution_output(fallback.clone(), Some("rsh-1"), false, |_| {
+                loaded = true;
+                Some("private terminal output".to_string())
+            });
+
+        assert_eq!(result, fallback);
+        assert!(!loaded);
+    }
+
+    #[test]
+    fn missing_or_empty_execution_output_keeps_exit_code_fallback() {
+        let fallback = Some(("false".to_string(), "exit code 1".to_string(), 1));
+
+        assert_eq!(
+            last_error_with_execution_output(fallback.clone(), Some("rsh-1"), true, |_| None),
+            fallback
+        );
+        assert_eq!(
+            last_error_with_execution_output(fallback.clone(), Some("rsh-1"), true, |_| Some(
+                String::new()
+            ),),
+            fallback
+        );
+        assert_eq!(
+            last_error_with_execution_output(fallback.clone(), None, true, |_| {
+                panic!("no execution ID must not invoke the journal loader")
+            }),
+            fallback
+        );
+    }
+
+    #[test]
+    fn ai_execution_output_cap_preserves_utf8_head_and_tail_with_marker() {
+        let output = format!("HEAD:{}:TAIL", "雪".repeat(MAX_AI_EXECUTION_OUTPUT_BYTES));
+        let bounded = bounded_ai_execution_output(output);
+
+        assert!(bounded.len() <= MAX_AI_EXECUTION_OUTPUT_BYTES);
+        assert!(bounded.starts_with("HEAD:"));
+        assert!(bounded.ends_with(":TAIL"));
+        assert!(bounded.contains(AI_OUTPUT_TRUNCATION_MARKER));
+    }
+
+    #[test]
+    fn ai_execution_output_at_limit_remains_exact() {
+        let output = "x".repeat(MAX_AI_EXECUTION_OUTPUT_BYTES);
+
+        assert_eq!(bounded_ai_execution_output(output.clone()), output);
     }
 }

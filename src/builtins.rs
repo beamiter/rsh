@@ -46,6 +46,7 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "bg",
     "wait",
     "history",
+    "context",
     "help",
     "pushd",
     "popd",
@@ -129,6 +130,7 @@ pub fn run_builtin(name: &str, args: &[String], state: &mut ShellState) -> i32 {
         "exec" => builtin_exec(args, state),
         "help" => builtin_help(args, state),
         "history" => builtin_history(state),
+        "context" => crate::execution_context::run_args(args),
         "pushd" => builtin_pushd(args, state),
         "popd" => builtin_popd(state),
         "dirs" => builtin_dirs(state),
@@ -3456,6 +3458,10 @@ const HELP_ENTRIES: &[(&str, &str)] = &[
         "declare [-aAirx] name[=value] — Declare variables with attributes.",
     ),
     ("history", "history — Display command history."),
+    (
+        "context",
+        "context <list|show|last-failed> [options] — Query execution context.",
+    ),
     (
         "pushd",
         "pushd [dir] — Push directory onto stack and cd to it.",

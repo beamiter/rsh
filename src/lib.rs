@@ -12,6 +12,8 @@ pub mod data;
 pub mod debug;
 pub mod editor;
 pub mod environment;
+pub mod execution;
+pub mod execution_context;
 pub mod executor;
 pub mod expand;
 pub mod glob_match;
