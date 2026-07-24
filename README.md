@@ -198,6 +198,31 @@ recent history or Git status unless
 `RSH_AI_SHARE_CONTEXT=1` is set. Generated commands are suggestions: inspect
 them before execution, especially when they contain destructive operations.
 
+### Agent mode
+
+The `agent` builtin runs a review-first agent loop on the shared
+[jagent](https://github.com/beamiter/jagent) core (the same state machine as
+jterm4's Shell Agent):
+
+```sh
+agent find the largest files under target and free some space
+```
+
+The model may only *propose* one command per turn. Every proposal shows a
+`[y] run  [e] edit  [n] reject  [q] quit` review prompt; recognized dangerous
+commands additionally require typing `RUN`. Approved commands execute through
+the normal rsh parser with output teed to the terminal, and a bounded sample
+plus the exit code is fed back as the next model turn's observation. Malformed
+model replies fail closed and never become proposals.
+
+Additional environment switches: `RSH_AGENT_MAX_TURNS` (default 16) bounds the
+model-turn budget, and `RSH_AGENT_AUTO_APPROVE_READONLY=1` opts in to
+auto-running only commands on a conservative read-only allowlist (`ls`,
+`git status`, …); everything else still prompts. Git branch/dirty metadata is
+attached only under the same `RSH_AI_SHARE_CONTEXT` rules as other cloud
+context. Agent commands run in a forked child, so `cd`/`export` do not change
+the interactive shell's state.
+
 Local context queries never send journal data over the network. Local Ollama
 may use the most recent failed execution's captured terminal output for command
 repair. Cloud providers receive execution output only when

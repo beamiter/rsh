@@ -17,6 +17,7 @@ pub fn reset_exit_request() {
 }
 
 pub const BUILTIN_NAMES: &[&str] = &[
+    "agent",
     "cd",
     "exit",
     "export",
@@ -99,12 +100,24 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "uniq",
 ];
 
+#[cfg(feature = "ai")]
+fn builtin_agent(args: &[String], state: &mut ShellState) -> i32 {
+    crate::agent::builtin_agent(args, state)
+}
+
+#[cfg(not(feature = "ai"))]
+fn builtin_agent(_args: &[String], _state: &mut ShellState) -> i32 {
+    eprintln!("agent: AI feature not enabled. Rebuild with --features ai");
+    1
+}
+
 pub fn is_builtin(name: &str) -> bool {
     BUILTIN_NAMES.contains(&name) || crate::value_builtins::is_value_aware(name)
 }
 
 pub fn run_builtin(name: &str, args: &[String], state: &mut ShellState) -> i32 {
     match name {
+        "agent" => builtin_agent(args, state),
         "cd" => builtin_cd(args, state),
         "exit" => builtin_exit(args, state),
         "export" => builtin_export(args, state),

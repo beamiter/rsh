@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+#[cfg(feature = "ai")]
+pub mod agent;
 pub mod ai;
 pub mod bookmarks;
 pub mod builtins;

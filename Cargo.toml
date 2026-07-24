@@ -10,7 +10,7 @@ categories = ["command-line-utilities"]
 
 [features]
 default = ["ai"]
-ai = ["dep:ureq"]
+ai = ["dep:ureq", "dep:jagent"]
 
 [dependencies]
 glob = "0.3"
@@ -24,6 +24,7 @@ crossterm = "0.29.0"
 dirs = "6.0.0"
 nix = { version = "0.31.3", features = ["process", "fs", "signal", "term"] }
 ureq = { version = "2", optional = true }
+jagent = { path = "../jagent", optional = true }
 serde_yaml = "0.9"
 toml = "0.8"
 quick-xml = { version = "0.37", features = ["serialize"] }
